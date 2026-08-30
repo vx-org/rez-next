@@ -93,10 +93,11 @@ pub fn get_package(
 #[pyfunction]
 #[pyo3(signature = (packages, paths=None))]
 pub fn resolve_packages(
+    py: Python<'_>,
     packages: Vec<String>,
     paths: Option<Vec<String>>,
 ) -> PyResult<PyResolvedContext> {
-    PyResolvedContext::new(packages, paths)
+    PyResolvedContext::new(py, packages, paths, true)
 }
 
 /// Iterate over all versions of a package.

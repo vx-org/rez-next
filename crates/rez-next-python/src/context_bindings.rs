@@ -1,6 +1,6 @@
 //! Python bindings for ResolvedContext
 
-use crate::package_bindings::PyPackage;
+use crate::package_bindings::{PyPackage, PyPackageRequirement};
 use crate::package_functions::expand_home;
 use crate::runtime::get_runtime;
 use crate::shell_utils::shell_type_from_str;
@@ -9,12 +9,39 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rez_next_context::{ContextStatus, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
-use rez_next_repository::simple_repository::RepositoryManager;
+use rez_next_repository::simple_repository::{RepositoryManager, SimpleRepository};
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn configured_implicit_packages(
+    py: Python<'_>,
+    python_config: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<PackageRequirement>> {
+    let Some(raw_requirements) = python_config
+        .and_then(|config| config.getattr("implicit_packages").ok())
+        .and_then(|value| value.extract::<Vec<String>>().ok())
+    else {
+        return Ok(Vec::new());
+    };
+
+    let system = py.import("rez_next.system")?.getattr("system")?;
+    let platform: String = system.getattr("platform")?.extract()?;
+    let arch: String = system.getattr("arch")?.extract()?;
+    let os: String = system.getattr("os")?.extract()?;
+
+    raw_requirements
+        .into_iter()
+        .map(|requirement| {
+            let expanded = requirement
+                .replace("{system.platform}", &platform)
+                .replace("{system.arch}", &arch)
+                .replace("{system.os}", &os);
+            PackageRequirement::parse(&expanded)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+        })
+        .collect()
+}
 
 /// Python-accessible ResolvedContext class, compatible with rez.resolved_context.ResolvedContext
 #[pyclass(name = "ResolvedContext")]
@@ -29,11 +56,36 @@ impl PyResolvedContext {
     /// Create a new ResolvedContext by resolving the given package requirements.
     /// Compatible with `rez.ResolvedContext(["python-3.9", "maya-2024"])`
     #[new]
-    #[pyo3(signature = (packages, paths=None))]
-    pub fn new(packages: Vec<String>, paths: Option<Vec<String>>) -> PyResult<Self> {
+    #[pyo3(signature = (packages, paths=None, add_implicit_packages=true))]
+    pub fn new(
+        py: Python<'_>,
+        packages: Vec<String>,
+        paths: Option<Vec<String>>,
+        add_implicit_packages: bool,
+    ) -> PyResult<Self> {
         use rez_next_common::config::RezCoreConfig;
 
         let config = RezCoreConfig::load();
+        let mut parent_variables = config.parent_variables.clone();
+        let mut all_parent_variables = config.all_parent_variables;
+        let python_config = py
+            .import("rez_next.config")
+            .and_then(|module| module.getattr("config"))
+            .ok();
+        if let Some(python_config) = &python_config {
+            if let Ok(value) = python_config
+                .getattr("parent_variables")
+                .and_then(|value| value.extract::<Vec<String>>())
+            {
+                parent_variables = value;
+            }
+            if let Ok(value) = python_config
+                .getattr("all_parent_variables")
+                .and_then(|value| value.extract::<bool>())
+            {
+                all_parent_variables = value;
+            }
+        }
 
         let pkg_paths: Vec<PathBuf> = paths
             .as_ref()
@@ -52,20 +104,27 @@ impl PyResolvedContext {
             .map(|s| PackageRequirement::parse(s))
             .collect::<Result<_, _>>()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let implicit_packages = if add_implicit_packages {
+            configured_implicit_packages(py, python_config.as_ref())?
+        } else {
+            Vec::new()
+        };
 
         // Build repository manager
         let mut repo_manager = RepositoryManager::new();
         for (i, path) in pkg_paths.iter().enumerate() {
             if path.exists() {
-                let repository =
-                    FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-                repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
+                repo_manager.add_repository(Box::new(SimpleRepository::new(
+                    path.clone(),
+                    format!("repo_{}", i),
+                )));
             }
         }
 
         // Convert to Requirement for the resolver via string parsing
         let resolver_reqs: Vec<Requirement> = requirements
             .iter()
+            .chain(&implicit_packages)
             .map(|pr| {
                 let req_str = pr.to_string();
                 req_str
@@ -77,25 +136,32 @@ impl PyResolvedContext {
         let rt = get_runtime();
 
         let repo_arc = Arc::new(repo_manager);
-        // A Python context may only report success when every required
-        // dependency resolves, just like the public Rust runtime facade.
-        let mut resolver = DependencyResolver::new(
-            Arc::clone(&repo_arc),
-            SolverConfig {
-                strict_mode: true,
-                ..SolverConfig::default()
-            },
-        );
+        let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), SolverConfig::default());
         let resolution = rt
             .block_on(resolver.resolve(resolver_reqs))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut context = ResolvedContext::from_requirements(requirements);
+        context.implicit_packages = implicit_packages;
         context.resolved_packages = resolution
             .resolved_packages
             .into_iter()
-            .map(|info| (*info.package).clone())
+            .map(|info| info.materialized_package())
             .collect();
+        context.resolved_ephemerals = resolution
+            .resolved_ephemerals
+            .iter()
+            .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+            .collect();
+        context.config.parent_variables = parent_variables;
+        context.config.all_parent_variables = all_parent_variables;
+        let encoded_package_paths = std::env::join_paths(&pkg_paths)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+            .to_string_lossy()
+            .into_owned();
+        context
+            .metadata
+            .insert("package_paths".to_string(), encoded_package_paths);
         context.status = ContextStatus::Resolved;
 
         Ok(PyResolvedContext {
@@ -139,6 +205,15 @@ impl PyResolvedContext {
             .collect()
     }
 
+    /// Package search paths used to resolve this context.
+    #[getter]
+    fn package_paths(&self) -> Vec<String> {
+        self.paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     /// Number of resolved packages
     #[getter]
     fn num_resolved_packages(&self) -> usize {
@@ -154,13 +229,20 @@ impl PyResolvedContext {
             .map(|p| PyPackage(p.clone()))
     }
 
-    /// Get environment variables for this context (as dict)
-    fn get_environ(&self, py: Python) -> PyResult<Py<PyAny>> {
+    /// Get environment variables for this context (as dict).
+    ///
+    /// `parent_environ` matches Rez's public API and is interpreted according
+    /// to `parent_variables` / `all_parent_variables`.
+    #[pyo3(signature = (parent_environ=None))]
+    fn get_environ(
+        &self,
+        py: Python,
+        parent_environ: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<Py<PyAny>> {
         let rt = get_runtime();
 
-        let env_manager = rez_next_context::EnvironmentManager::new(self.inner.config.clone());
         let env_vars = rt
-            .block_on(env_manager.generate_environment(&self.inner.resolved_packages))
+            .block_on(self.inner.get_environ(parent_environ))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let dict = PyDict::new(py);
@@ -171,59 +253,107 @@ impl PyResolvedContext {
     }
 
     /// Apply environment to current process
-    fn apply_to_os_environ(&self) -> PyResult<()> {
+    fn apply_to_os_environ(&self, py: Python) -> PyResult<()> {
         let rt = get_runtime();
 
-        let env_manager = rez_next_context::EnvironmentManager::new(self.inner.config.clone());
         let env_vars = rt
-            .block_on(env_manager.generate_environment(&self.inner.resolved_packages))
+            .block_on(self.inner.get_environ(None))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        for (k, v) in env_vars {
-            unsafe {
-                std::env::set_var(k, v);
-            };
-        }
-        Ok(())
+        apply_python_environment(py, env_vars)
     }
 
-    /// Execute a command in the resolved context and return the result
-    #[pyo3(signature = (command, stdout=None, stderr=None))]
+    /// Return the package requests used to create this context.
+    #[pyo3(signature = (include_implicit=false))]
+    fn requested_packages(&self, include_implicit: bool) -> Vec<PyPackageRequirement> {
+        let explicit = self
+            .inner
+            .requirements
+            .iter()
+            .cloned()
+            .map(PyPackageRequirement);
+        if include_implicit {
+            explicit
+                .chain(
+                    self.inner
+                        .implicit_packages
+                        .iter()
+                        .cloned()
+                        .map(PyPackageRequirement),
+                )
+                .collect()
+        } else {
+            explicit.collect()
+        }
+    }
+
+    /// Get final non-conflict ephemeral requests.
+    #[getter]
+    fn resolved_ephemerals(&self) -> Vec<PyPackageRequirement> {
+        self.inner
+            .resolved_ephemerals
+            .iter()
+            .cloned()
+            .map(PyPackageRequirement)
+            .collect()
+    }
+
+    /// Apply the context to the current Python process environment.
+    #[pyo3(signature = (parent_environ=None))]
+    fn apply(
+        &self,
+        py: Python,
+        parent_environ: Option<std::collections::HashMap<String, String>>,
+    ) -> PyResult<()> {
+        let env_vars = get_runtime()
+            .block_on(self.inner.get_environ(parent_environ))
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+        apply_python_environment(py, env_vars)
+    }
+
+    /// Execute a command in the resolved context and return subprocess.Popen.
+    #[pyo3(signature = (args, parent_environ=None, **popen_args))]
     fn execute_command(
         &self,
-        command: Vec<String>,
-        stdout: Option<bool>,
-        stderr: Option<bool>,
-    ) -> PyResult<i32> {
-        let _ = stdout;
-        let _ = stderr;
-        let rt = get_runtime();
+        py: Python<'_>,
+        args: Bound<'_, PyAny>,
+        parent_environ: Option<std::collections::HashMap<String, String>>,
+        popen_args: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let generated_environment = get_runtime()
+            .block_on(self.inner.get_environ(parent_environ.clone()))
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
 
-        let env_manager = rez_next_context::EnvironmentManager::new(self.inner.config.clone());
-        let env_vars = rt
-            .block_on(env_manager.generate_environment(&self.inner.resolved_packages))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        if command.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Command cannot be empty",
-            ));
+        let process_environment = PyDict::new(py);
+        if let Some(parent_environment) = parent_environ {
+            for (name, value) in parent_environment {
+                process_environment.set_item(name, value)?;
+            }
+        } else {
+            let os_environment = py.import("os")?.getattr("environ")?;
+            for item in os_environment.call_method0("items")?.try_iter()? {
+                let (name, value): (String, String) = item?.extract()?;
+                process_environment.set_item(name, value)?;
+            }
+        }
+        for (name, value) in generated_environment {
+            process_environment.set_item(name, value)?;
         }
 
-        let mut proc = std::process::Command::new(&command[0]);
-        if command.len() > 1 {
-            proc.args(&command[1..]);
+        let keyword_arguments = PyDict::new(py);
+        if let Some(popen_args) = popen_args {
+            for (key, value) in popen_args.iter() {
+                keyword_arguments.set_item(key, value)?;
+            }
         }
+        keyword_arguments.set_item("env", process_environment)?;
 
-        for (k, v) in env_vars {
-            proc.env(k, v);
-        }
-
-        let status = proc
-            .status()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        Ok(status.code().unwrap_or(-1))
+        let process = py
+            .import("subprocess")?
+            .getattr("Popen")?
+            .call((args,), Some(&keyword_arguments))?;
+        Ok(process.unbind())
     }
 
     /// Context ID
@@ -295,47 +425,54 @@ impl PyResolvedContext {
 
         let rt = get_runtime();
 
-        let env_manager = rez_next_context::EnvironmentManager::new(self.inner.config.clone());
-        let env_vars = rt
-            .block_on(env_manager.generate_environment(&self.inner.resolved_packages))
+        let rex_env = rt
+            .block_on(self.inner.get_rex_environment(None))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        // Build RexEnvironment from env_vars
-        let mut rex_env = rez_next_rex::RexEnvironment::new();
-        rex_env.vars = env_vars;
 
         Ok(generate_shell_script(&rex_env, &shell_type))
     }
 
-    /// Get the list of tools provided by packages in this context.
-    ///
-    /// Returns a `{tool_name: tool_path}` dict.  The tool path is built from
-    /// `pkg.base` (the package installation root as recorded in `package.py`)
-    /// plus a `bin/` sub-directory.  When `pkg.base` is `None` — which happens
-    /// for in-memory packages that have not been installed — the path is an
-    /// **estimated** `<pkg_name>-<version>/bin/<tool>` string; callers should
-    /// treat `None`-base entries as advisory only.
-    ///
-    /// Compatible with `context.get_tools()`.
-    fn get_tools(&self, py: Python) -> PyResult<Py<PyAny>> {
+    /// Generate shell activation code using Rez's public method name.
+    #[pyo3(signature = (shell=None, parent_environ=None, style=None))]
+    fn get_shell_code(
+        &self,
+        shell: Option<&str>,
+        parent_environ: Option<std::collections::HashMap<String, String>>,
+        style: Option<Py<PyAny>>,
+    ) -> PyResult<String> {
+        use rez_next_rex::generate_shell_script;
+
+        let _ = style;
+        let shell_name = shell
+            .map(str::to_string)
+            .unwrap_or_else(detect_current_shell);
+        let shell_type = shell_type_from_str(&shell_name);
+        let rex_environment = get_runtime()
+            .block_on(self.inner.get_rex_environment(parent_environ))
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
+
+        Ok(generate_shell_script(&rex_environment, &shell_type))
+    }
+
+    /// Return `{package_name: (package, [tools])}` using Rez's public shape.
+    #[pyo3(signature = (request_only=false))]
+    fn get_tools(&self, py: Python, request_only: bool) -> PyResult<Py<PyAny>> {
+        let requested_names = self
+            .inner
+            .requirements
+            .iter()
+            .filter(|requirement| !requirement.conflict)
+            .map(|requirement| requirement.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
         let dict = PyDict::new(py);
         for pkg in &self.inner.resolved_packages {
-            for tool in &pkg.tools {
-                let tool_path = if let Some(base) = &pkg.base {
-                    // Use the real installation base recorded in package.py
-                    format!("{}/bin/{}", base, tool)
-                } else {
-                    // Fallback: estimated path for uninstalled / in-memory packages.
-                    // This is advisory; the actual path depends on the rez packages path.
-                    let ver = pkg
-                        .version
-                        .as_ref()
-                        .map(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    format!("{}-{}/bin/{}", pkg.name, ver, tool)
-                };
-                dict.set_item(tool, tool_path)?;
+            if pkg.tools.is_empty()
+                || (request_only && !requested_names.contains(pkg.name.as_str()))
+            {
+                continue;
             }
+            let package = Py::new(py, PyPackage(pkg.clone()))?;
+            dict.set_item(&pkg.name, (package, pkg.tools.clone()))?;
         }
         Ok(dict.into_any().unbind())
     }
@@ -395,6 +532,17 @@ impl PyResolvedContext {
         }
         Ok(list.into_any().unbind())
     }
+}
+
+fn apply_python_environment(
+    py: Python,
+    environment: std::collections::HashMap<String, String>,
+) -> PyResult<()> {
+    let os_environment = py.import("os")?.getattr("environ")?;
+    for (name, value) in environment {
+        os_environment.set_item(name, value)?;
+    }
+    Ok(())
 }
 
 // ─── Rust unit tests ─────────────────────────────────────────────────────────

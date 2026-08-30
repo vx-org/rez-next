@@ -5,8 +5,8 @@ use crate::resolution_state::ResolutionState;
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageInstallLayout, Requirement, VersionConstraint};
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_version::Version;
-use std::collections::HashMap;
+use rez_next_version::{Version, VersionRange};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,6 +28,9 @@ pub struct DetailedResolutionResult {
     /// Successfully resolved packages
     pub resolved_packages: Vec<ResolvedPackageInfo>,
 
+    /// Final non-conflict ephemeral ranges from the request.
+    pub resolved_ephemerals: Vec<ResolvedEphemeral>,
+
     /// Requirements that couldn't be satisfied
     pub failed_requirements: Vec<Requirement>,
 
@@ -36,6 +39,31 @@ pub struct DetailedResolutionResult {
 
     /// Resolution statistics
     pub stats: ResolutionStats,
+}
+
+/// A resolved ephemeral feature range, which has no repository package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEphemeral {
+    pub name: String,
+    pub range: VersionRange,
+}
+
+impl ResolvedEphemeral {
+    /// Convert to the package-request representation used by resolved contexts.
+    #[must_use]
+    pub fn as_package_requirement(&self) -> rez_next_package::PackageRequirement {
+        let version_spec = if self.range.is_any() {
+            None
+        } else {
+            Some(self.range.as_str().to_string())
+        };
+        rez_next_package::PackageRequirement {
+            name: self.name.clone(),
+            version_spec,
+            weak: false,
+            conflict: false,
+        }
+    }
 }
 
 /// Information about a resolved package
@@ -127,6 +155,71 @@ pub struct ResolutionStats {
     pub backtrack_steps: usize,
 }
 
+#[derive(Default)]
+struct EphemeralRanges {
+    positive: Option<VersionRange>,
+    excluded: Vec<VersionRange>,
+}
+
+fn resolve_ephemerals(
+    requirements: Vec<Requirement>,
+) -> Result<(Vec<Requirement>, Vec<ResolvedEphemeral>), RezCoreError> {
+    let mut regular = Vec::new();
+    let mut grouped: BTreeMap<String, EphemeralRanges> = BTreeMap::new();
+
+    for requirement in requirements {
+        if !requirement.name.starts_with('.') {
+            regular.push(requirement);
+            continue;
+        }
+
+        let range = requirement_range(&requirement)?;
+        let ranges = grouped.entry(requirement.name.clone()).or_default();
+        if requirement.conflict {
+            ranges.excluded.push(range);
+        } else {
+            ranges.positive = Some(match ranges.positive.take() {
+                Some(current) => current.intersect(&range).ok_or_else(|| {
+                    RezCoreError::Solver(format!(
+                        "Ephemeral request '{}' has incompatible ranges",
+                        requirement.name
+                    ))
+                })?,
+                None => range,
+            });
+        }
+    }
+
+    let mut resolved = Vec::new();
+    for (name, ranges) in grouped {
+        let Some(mut range) = ranges.positive else {
+            continue;
+        };
+        for excluded in ranges.excluded {
+            range = range.subtract(&excluded).ok_or_else(|| {
+                RezCoreError::Solver(format!("Ephemeral request '{name}' is fully excluded"))
+            })?;
+        }
+        resolved.push(ResolvedEphemeral { name, range });
+    }
+
+    Ok((regular, resolved))
+}
+
+fn requirement_range(requirement: &Requirement) -> Result<VersionRange, RezCoreError> {
+    let range = match &requirement.version_constraint {
+        None | Some(VersionConstraint::Any) => return Ok(VersionRange::any()),
+        Some(VersionConstraint::Prefix(version)) => version.as_str().to_string(),
+        Some(constraint) => constraint.to_string(),
+    };
+    VersionRange::parse(&range).map_err(|error| {
+        RezCoreError::RequirementParse(format!(
+            "Invalid ephemeral request '{}': {error}",
+            requirement
+        ))
+    })
+}
+
 impl DependencyResolver {
     /// Create a new dependency resolver
     pub fn new(repository_manager: Arc<RepositoryManager>, config: SolverConfig) -> Self {
@@ -143,6 +236,8 @@ impl DependencyResolver {
         requirements: Vec<Requirement>,
     ) -> Result<DetailedResolutionResult, RezCoreError> {
         let start_time = std::time::Instant::now();
+
+        let (requirements, resolved_ephemerals) = resolve_ephemerals(requirements)?;
 
         // Initialize resolution state
         let mut resolution_state = ResolutionState::new(requirements.clone());
@@ -192,6 +287,7 @@ impl DependencyResolver {
 
         Ok(DetailedResolutionResult {
             resolved_packages: result,
+            resolved_ephemerals,
             failed_requirements: failed,
             conflicts: resolution_state.conflicts,
             stats,

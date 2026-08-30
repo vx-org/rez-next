@@ -22,7 +22,7 @@ use rez_next_package::Package;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub use detect::DetectedTool;
+pub use detect::{DetectedTool, detect_system_tool};
 pub use utils::BindModule;
 
 /// Arguments for the bind command

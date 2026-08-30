@@ -3,6 +3,7 @@
 //! Provides `rez.system` compatible API: platform, arch, os, rez_version, etc.
 
 use pyo3::prelude::*;
+use rez_next_common::SystemInfo;
 
 /// System information class - compatible with rez.system
 #[pyclass(name = "System")]
@@ -91,50 +92,15 @@ impl PySystem {
     }
 
     fn platform_str() -> String {
-        match std::env::consts::OS {
-            "windows" => "windows".to_string(),
-            "macos" => "osx".to_string(),
-            "linux" => "linux".to_string(),
-            other => other.to_string(),
-        }
+        SystemInfo::detect().platform
     }
 
     fn arch_str() -> String {
-        match std::env::consts::ARCH {
-            "x86_64" => "x86_64".to_string(),
-            "aarch64" => "arm_64".to_string(),
-            other => other.to_string(),
-        }
+        SystemInfo::detect().arch
     }
 
     fn os_str() -> String {
-        // Attempt to read /etc/os-release on Linux, else use OS name
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-                for line in content.lines() {
-                    if line.starts_with("PRETTY_NAME=") {
-                        return line
-                            .trim_start_matches("PRETTY_NAME=")
-                            .trim_matches('"')
-                            .to_string();
-                    }
-                }
-            }
-            "linux".to_string()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            "windows".to_string()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            "osx".to_string()
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-        {
-            std::env::consts::OS.to_string()
-        }
+        SystemInfo::detect().os
     }
 }
 

@@ -289,7 +289,7 @@ impl RezRuntime {
             ));
         }
         for requirement in &package_requirements {
-            if requirement.conflict || requirement.weak {
+            if requirement.conflict || requirement.weak || requirement.name.starts_with('.') {
                 continue;
             }
             if repositories
@@ -317,6 +317,11 @@ impl RezRuntime {
             .map(|package| package.try_materialized_package())
             .collect::<Result<Vec<_>, _>>()
             .map_err(RezRuntimeError::Resolve)?;
+        context.resolved_ephemerals = resolution
+            .resolved_ephemerals
+            .iter()
+            .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+            .collect();
         context.status = ContextStatus::Resolved;
         if let Some(target) = &self.target {
             for (family, expected) in [

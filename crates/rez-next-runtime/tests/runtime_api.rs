@@ -680,3 +680,18 @@ fn test_runtime_errors_classify_invalid_bundle_and_missing_package() {
         matches!(RezRuntime::new([temporary.path()]).unwrap().with_target("plan9", "amd64").unwrap_err(), RezRuntimeError::UnsupportedPlatform { platform } if platform == "plan9")
     );
 }
+
+#[test]
+fn runtime_resolves_ephemeral_requests_without_repository_packages() {
+    let temporary = tempfile::tempdir().expect("temporary repository");
+    let runtime = RezRuntime::new([temporary.path()]).expect("valid repository directory");
+    let tokio = tokio::runtime::Runtime::new().expect("test runtime");
+
+    let resolved = tokio
+        .block_on(runtime.resolve([".feature>=1"]))
+        .expect("ephemeral request resolves without a package");
+
+    assert!(resolved.context().resolved_packages.is_empty());
+    assert_eq!(resolved.context().resolved_ephemerals.len(), 1);
+    assert_eq!(resolved.context().resolved_ephemerals[0].name, ".feature");
+}

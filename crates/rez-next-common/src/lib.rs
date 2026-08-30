@@ -10,9 +10,11 @@
 
 pub mod config;
 pub mod error;
+pub mod system;
 pub mod utils;
 
 // Re-export commonly used types
 pub use config::RezCoreConfig;
 pub use error::RezCoreError;
 pub use error::RezCoreResult;
+pub use system::SystemInfo;

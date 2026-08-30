@@ -4,7 +4,7 @@
 //! This command resolves package requirements and spawns a shell with the resolved environment.
 
 use clap::Args;
-use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
+use rez_next_common::{RezCoreError, SystemInfo, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext, ShellType};
 use rez_next_package::{PackageRequirement, Requirement};
 use rez_next_repository::package_repository::FilesystemPackageRepository;
@@ -98,6 +98,10 @@ pub struct EnvArgs {
     /// Exclude the configured local package repository
     #[arg(long = "no-local")]
     pub no_local: bool,
+
+    /// Do not append configured implicit package requests
+    #[arg(long = "no-implicit")]
+    pub no_implicit: bool,
 
     /// Mark the context as a build environment
     #[arg(long)]
@@ -236,6 +240,10 @@ fn resolve_environment(
     // Setup repository manager from config or args
     let mut repo_manager = RepositoryManager::new();
     let rez_config = RezCoreConfig::load();
+    config.parent_variables = rez_config.parent_variables.clone();
+    config.all_parent_variables = rez_config.all_parent_variables;
+    let implicit_packages =
+        configured_implicit_requirements(&rez_config, &SystemInfo::detect(), args.no_implicit)?;
 
     // Add configured package paths as repositories
     let mut package_paths: Vec<PathBuf> = if let Some(ref paths_str) = args.paths {
@@ -265,6 +273,7 @@ fn resolve_environment(
     // Convert PackageRequirement -> Requirement via string parsing
     let resolver_reqs: Vec<Requirement> = requirements
         .iter()
+        .chain(&implicit_packages)
         .map(|pr| {
             let req_str = pr.to_string();
             req_str
@@ -285,15 +294,47 @@ fn resolve_environment(
 
     // Build context from resolution result
     let mut context = ResolvedContext::from_requirements(requirements.to_vec());
+    context.implicit_packages = implicit_packages;
     context.config = config;
     context.resolved_packages = resolution
         .resolved_packages
         .iter()
         .map(|package| package.try_materialized_package())
         .collect::<Result<Vec<_>, _>>()?;
+    context.resolved_ephemerals = resolution
+        .resolved_ephemerals
+        .iter()
+        .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+        .collect();
     context.status = rez_next_context::ContextStatus::Resolved;
 
     Ok(context)
+}
+
+fn configured_implicit_requirements(
+    config: &RezCoreConfig,
+    system: &SystemInfo,
+    disabled: bool,
+) -> RezCoreResult<Vec<PackageRequirement>> {
+    if disabled {
+        Ok(Vec::new())
+    } else {
+        config
+            .implicit_packages
+            .iter()
+            .map(|request| {
+                let expanded = request
+                    .replace("{system.platform}", &system.platform)
+                    .replace("{system.arch}", &system.arch)
+                    .replace("{system.os}", &system.os);
+                PackageRequirement::parse(&expanded).map_err(|error| {
+                    RezCoreError::ConfigError(format!(
+                        "Invalid implicit package request '{request}': {error}"
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 fn expand_home(path: &str) -> PathBuf {
@@ -746,6 +787,7 @@ mod tests {
             format: None,
             paths: None,
             no_local: false,
+            no_implicit: false,
             build: false,
             time: None,
             verbose: 0,
@@ -772,6 +814,41 @@ mod tests {
         assert_eq!(requirements[0].name(), "python");
         assert_eq!(requirements[1].name(), "python");
         assert_eq!(requirements[2].name(), "maya");
+    }
+
+    #[test]
+    fn test_configured_implicit_requirements_expand_system_values_and_can_be_disabled() {
+        let config = RezCoreConfig {
+            implicit_packages: vec![
+                "~platform=={system.platform}".to_string(),
+                "~arch=={system.arch}".to_string(),
+                "~os=={system.os}".to_string(),
+            ],
+            ..RezCoreConfig::default()
+        };
+        let system = SystemInfo {
+            platform: "test-platform".to_string(),
+            arch: "test-arch".to_string(),
+            os: "test-os".to_string(),
+        };
+
+        let requirements = configured_implicit_requirements(&config, &system, false).unwrap();
+        assert_eq!(
+            requirements
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [
+                "~platform==test-platform",
+                "~arch==test-arch",
+                "~os==test-os",
+            ]
+        );
+        assert!(
+            configured_implicit_requirements(&config, &system, true)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -824,6 +901,7 @@ mod tests {
             format: None,
             paths: Some(temp.path().to_string_lossy().into_owned()),
             no_local: false,
+            no_implicit: false,
             build: false,
             time: None,
             verbose: 0,
@@ -842,6 +920,13 @@ mod tests {
     fn test_context_environment_exposes_resolve_metadata() {
         let requirements = parse_package_requirements(&["tool-1".to_string()]).unwrap();
         let mut context = ResolvedContext::from_requirements(requirements);
+        context.implicit_packages = parse_package_requirements(&[
+            "~platform==windows".to_string(),
+            "~arch==x86_64".to_string(),
+        ])
+        .unwrap();
+        context.resolved_ephemerals =
+            parse_package_requirements(&[".feature>=1".to_string()]).unwrap();
         context.config.inherit_parent_env = false;
         let mut package = rez_next_package::Package::new("tool".to_string());
         package.version = Some(rez_next_version::Version::parse("1.2.0").unwrap());
@@ -852,6 +937,14 @@ mod tests {
         assert_eq!(
             environment.vars.get("REZ_USED_REQUEST"),
             Some(&"tool-1".to_string())
+        );
+        assert_eq!(
+            environment.vars.get("REZ_USED_IMPLICIT_PACKAGES"),
+            Some(&"~platform==windows ~arch==x86_64".to_string())
+        );
+        assert_eq!(
+            environment.vars.get("REZ_USED_EPH_RESOLVE"),
+            Some(&".feature>=1".to_string())
         );
         assert_eq!(
             environment.vars.get("REZ_USED_RESOLVE"),

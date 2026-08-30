@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::SystemInfo;
+
 /// Configuration for rez-core components
 ///
 /// `#[serde(default)]` at container level is required: without it a user config
@@ -45,6 +47,9 @@ pub struct RezCoreConfig {
 
     /// Release packages path
     pub release_packages_path: String,
+
+    /// Weak package requests appended to every resolve unless disabled.
+    pub implicit_packages: Vec<String>,
 
     /// Default shell
     pub default_shell: String,
@@ -146,6 +151,7 @@ impl RezCoreConfig {
 
 impl Default for RezCoreConfig {
     fn default() -> Self {
+        let system = SystemInfo::detect();
         Self {
             use_rust_version: true,
             use_rust_solver: true,
@@ -160,6 +166,7 @@ impl Default for RezCoreConfig {
             ],
             local_packages_path: "~/packages".to_string(),
             release_packages_path: "~/.rez/packages/int".to_string(),
+            implicit_packages: system.implicit_packages().into_iter().collect(),
             default_shell: if cfg!(windows) { "cmd" } else { "bash" }.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             plugin_path: vec![],

@@ -96,6 +96,13 @@ Platforms are `windows`, `linux` and `osx`; `macos` and `darwin` normalize to
 `osx`. Architecture values use the repository's Rez version spelling, such as
 `x86_64`, `AMD64` or `aarch64`.
 
+Ephemeral requests such as `.feature>=1` are resolved as version ranges without
+repository packages. Compatible ranges are intersected, conflict ephemerals are
+subtracted, and the final values are available from
+`ResolvedContext::resolved_ephemerals` and `REZ_USED_EPH_RESOLVE`.
+
+## Error and compatibility contract
+
 Compatible explicit positive requests are intersected with the exact target.
 Contradictory requests and explicit weak/conflict requests for either target
 family return `IncompatibleTargetRequirement`. For example, a Windows target

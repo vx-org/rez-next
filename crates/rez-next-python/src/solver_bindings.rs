@@ -670,6 +670,7 @@ impl PySolver {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect(),
             ),
+            true,
         )
     }
 }

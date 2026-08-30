@@ -48,11 +48,17 @@ pub enum RezCommand {
     /// Show configuration information
     Config(commands::config::ConfigArgs),
 
+    /// Report rez-next and legacy Rez installation information
+    Info(commands::info::InfoArgs),
+
     /// Print information about the current rez context, or a given context file
     Context(commands::context::ContextArgs),
 
     /// View package information
     View(commands::view::ViewArgs),
+
+    /// Locate the running rez-next or a legacy Rez executable
+    Which(commands::which::WhichArgs),
 
     /// Resolve packages and spawn a shell or execute a command
     Env(commands::env::EnvArgs),
@@ -244,8 +250,10 @@ impl RezCli {
     fn execute_command(&self, command: &RezCommand) -> RezCoreResult<()> {
         match command {
             RezCommand::Config(args) => commands::config::execute(args.clone()),
+            RezCommand::Info(args) => commands::info::execute(args.clone()),
             RezCommand::Context(args) => commands::context::execute(args.clone()),
             RezCommand::View(args) => commands::view::execute(args.clone()),
+            RezCommand::Which(args) => commands::which::execute(args.clone()),
             RezCommand::Env(args) => commands::env::execute(args.clone()),
             RezCommand::Release(args) => commands::release::execute(args.clone()),
             RezCommand::Test(args) => commands::test::execute(args.clone()),

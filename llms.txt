@@ -215,6 +215,10 @@ crates/
 2. Only crate-root `pub use` re-exports are contract; `pub mod` leaves are not
 3. Run `vx just semver-check` before PR (gate: `cargo-semver-checks`)
 
+### Discover rez-next from IDEs and toolchains
+→ Run `rez-next info --json` and consume its stable installation/configuration
+schema. Legacy Rez and Python are optional. See `docs/installation-discovery.md`.
+
 ### Debug solver issues
 → `crates/rez-next-solver/` (A* with backtracking), `RUST_LOG=debug`
 

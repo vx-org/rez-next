@@ -9,6 +9,7 @@ pub mod env;
 pub mod release;
 pub mod test;
 pub mod view;
+pub mod which;
 
 pub mod bind;
 pub mod build;
@@ -21,6 +22,7 @@ pub mod diff;
 pub mod forward;
 pub mod gui;
 pub mod help;
+pub mod info;
 pub mod mv;
 pub mod pip;
 pub mod pkg_cache;
