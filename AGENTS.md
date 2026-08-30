@@ -14,7 +14,7 @@ rez-next is a **high-performance Rust rewrite** of the [Rez](https://github.com/
 - Current version: 0.3.12 (see [CHANGELOG.md](./CHANGELOG.md)) <!-- x-release-please-version -->
 - License: Apache 2.0
 - Python API: curated top-level interfaces backed by native PyO3 modules
-- CLI: **28 subcommands** (config, context, view, env, release, test, build, search, bind, depends, solve, cp, mv, rm, status, diff, pkg-help, plugins, pkg-cache, suites, bundle, pip, complete, forward, gui, parse-version, self-test, self-update)
+- CLI: **31 subcommands** (config, info, context, view, which, env, release, test, build, search, bind, depends, solve, cp, mv, rm, status, diff, pkg-help, plugins, pkg-cache, suites, bundle, pip, complete, completions, forward, gui, parse-version, self-test, self-update)
 - Status: Common workflows work with `import rez_next as rez`; internal namespaces such as `rez.utils` are intentionally not mirrored.
 
 ## Quick Start
@@ -51,6 +51,9 @@ pkg = rez.get_latest_package("python")
   - `release-sdk.md` → Driving releases from Rust, including a custom VCS
   - `rust-integration.md` → Runtime embedding, target selection and direct execution
   - `api-stability.md` → Public API contract enforced by `cargo-semver-checks`
+  - `rust-integration.md` → Stable Rust/vx embedding API and environment policy
+  - `rez-compatibility.md` → Exact upstream Rez baseline, supported contracts, and known gaps
+  - `completion-api.md` → Versioned IDE queries and dynamic shell completion
   - `PRE_COMMIT_SETUP.md` → Code quality hooks
 
 ### Reference
@@ -83,7 +86,7 @@ rez-next/                          # Monorepo root
 │   ├── rez-next-release-hook/    # Release hooks
 │   ├── rez-next-util/            # Utility functions
 │   └── rez-next-python/          # Python bindings (PyO3)
-├── src/                           # Rust CLI binary (28 subcommands, entry: src/bin/rez-next.rs)
+├── src/                           # Rust CLI binary (31 subcommands, entry: src/bin/rez-next.rs)
 ├── tests/                         # Integration tests
 ├── benches/                       # Criterion benchmarks
 ├── docs/                          # Documentation (see above)

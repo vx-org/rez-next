@@ -5,6 +5,7 @@
 #   REZ_NEXT_VERSION  - Specific version to install (e.g., "0.1.0"). Default: latest
 #   REZ_NEXT_INSTALL  - Installation directory. Default: $HOME\.rez-next\bin
 #   REZ_NEXT_NO_PATH  - Set to "1" to skip adding to PATH. Default: auto-add
+#   REZ_NEXT_NO_COMPLETIONS - Set to "1" to skip PowerShell completion installation
 
 $ErrorActionPreference = 'Stop'
 $Repo = "vx-org/rez-next"
@@ -30,6 +31,48 @@ function Get-LatestVersion {
         return $release.tag_name -replace '^v', ''
     } catch {
         Write-Err "Failed to fetch latest version: $_"
+    }
+}
+
+function Install-RezNextCompletions {
+    param([string]$BinaryPath)
+
+    if ($env:REZ_NEXT_NO_COMPLETIONS -eq "1") {
+        Write-Info "Skipping PowerShell completions (REZ_NEXT_NO_COMPLETIONS=1)"
+        return
+    }
+
+    try {
+        $completionDir = Join-Path $HOME ".rez-next\completions"
+        $completionPath = Join-Path $completionDir "rez-next.ps1"
+        New-Item -ItemType Directory -Path $completionDir -Force | Out-Null
+
+        & $BinaryPath completions shell --shell powershell | Set-Content -Path $completionPath -Encoding utf8
+        if ($LASTEXITCODE -ne 0) {
+            throw "rez-next completion generation exited with code $LASTEXITCODE"
+        }
+
+        $profilePath = $PROFILE.CurrentUserAllHosts
+        $profileDir = Split-Path -Parent $profilePath
+        if (-not (Test-Path $profileDir)) {
+            New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+        }
+
+        $escapedCompletionPath = $completionPath.Replace("'", "''")
+        $sourceLine = ". '$escapedCompletionPath'"
+        $profileContent = if (Test-Path $profilePath) {
+            [System.IO.File]::ReadAllText($profilePath)
+        } else {
+            ""
+        }
+        if (-not $profileContent.Contains($sourceLine)) {
+            Add-Content -Path $profilePath -Value "`n# rez-next dynamic completions`n$sourceLine" -Encoding utf8
+        }
+
+        . $completionPath
+        Write-Success "Installed dynamic completions for PowerShell"
+    } catch {
+        Write-Warn "Could not install PowerShell completions: $_"
     }
 }
 
@@ -160,6 +203,7 @@ function Install-RezNext {
         try {
             $installedVersion = & $destPath --version 2>&1 | Select-Object -First 1
             Write-Success "Verified: $installedVersion"
+            Install-RezNextCompletions -BinaryPath $destPath
         } catch {
             Write-Warn "Could not verify installation, but binary was placed at $destPath"
         }

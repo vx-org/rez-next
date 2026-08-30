@@ -6,6 +6,7 @@
 #   REZ_NEXT_VERSION  - Specific version to install (e.g., "0.1.0"). Default: latest
 #   REZ_NEXT_INSTALL  - Installation directory. Default: $HOME/.rez-next/bin
 #   REZ_NEXT_MUSL     - Set to "1" on Linux to prefer musl build. Default: auto-detect
+#   REZ_NEXT_NO_COMPLETIONS - Set to "1" to skip shell completion installation
 set -eu
 
 REPO="vx-org/rez-next"
@@ -103,6 +104,32 @@ detect_target() {
     esac
 
     info "Detected platform: $OS $ARCH ($TARGET)"
+}
+
+# --- Install dynamic shell completions ---
+install_completions() {
+    if [ "${REZ_NEXT_NO_COMPLETIONS:-0}" = "1" ]; then
+        info "Skipping shell completions (REZ_NEXT_NO_COMPLETIONS=1)"
+        return
+    fi
+
+    local binary="$INSTALL_DIR/$BINARY_NAME"
+    local bash_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+    local zsh_dir="$HOME/.zsh/completions"
+    local fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+
+    if ! mkdir -p "$bash_dir" "$zsh_dir" "$fish_dir"; then
+        warn "Could not create shell completion directories"
+        return
+    fi
+
+    if "$binary" completions shell --shell bash > "$bash_dir/$BINARY_NAME" &&
+       "$binary" completions shell --shell zsh > "$zsh_dir/_$BINARY_NAME" &&
+       "$binary" completions shell --shell fish > "$fish_dir/$BINARY_NAME.fish"; then
+        success "Installed dynamic completions for bash, zsh, and fish"
+    else
+        warn "Could not install one or more shell completion scripts"
+    fi
 }
 
 # --- Get latest version ---
@@ -268,6 +295,7 @@ install() {
         local installed_version
         installed_version=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null | head -1)
         success "Verified: ${installed_version}"
+        install_completions
     else
         warn "Could not verify installation, but binary was placed at ${INSTALL_DIR}/${BINARY_NAME}"
     fi

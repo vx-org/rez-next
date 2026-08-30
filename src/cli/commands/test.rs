@@ -26,7 +26,12 @@ use std::time::Instant;
 #[derive(Debug, Clone, Args)]
 pub struct TestArgs {
     /// Package to test (can be a path or package name)
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: String,
 
     /// Test names to run (defaults to all tests)
@@ -42,7 +47,12 @@ pub struct TestArgs {
     pub inplace: bool,
 
     /// Extra packages to add to test environment
-    #[arg(long = "extra-packages")]
+    #[arg(
+        long = "extra-packages",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub extra_packages: Vec<String>,
 
     /// Package search paths (colon-separated)

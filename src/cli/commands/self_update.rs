@@ -32,7 +32,7 @@ pub struct SelfUpdateArgs {
     pub force: bool,
 
     /// Print verbose output
-    #[arg(short, long)]
+    #[arg(long)]
     pub verbose: bool,
 }
 

@@ -14,6 +14,7 @@ pub mod bind;
 pub mod build;
 pub mod bundle;
 pub mod complete;
+pub mod completions;
 pub mod cp;
 pub mod depends;
 pub mod diff;

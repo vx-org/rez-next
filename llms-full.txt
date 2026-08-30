@@ -619,7 +619,20 @@ rez-next info python --all
 rez-next self-update
 rez-next self-update --check
 rez-next self-update --version 0.3.2
+
+# Stable IDE/LSP completion queries (schema_version 1)
+rez-next completions packages --prefix pyth --json
+rez-next completions versions --package python --json
+
+# Dynamic shell registration
+rez-next completions shell --shell bash
+rez-next completions shell --shell zsh
+rez-next completions shell --shell fish
+rez-next completions shell --shell powershell
 ```
+
+Completion response fields and compatibility rules are documented in
+`docs/completion-api.md`.
 
 ---
 

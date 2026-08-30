@@ -15,7 +15,12 @@ use crate::cli::utils::split_package_paths;
 #[derive(Args, Clone, Debug)]
 pub struct DependsArgs {
     /// Package that other packages depend on
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: String,
 
     /// Dependency tree depth limit

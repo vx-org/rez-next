@@ -14,7 +14,12 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct PkgHelpArgs {
     /// Package name to get help for
-    #[arg(value_name = "PACKAGE")]
+    #[arg(
+        value_name = "PACKAGE",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: Option<String>,
 
     /// Help section to view (1..N)

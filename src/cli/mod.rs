@@ -116,6 +116,9 @@ pub enum RezCommand {
     /// Shell tab completion support
     Complete(commands::complete::CompleteArgs),
 
+    /// Stable IDE queries and dynamic shell completion generation
+    Completions(commands::completions::CompletionsArgs),
+
     /// Forward rez commands to rez_next (compatibility shim)
     Forward(commands::forward::ForwardArgs),
 
@@ -128,7 +131,13 @@ pub enum RezCommand {
         #[arg(long)]
         open: bool,
         /// Filter to specific package
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            add = clap_complete::ArgValueCompleter::new(
+                crate::cli::commands::completions::package_request_candidates
+            )
+        )]
         package: Option<String>,
     },
 
@@ -261,6 +270,7 @@ impl RezCli {
             RezCommand::Bundle(args) => commands::bundle::execute(args.clone()),
             RezCommand::Pip(args) => commands::pip::execute(args.clone()),
             RezCommand::Complete(args) => commands::complete::execute(args.clone()),
+            RezCommand::Completions(args) => commands::completions::execute(args.clone()),
             RezCommand::Forward(args) => commands::forward::execute(args.clone()),
             RezCommand::Gui {
                 output,

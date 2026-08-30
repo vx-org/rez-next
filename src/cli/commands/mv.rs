@@ -15,7 +15,12 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct MvArgs {
     /// Source package specification (name-version)
-    #[arg(value_name = "SRC_PKG")]
+    #[arg(
+        value_name = "SRC_PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub source_package: String,
 
     /// Destination repository path

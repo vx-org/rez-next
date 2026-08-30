@@ -14,11 +14,21 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct DiffArgs {
     /// First package to diff
-    #[arg(value_name = "PKG1")]
+    #[arg(
+        value_name = "PKG1",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub pkg1: String,
 
     /// Second package to diff against (optional)
-    #[arg(value_name = "PKG2")]
+    #[arg(
+        value_name = "PKG2",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub pkg2: Option<String>,
 
     /// Repository paths to search

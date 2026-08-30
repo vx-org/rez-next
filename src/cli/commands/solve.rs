@@ -14,7 +14,12 @@ use std::sync::Arc;
 #[derive(Args, Clone)]
 pub struct SolveArgs {
     /// Package requirements to resolve
-    #[arg(value_name = "REQUIREMENTS")]
+    #[arg(
+        value_name = "REQUIREMENTS",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub requirements: Vec<String>,
 
     /// Repository paths to search for packages

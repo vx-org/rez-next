@@ -15,7 +15,12 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct StatusArgs {
     /// Show status for specific package
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: Option<String>,
 
     /// Repository paths to check

@@ -44,6 +44,7 @@ Environment variables:
 | `REZ_NEXT_VERSION` | Version to install (e.g. `0.3.12`) | latest | <!-- x-release-please-version -->
 | `REZ_NEXT_INSTALL` | Installation directory | `$HOME/.rez-next/bin` |
 | `REZ_NEXT_MUSL` | Force musl build on Linux | auto-detect |
+| `REZ_NEXT_NO_COMPLETIONS` | Skip dynamic shell completion installation | unset |
 
 ### Windows (PowerShell)
 
@@ -84,6 +85,22 @@ rez-next self-update --version 0.3.12 # x-release-please-version
 # Force reinstall of the current version
 rez-next self-update --force
 ```
+
+---
+
+## CLI and IDE Completions
+
+The install scripts register dynamic completions for bash, zsh, fish, or
+PowerShell. IDE/LSP clients can query the same repository-backed interface:
+
+```bash
+rez-next completions packages --prefix pyth --json
+rez-next completions versions --package python --json
+rez-next completions shell --shell powershell
+```
+
+The JSON schema and manual shell setup are documented in the
+[Completion API](docs/completion-api.md).
 
 ---
 
@@ -268,7 +285,7 @@ for r in results:
 names = search_package_names("^py")  # supports regex
 ```
 
-#### Shell completion (`rez.complete`)
+#### Python shell completion (`rez.complete`)
 
 ```python
 from rez_next.complete import get_completion_script
@@ -443,6 +460,9 @@ Measured with `pytest-benchmark` (Python layer over Rust core).
 - [API Stability](docs/api-stability.md) — public API contract and semver gate
 - [Contributing](docs/contributing.md) — development workflow and CI
 - [Python Integration](docs/python-integration.md) — Python bindings usage and module coverage
+- [Rust Integration](docs/rust-integration.md) — stable Rust/vx embedding boundary
+- [Rez Compatibility](docs/rez-compatibility.md) — exact upstream baseline and known gaps
+- [Completion API](docs/completion-api.md) — versioned IDE queries and dynamic shell registration
 - [Benchmark Guide](docs/benchmark_guide.md) — running and interpreting benchmarks
 - [Performance Guide](docs/performance.md) — profiling tools
 - [Pre-commit Setup](docs/PRE_COMMIT_SETUP.md) — code quality hooks

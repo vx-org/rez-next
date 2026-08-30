@@ -23,7 +23,12 @@ use crate::cli::utils::split_package_paths;
 #[derive(Args, Clone)]
 pub struct EnvArgs {
     /// Package requests to resolve (e.g., "python-3.9" "maya-2023")
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub packages: Vec<String>,
 
     /// Command and arguments to execute (passed after '--')

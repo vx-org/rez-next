@@ -11,6 +11,8 @@ use std::process;
 use rez_core::cli::{RezCli, RezCommand};
 
 fn main() {
+    rez_core::cli::commands::completions::complete_from_env();
+
     let args: Vec<String> = env::args().collect();
 
     // Check if this is a command that supports grouped arguments (with '--')

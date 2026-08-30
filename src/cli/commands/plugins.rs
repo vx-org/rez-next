@@ -15,7 +15,12 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct PluginsArgs {
     /// Package to list plugins for (optional; lists all if omitted)
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: Option<String>,
 
     /// Set package search path

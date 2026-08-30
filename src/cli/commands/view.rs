@@ -13,6 +13,9 @@ use std::path::Path;
 #[derive(Args, Clone)]
 pub struct ViewArgs {
     /// Package to view
+    #[arg(add = clap_complete::ArgValueCompleter::new(
+        crate::cli::commands::completions::package_request_candidates
+    ))]
     pub package: String,
 
     /// Format to print the package in

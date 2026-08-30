@@ -88,6 +88,16 @@ if !result.success { /* rejected: read result.errors */ }
 
 Full contract: `docs/release-sdk.md` (human) / `llms-full.txt` →
 Rust API → rez-next-build → Release SDK.
+Stable IDE and shell completion interfaces:
+
+```bash
+rez-next completions packages --prefix pyth --json
+rez-next completions versions --package python --json
+rez-next completions shell --shell bash
+```
+
+See `docs/completion-api.md` for the versioned JSON schema and installation
+contract.
 
 ## Architecture Map (20 crates)
 
@@ -213,6 +223,10 @@ crates/
 
 ### Check API coverage
 → See `docs/python-integration.md`
+
+### Integrate an IDE or shell completer
+→ See `docs/completion-api.md`; use the `completions` command rather than
+parsing human-readable `search` output.
 
 ## Important Files
 
