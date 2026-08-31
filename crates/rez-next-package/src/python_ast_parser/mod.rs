@@ -9,6 +9,7 @@
 mod commands;
 mod eval;
 mod extract;
+mod metadata;
 mod types;
 
 use crate::Package;
@@ -150,13 +151,18 @@ impl PythonAstParser {
                 self.process_commands_function(&func_def.body, package_data)?;
             }
             "pre_commands" => {
-                self.process_pre_commands_function(&func_def.body, package_data)?;
+                if !Self::function_has_decorator(func_def, "include") {
+                    self.process_pre_commands_function(&func_def.body, package_data)?;
+                }
             }
             "post_commands" => {
                 self.process_post_commands_function(&func_def.body, package_data)?;
             }
             "pre_test_commands" => {
                 self.process_pre_test_commands_function(&func_def.body, package_data)?;
+            }
+            "requires" => {
+                self.process_late_requires_function(func_def, package_data)?;
             }
             _ => {
                 return Err(RezCoreError::PackageParse(format!(
@@ -166,6 +172,19 @@ impl PythonAstParser {
             }
         }
         Ok(())
+    }
+
+    fn function_has_decorator(
+        function: &rustpython_ast::StmtFunctionDef,
+        decorator_name: &str,
+    ) -> bool {
+        function.decorator_list.iter().any(|decorator| {
+            matches!(
+                decorator,
+                Expr::Call(call)
+                    if matches!(&*call.func, Expr::Name(name) if name.id.as_str() == decorator_name)
+            )
+        })
     }
 
     /// Process conditional statements
@@ -543,6 +562,29 @@ def commands():
     }
 
     #[test]
+    fn test_commands_use_imports_declared_inside_the_function() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "python"
+version = "3.9.13"
+def commands():
+    from platform import system
+    if system() == "Windows":
+        env.PLATFORM_MODE = "windows"
+    else:
+        env.PLATFORM_MODE = "posix"
+"#,
+        )
+        .expect("safe command-scope imports should be available to conditions");
+
+        let expected = if cfg!(windows) { "windows" } else { "posix" };
+        assert_eq!(
+            package.commands.as_deref(),
+            Some(format!("env.setenv('PLATFORM_MODE', '{expected}')").as_str())
+        );
+    }
+
+    #[test]
     fn test_commands_evaluate_platform_alias_with_local_variables() {
         let package = PythonAstParser::parse_package_py(
             r#"
@@ -604,6 +646,29 @@ def commands():
     }
 
     #[test]
+    fn test_included_dynamic_pre_commands_do_not_block_environment_commands() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "pywin32"
+version = "306"
+def commands():
+    env.PYTHONPATH.prepend("{this.root}/site-packages")
+@include("pkg_shared")
+def pre_commands():
+    for dll in discover_system_dlls():
+        copy_to_system(dll)
+"#,
+        )
+        .expect("external pre-command extensions should not block package environments");
+
+        assert!(package.pre_commands.is_none());
+        assert_eq!(
+            package.commands.as_deref(),
+            Some("env.prepend_path('PYTHONPATH', '{this.root}/site-packages')")
+        );
+    }
+
+    #[test]
     fn test_dynamic_metadata_function_is_rejected() {
         let error = PythonAstParser::parse_package_py(
             r#"
@@ -620,6 +685,30 @@ def version():
                 .to_string()
                 .contains("Unsupported package.py function"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_late_bound_requires_function_is_evaluated() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "blender"
+version = "4.5.5"
+
+@late()
+def requires():
+    requires_ = ["~python-3.11", "~msvc-14.0", "python_embedded-1"]
+    import os
+    if "__REZ_NEXT_TEST_LATE_REQUIRES_SHOULD_NOT_EXIST__" in os.environ:
+        requires_ = []
+    return requires_
+"#,
+        )
+        .expect("supported late-bound requirements should be evaluated safely");
+
+        assert_eq!(
+            package.requires,
+            ["~python-3.11", "~msvc-14.0", "python_embedded-1"]
         );
     }
 
@@ -644,8 +733,8 @@ for requirement in discover_requirements():
     }
 
     #[test]
-    fn test_structured_package_test_is_rejected_until_supported() {
-        let error = PythonAstParser::parse_package_py(
+    fn test_structured_package_test_command_is_supported() {
+        let package = PythonAstParser::parse_package_py(
             r#"
 name = "test_package"
 version = "1.0.0"
@@ -657,11 +746,11 @@ tests = {
 }
 "#,
         )
-        .expect_err("structured test metadata must not be flattened into debug text");
+        .expect("structured test metadata should preserve its command");
 
-        assert!(
-            error.to_string().contains("Unsupported test definition"),
-            "unexpected error: {error}"
+        assert_eq!(
+            package.tests.get("unit").map(String::as_str),
+            Some("python -m pytest")
         );
     }
 

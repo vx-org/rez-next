@@ -169,15 +169,17 @@ impl DependencyResolver {
         };
 
         let failed_requirements = std::mem::take(&mut resolution_state.failed_requirements);
-        let failed: Vec<_> = failed_requirements
-            .into_iter()
-            .filter(|requirement| {
-                resolution_state.is_requirement_active(requirement)
-                    && resolution_state
-                        .find_satisfying_package(requirement)
-                        .is_none()
-            })
-            .collect();
+        let mut failed = Vec::new();
+        for requirement in failed_requirements {
+            if resolution_state.is_requirement_active(&requirement)
+                && resolution_state
+                    .find_satisfying_package(&requirement)
+                    .is_none()
+                && !failed.contains(&requirement)
+            {
+                failed.push(requirement);
+            }
+        }
 
         // Strict mode: any unsatisfied requirement is a hard error
         if self.config.strict_mode && !failed.is_empty() {
@@ -238,9 +240,6 @@ impl DependencyResolver {
             let mut resolved = false;
             let mut best_effort_candidate = None;
             for candidate in candidates {
-                if state.is_package_rejected(&candidate) {
-                    continue;
-                }
                 if best_effort_candidate.is_none()
                     && state.check_explicit_conflicts(&candidate).is_none()
                 {
@@ -257,6 +256,9 @@ impl DependencyResolver {
                     .try_resolve_with_candidate(state, &candidate, &requirement)
                     .await
                 {
+                    if state.is_resolution_rejected(&resolved_info) {
+                        continue;
+                    }
                     let package_name = resolved_info.package.name.clone();
                     state.add_resolved_package(resolved_info);
                     state.set_package_requirements(package_name, dependencies, conflicts);
@@ -366,32 +368,42 @@ impl DependencyResolver {
             return Ok(false);
         };
 
-        state.reject_package(&current.package);
+        let mut state_without_current = state.clone();
+        state_without_current.reject_resolution(&current);
+        state_without_current.remove_resolved_package(package_name);
         let candidates = self.find_candidate_packages(primary_requirement).await?;
         for candidate in candidates {
-            if state.is_package_rejected(&candidate)
-                || candidate.version == current.package.version
-                || candidate.version.as_ref().is_some_and(|version| {
-                    requirements
-                        .iter()
-                        .any(|requirement| !requirement.is_satisfied_by(version))
-                })
-                || state.check_explicit_conflicts(&candidate).is_some()
+            if candidate.version.as_ref().is_some_and(|version| {
+                requirements
+                    .iter()
+                    .any(|requirement| !requirement.is_satisfied_by(version))
+            }) || state_without_current
+                .check_explicit_conflicts(&candidate)
+                .is_some()
             {
                 continue;
             }
 
+            let mut trial_state = state_without_current.clone();
             let requirement = current
                 .satisfying_requirement
                 .as_ref()
                 .unwrap_or(primary_requirement);
             if let Ok((resolved_info, dependencies, conflicts)) = self
-                .try_resolve_with_candidate(state, &candidate, requirement)
+                .try_resolve_with_candidate(&mut trial_state, &candidate, requirement)
                 .await
             {
-                state.add_resolved_package(resolved_info);
-                state.set_package_requirements(package_name.to_string(), dependencies, conflicts);
-                state.backtrack_steps += 1;
+                if trial_state.is_resolution_rejected(&resolved_info) {
+                    continue;
+                }
+                trial_state.add_resolved_package(resolved_info);
+                trial_state.set_package_requirements(
+                    package_name.to_string(),
+                    dependencies,
+                    conflicts,
+                );
+                trial_state.backtrack_steps += 1;
+                *state = trial_state;
                 return Ok(true);
             }
         }
@@ -609,23 +621,50 @@ impl DependencyResolver {
             let Ok((conflict, requirement)) = Self::parse_variant_requirement(raw) else {
                 return false;
             };
+
             let resolved = state
                 .resolved_packages
                 .iter()
                 .find(|resolved| resolved.package.name == requirement.name);
-            match (conflict, resolved) {
-                (true, Some(resolved)) => resolved
-                    .package
-                    .version
-                    .as_ref()
-                    .is_some_and(|version| !requirement.is_satisfied_by(version)),
-                // A later positive constraint may legitimately narrow an already
-                // selected package. The queue will replace it with a candidate
-                // satisfying every active constraint.
-                (false, Some(_)) => true,
-                _ => true,
+            if let Some(version) = resolved.and_then(|resolved| resolved.package.version.as_ref()) {
+                let satisfies = requirement.is_satisfied_by(version);
+                if conflict || satisfies {
+                    return conflict != satisfies;
+                }
             }
+
+            if !conflict
+                && state
+                    .active_requirements
+                    .get(&requirement.name)
+                    .is_some_and(|active| {
+                        active.iter().any(|active_requirement| {
+                            !Self::requirements_may_intersect(&requirement, active_requirement)
+                        })
+                    })
+            {
+                return false;
+            }
+
+            true
         })
+    }
+
+    fn requirements_may_intersect(left: &Requirement, right: &Requirement) -> bool {
+        let left_floor = left
+            .version_constraint
+            .as_ref()
+            .and_then(Self::constraint_version_floor);
+        let right_floor = right
+            .version_constraint
+            .as_ref()
+            .and_then(Self::constraint_version_floor);
+        match (left_floor, right_floor) {
+            (Some(left_floor), Some(right_floor)) => {
+                left.is_satisfied_by(&right_floor) || right.is_satisfied_by(&left_floor)
+            }
+            _ => true,
+        }
     }
 
     fn parse_variant_requirement(raw: &str) -> Result<(bool, Requirement), String> {

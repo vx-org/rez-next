@@ -20,6 +20,15 @@ pub(crate) enum PythonValue {
     Boolean(bool),
     List(Vec<PythonValue>),
     Dict(HashMap<String, PythonValue>),
+    /// Process environment key lookup without materializing variable values.
+    Environment,
+    /// Rez ephemeral context lookup, resolved after dependency solving.
+    Ephemerals,
+    /// A deferred membership check against the final ephemeral context.
+    EphemeralMembership {
+        name: String,
+        expected: bool,
+    },
     None,
 }
 

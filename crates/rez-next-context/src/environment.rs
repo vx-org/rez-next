@@ -1,13 +1,15 @@
 //! Environment variable generation and management
 
 use crate::{ContextConfig, PathStrategy, ShellType};
+use regex::{Captures, Regex};
 use rez_next_common::RezCoreError;
-use rez_next_package::Package;
+use rez_next_package::{Package, deferred_commands::materialize_deferred_commands};
 use rez_next_rex::{RexAction, RexActionType, RexEnvironment, RexExecutor};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Environment manager for generating package environments
 ///
@@ -18,7 +20,9 @@ use std::path::Path;
 pub struct EnvironmentManager {
     /// Configuration for environment generation
     config: ContextConfig,
-    /// Base environment variables
+    /// Parent environment available to Rez inheritance rules.
+    parent_env: HashMap<String, String>,
+    /// Environment exported before package Rex actions are applied.
     base_env: HashMap<String, String>,
 }
 
@@ -35,6 +39,8 @@ pub enum EnvOperation {
     Unset,
     /// Set a variable only when it is not already defined
     SetIfEmpty(String),
+    /// Restore a variable to its original parent value
+    Reset,
 }
 
 /// Environment variable definition
@@ -53,15 +59,20 @@ pub struct EnvVarDefinition {
 impl EnvironmentManager {
     /// Create a new environment manager
     pub fn new(config: ContextConfig) -> Self {
+        let parent_env = env::vars()
+            .map(|(name, value)| (environment_key(&name), value))
+            .collect::<HashMap<_, _>>();
         let base_env = if config.inherit_parent_env {
-            env::vars()
-                .map(|(name, value)| (environment_key(&name), value))
-                .collect()
+            parent_env.clone()
         } else {
             HashMap::new()
         };
 
-        Self { config, base_env }
+        Self {
+            config,
+            parent_env,
+            base_env,
+        }
     }
 
     /// Create a manager with an explicit base environment.
@@ -72,6 +83,39 @@ impl EnvironmentManager {
         config: ContextConfig,
         environment: HashMap<String, String>,
     ) -> Self {
+        let parent_env = Self::normalize_parent_environment(environment);
+        let base_env = parent_env.clone();
+        Self {
+            config,
+            parent_env,
+            base_env,
+        }
+    }
+
+    /// Create a manager with an explicit parent environment.
+    ///
+    /// The parent is always visible to Rex expressions and reset operations.
+    /// It is exported only through the configured Rez inheritance policy.
+    pub fn with_parent_environment(
+        config: ContextConfig,
+        environment: HashMap<String, String>,
+    ) -> Self {
+        let parent_env = Self::normalize_parent_environment(environment);
+        let base_env = if config.inherit_parent_env {
+            parent_env.clone()
+        } else {
+            HashMap::new()
+        };
+        Self {
+            config,
+            parent_env,
+            base_env,
+        }
+    }
+
+    fn normalize_parent_environment(
+        environment: HashMap<String, String>,
+    ) -> HashMap<String, String> {
         let mut entries: Vec<_> = environment.into_iter().collect();
         if cfg!(windows) {
             entries.sort_by(|(left, _), (right, _)| {
@@ -84,11 +128,11 @@ impl EnvironmentManager {
                 })
             });
         }
-        let mut base_env = HashMap::new();
+        let mut parent_env = HashMap::new();
         for (name, value) in entries {
-            base_env.insert(environment_key(&name), value);
+            parent_env.insert(environment_key(&name), value);
         }
-        Self { config, base_env }
+        parent_env
     }
 
     /// Generate environment variables for a list of packages
@@ -104,10 +148,28 @@ impl EnvironmentManager {
         &self,
         packages: &[Package],
     ) -> Result<RexEnvironment, RezCoreError> {
+        self.generate_rex_environment_with_ephemerals(packages, &HashSet::new())
+            .await
+    }
+
+    pub(crate) async fn generate_rex_environment_with_ephemerals(
+        &self,
+        packages: &[Package],
+        resolved_ephemeral_names: &HashSet<String>,
+    ) -> Result<RexEnvironment, RezCoreError> {
         let mut env_vars = self.base_env.clone();
         let mut env_definitions = Vec::new();
         let mut shell_actions = Vec::new();
         let mut priority = 0;
+        let resolved_package_names = packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect::<HashSet<_>>();
+        let building = self
+            .config
+            .additional_env_vars
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("REZ_BUILD_ENV"));
 
         // Package metadata is available to every Rex phase.
         for package in packages {
@@ -127,7 +189,14 @@ impl EnvironmentManager {
         for commands_for in command_phases {
             for package in packages {
                 if let Some(commands) = commands_for(package) {
-                    let (definitions, actions) = self.rex_effects(package, commands, priority)?;
+                    let (definitions, actions) = self.rex_effects(
+                        package,
+                        commands,
+                        priority,
+                        &resolved_package_names,
+                        resolved_ephemeral_names,
+                        building,
+                    )?;
                     env_definitions.extend(definitions);
                     shell_actions.extend(actions);
                 }
@@ -179,17 +248,56 @@ impl EnvironmentManager {
         // Always set package root and version variables. Real repository packages
         // carry their descriptor path; synthetic packages keep the legacy fallback.
         let package_root = Self::package_root(package);
+        let legacy_prefix = package.name.to_uppercase();
+        let rez_prefix = format!("REZ_{}", legacy_prefix.replace('.', "_"));
         definitions.push(EnvVarDefinition {
-            name: format!("{}_ROOT", package.name.to_uppercase()),
+            name: format!("{legacy_prefix}_ROOT"),
             operation: EnvOperation::Set(package_root.clone()),
             source_package: Some(package.name.clone()),
             priority,
         });
+        definitions.push(EnvVarDefinition {
+            name: format!("{rez_prefix}_ROOT"),
+            operation: EnvOperation::Set(package_root.clone()),
+            source_package: Some(package.name.clone()),
+            priority,
+        });
+        definitions.push(EnvVarDefinition {
+            name: format!("{rez_prefix}_BASE"),
+            operation: EnvOperation::Set(
+                package.base.clone().unwrap_or_else(|| package_root.clone()),
+            ),
+            source_package: Some(package.name.clone()),
+            priority,
+        });
 
-        if let Some(ref version) = package.version {
+        let version_string = package
+            .version
+            .as_ref()
+            .map_or_else(String::new, |version| version.as_str().to_string());
+        definitions.push(EnvVarDefinition {
+            name: format!("{legacy_prefix}_VERSION"),
+            operation: EnvOperation::Set(version_string.clone()),
+            source_package: Some(package.name.clone()),
+            priority,
+        });
+        definitions.push(EnvVarDefinition {
+            name: format!("{rez_prefix}_VERSION"),
+            operation: EnvOperation::Set(version_string),
+            source_package: Some(package.name.clone()),
+            priority,
+        });
+        for (index, component) in ["MAJOR", "MINOR", "PATCH"].into_iter().enumerate() {
             definitions.push(EnvVarDefinition {
-                name: format!("{}_VERSION", package.name.to_uppercase()),
-                operation: EnvOperation::Set(version.as_str().to_string()),
+                name: format!("{rez_prefix}_{component}_VERSION"),
+                operation: EnvOperation::Set(
+                    package
+                        .version
+                        .as_ref()
+                        .and_then(|version| version.component(index))
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
                 source_package: Some(package.name.clone()),
                 priority,
             });
@@ -204,6 +312,9 @@ impl EnvironmentManager {
         package: &Package,
         commands: &str,
         priority: i32,
+        resolved_package_names: &HashSet<String>,
+        resolved_ephemeral_names: &HashSet<String>,
+        building: bool,
     ) -> Result<(Vec<EnvVarDefinition>, Vec<RexAction>), RezCoreError> {
         let mut definitions = Vec::new();
         let mut shell_actions = Vec::new();
@@ -217,8 +328,14 @@ impl EnvironmentManager {
         }
         executor.set_context_var("name", &package.name);
 
-        executor.execute_commands(
+        let commands = materialize_deferred_commands(
             commands,
+            resolved_package_names,
+            resolved_ephemeral_names,
+            building,
+        )?;
+        executor.execute_commands(
+            &commands,
             &package.name,
             Some(&package_root),
             package.version.as_ref().map(|v| v.as_str()),
@@ -254,6 +371,7 @@ impl EnvironmentManager {
                 RexActionType::SetenvIfEmpty { name, value } => {
                     Some((name.clone(), EnvOperation::SetIfEmpty(value.clone())))
                 }
+                RexActionType::Resetenv { name } => Some((name.clone(), EnvOperation::Reset)),
                 _ => None,
             };
             let Some((name, operation)) = definition else {
@@ -305,21 +423,24 @@ impl EnvironmentManager {
         let name = environment_key(&env_def.name);
         match &env_def.operation {
             EnvOperation::Set(value) => {
-                env_vars.insert(name, value.clone());
+                let value = self.expand_environment_value(value, env_vars);
+                env_vars.insert(name, value);
             }
             EnvOperation::Prepend(value, separator) => {
-                let current = env_vars.get(&name).cloned().unwrap_or_default();
+                let value = self.expand_environment_value(value, env_vars);
+                let current = self.current_or_selected_parent_value(env_vars, &name);
                 let new_value = if current.is_empty() {
-                    value.clone()
+                    value
                 } else {
                     format!("{}{}{}", value, separator, current)
                 };
                 env_vars.insert(name, new_value);
             }
             EnvOperation::Append(value, separator) => {
-                let current = env_vars.get(&name).cloned().unwrap_or_default();
+                let value = self.expand_environment_value(value, env_vars);
+                let current = self.current_or_selected_parent_value(env_vars, &name);
                 let new_value = if current.is_empty() {
-                    value.clone()
+                    value
                 } else {
                     format!("{}{}{}", current, separator, value)
                 };
@@ -329,14 +450,72 @@ impl EnvironmentManager {
                 env_vars.remove(&name);
             }
             EnvOperation::SetIfEmpty(value) => {
-                env_vars.entry(name).or_insert_with(|| value.clone());
+                if !env_vars.contains_key(&name) && !self.parent_env.contains_key(&name) {
+                    let value = self.expand_environment_value(value, env_vars);
+                    env_vars.insert(name, value);
+                }
             }
+            EnvOperation::Reset => match self.parent_env.get(&name) {
+                Some(value) => {
+                    env_vars.insert(name, value.clone());
+                }
+                None => {
+                    env_vars.remove(&name);
+                }
+            },
         }
 
         Ok(())
     }
 
-    /// Apply the legacy tools-only PATH fallback for packages without commands.
+    fn expand_environment_value(
+        &self,
+        value: &str,
+        environment: &HashMap<String, String>,
+    ) -> String {
+        static ENVIRONMENT_REFERENCE: OnceLock<Regex> = OnceLock::new();
+        let expression = ENVIRONMENT_REFERENCE.get_or_init(|| {
+            Regex::new(r"\$(?:\{(?P<braced>[^}]*)\}|(?P<plain>\w+))")
+                .expect("environment reference regex is valid")
+        });
+        expression
+            .replace_all(value, |captures: &Captures<'_>| {
+                let name = captures
+                    .name("braced")
+                    .or_else(|| captures.name("plain"))
+                    .expect("one environment reference group matches")
+                    .as_str();
+                let key = environment_key(name);
+                environment
+                    .get(&key)
+                    .or_else(|| self.parent_env.get(&key))
+                    .cloned()
+                    .unwrap_or_else(|| captures[0].to_string())
+            })
+            .into_owned()
+    }
+
+    fn current_or_selected_parent_value(
+        &self,
+        environment: &HashMap<String, String>,
+        name: &str,
+    ) -> String {
+        environment.get(name).cloned().unwrap_or_else(|| {
+            let inherits_parent = self.config.all_parent_variables
+                || self
+                    .config
+                    .parent_variables
+                    .iter()
+                    .any(|variable| environment_key(variable) == name);
+            if inherits_parent {
+                self.parent_env.get(name).cloned().unwrap_or_default()
+            } else {
+                String::new()
+            }
+        })
+    }
+
+    /// Apply PATH modifications based on package tools
     fn apply_path_modifications(
         &self,
         env_vars: &mut HashMap<String, String>,
@@ -348,18 +527,8 @@ impl EnvironmentManager {
 
         let mut tool_paths = Vec::new();
 
-        // Explicit Rez command phases define the complete package environment.
-        // https://rez.readthedocs.io/en/stable/package_commands.html
-        // The tools attribute is metadata and must not override those commands,
-        // including an intentional PATH unset or a nonstandard payload layout.
-        // Keep the legacy fallback only for commandless packages.
+        // Collect tool paths from packages
         for package in packages {
-            if package.pre_commands.is_some()
-                || package.commands.is_some()
-                || package.post_commands.is_some()
-            {
-                continue;
-            }
             for _tool in &package.tools {
                 let tool_path = Self::package_tool_path(package);
                 if !tool_paths.contains(&tool_path) {

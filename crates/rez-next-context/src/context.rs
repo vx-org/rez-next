@@ -3,9 +3,10 @@
 use crate::{EnvironmentManager, ShellType};
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageRequirement};
+use rez_next_rex::RexEnvironment;
 use rez_next_version::Version;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -20,6 +21,14 @@ pub struct ResolvedContext {
 
     /// Original requirements that led to this context
     pub requirements: Vec<PackageRequirement>,
+
+    /// Requirements added automatically from the Rez configuration.
+    #[serde(default)]
+    pub implicit_packages: Vec<PackageRequirement>,
+
+    /// Final non-conflict ephemeral requests produced by the solver.
+    #[serde(default)]
+    pub resolved_ephemerals: Vec<PackageRequirement>,
 
     /// Resolved packages in dependency order
     pub resolved_packages: Vec<Package>,
@@ -64,9 +73,17 @@ pub enum ContextStatus {
 
 /// Context configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextConfig {
     /// Whether to include parent environment variables
     pub inherit_parent_env: bool,
+    /// Parent variables whose values are preserved on the first prepend or append.
+    ///
+    /// This matches Rez's `parent_variables` setting without copying unrelated
+    /// parent variables into an exported context environment.
+    pub parent_variables: Vec<String>,
+    /// Treat every variable touched by prepend or append as a parent variable.
+    pub all_parent_variables: bool,
     /// Shell type for environment generation
     pub shell_type: ShellType,
     /// Working directory for the context
@@ -75,12 +92,11 @@ pub struct ContextConfig {
     pub additional_env_vars: HashMap<String, String>,
     /// Variables to unset
     pub unset_vars: Vec<String>,
-    /// Legacy tools-only PATH fallback strategy for packages without command phases.
-    /// Explicit pre_commands, commands and post_commands remain authoritative.
+    /// PATH modification strategy
     pub path_strategy: PathStrategy,
 }
 
-/// Legacy tools-only PATH fallback strategy for packages without command phases.
+/// PATH modification strategy
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PathStrategy {
     /// Prepend to existing PATH
@@ -97,6 +113,8 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             inherit_parent_env: false,
+            parent_variables: Vec::new(),
+            all_parent_variables: false,
             shell_type: ShellType::Bash,
             working_directory: None,
             additional_env_vars: HashMap::new(),
@@ -116,6 +134,8 @@ impl ResolvedContext {
             id,
             name: None,
             requirements,
+            implicit_packages: Vec::new(),
+            resolved_ephemerals: Vec::new(),
             resolved_packages: Vec::new(),
             environment_vars: HashMap::new(),
             metadata: HashMap::new(),
@@ -193,11 +213,97 @@ impl ResolvedContext {
 
     /// Generate environment variables for this context
     pub async fn generate_environment(&mut self) -> Result<(), RezCoreError> {
-        let env_manager = EnvironmentManager::new(self.config.clone());
-        self.environment_vars = env_manager
-            .generate_environment(&self.resolved_packages)
-            .await?;
+        self.environment_vars = self.get_environ(None).await?;
         Ok(())
+    }
+
+    /// Generate the environment produced by this context.
+    ///
+    /// An explicit parent environment is interpreted according to this
+    /// context's inheritance policy. Context-level `REZ_USED_*` metadata is
+    /// added after package actions.
+    pub async fn get_environ(
+        &self,
+        parent_environment: Option<HashMap<String, String>>,
+    ) -> Result<HashMap<String, String>, RezCoreError> {
+        Ok(self.get_rex_environment(parent_environment).await?.vars)
+    }
+
+    /// Generate the complete Rex activation state for this context.
+    pub async fn get_rex_environment(
+        &self,
+        parent_environment: Option<HashMap<String, String>>,
+    ) -> Result<RexEnvironment, RezCoreError> {
+        let environment_manager = match parent_environment {
+            Some(environment) => {
+                EnvironmentManager::with_parent_environment(self.config.clone(), environment)
+            }
+            None => EnvironmentManager::new(self.config.clone()),
+        };
+        let resolved_ephemeral_names = self
+            .resolved_ephemerals
+            .iter()
+            .map(|requirement| requirement.name.trim_start_matches('.').to_string())
+            .collect::<HashSet<_>>();
+        let mut environment = environment_manager
+            .generate_rex_environment_with_ephemerals(
+                &self.resolved_packages,
+                &resolved_ephemeral_names,
+            )
+            .await?;
+        self.add_context_environment_metadata(&mut environment.vars);
+        Ok(environment)
+    }
+
+    fn add_context_environment_metadata(&self, environment: &mut HashMap<String, String>) {
+        let request = self
+            .requirements
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let resolved_packages = self
+            .resolved_packages
+            .iter()
+            .map(|package| match &package.version {
+                Some(version) => format!("{}-{}", package.name, version.as_str()),
+                None => package.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let resolve = resolved_packages.join(" ");
+
+        environment.insert("REZ_USED_REQUEST".to_string(), request);
+        environment.insert("REZ_USED_RESOLVE".to_string(), resolve.clone());
+        environment.insert("REZ_USED_PACKAGES_NAMES".to_string(), resolve);
+        environment.insert(
+            "REZ_USED_IMPLICIT_PACKAGES".to_string(),
+            self.implicit_packages
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if !self.resolved_ephemerals.is_empty() {
+            environment.insert(
+                "REZ_USED_EPH_RESOLVE".to_string(),
+                self.resolved_ephemerals
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        environment.insert(
+            "REZ_USED_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        environment.insert(
+            "REZ_USED_TIMESTAMP".to_string(),
+            self.created_at.to_string(),
+        );
+        if let Some(package_paths) = self.metadata.get("package_paths") {
+            environment.insert("REZ_USED_PACKAGES_PATH".to_string(), package_paths.clone());
+        }
     }
 
     /// Get all tools from resolved packages

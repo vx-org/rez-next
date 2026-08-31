@@ -2,9 +2,13 @@
 //! Supports the full Rex DSL used by rez package commands.
 
 use super::PythonAstParser;
-use super::types::PackageData;
+use super::types::{PackageData, PythonValue};
+use crate::deferred_commands::{
+    defer_build_mode, defer_resolve_membership, defer_unsupported_build_mode,
+    defer_unsupported_build_or_ephemeral,
+};
 use rez_next_common::RezCoreError;
-use rustpython_ast::{Expr, Stmt};
+use rustpython_ast::{CmpOp, Expr, Stmt, UnaryOp};
 
 impl PythonAstParser {
     /// Process the `commands` function body
@@ -52,6 +56,7 @@ impl PythonAstParser {
         body: &[Stmt],
     ) -> Result<Option<String>, RezCoreError> {
         let outer_variables = self.context.variables.clone();
+        let outer_imports = self.context.imports.clone();
         let result = (|| {
             let mut commands = Vec::new();
             for stmt in body {
@@ -62,7 +67,112 @@ impl PythonAstParser {
             Ok((!commands.is_empty()).then(|| commands.join("\n")))
         })();
         self.context.variables = outer_variables;
+        self.context.imports = outer_imports;
         result
+    }
+
+    fn commands_from_statements(&mut self, statements: &[Stmt]) -> Result<String, RezCoreError> {
+        let mut commands = Vec::new();
+        for statement in statements {
+            if let Some(command) = self.extract_command_from_statement(statement)? {
+                commands.push(command);
+            }
+        }
+        Ok(commands.join("\n"))
+    }
+
+    fn commands_from_scoped_statements(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<String, RezCoreError> {
+        let outer_variables = self.context.variables.clone();
+        let outer_imports = self.context.imports.clone();
+        let result = self.commands_from_statements(statements);
+        self.context.variables = outer_variables;
+        self.context.imports = outer_imports;
+        result
+    }
+
+    fn defer_condition_branches(
+        &mut self,
+        body: &[Stmt],
+        orelse: &[Stmt],
+        defer: impl Fn(bool, &str) -> String,
+    ) -> Result<Option<String>, RezCoreError> {
+        let mut commands = Vec::new();
+        let body_commands = self.commands_from_scoped_statements(body)?;
+        if !body_commands.is_empty() {
+            commands.push(defer(true, &body_commands));
+        }
+        let else_commands = self.commands_from_scoped_statements(orelse)?;
+        if !else_commands.is_empty() {
+            commands.push(defer(false, &else_commands));
+        }
+        Ok((!commands.is_empty()).then(|| commands.join("\n")))
+    }
+
+    fn resolve_membership_condition(
+        &self,
+        expression: &Expr,
+    ) -> Result<Option<(String, bool)>, RezCoreError> {
+        let Expr::Compare(comparison) = expression else {
+            return Ok(None);
+        };
+        if comparison.ops.len() != 1 || comparison.comparators.len() != 1 {
+            return Ok(None);
+        }
+        let Expr::Name(container) = &comparison.comparators[0] else {
+            return Ok(None);
+        };
+        if container.id.as_str() != "resolve" {
+            return Ok(None);
+        }
+        let expected_present = match comparison.ops[0] {
+            CmpOp::In => true,
+            CmpOp::NotIn => false,
+            _ => return Ok(None),
+        };
+        Ok(Some((
+            self.extract_string_value(&comparison.left)?,
+            expected_present,
+        )))
+    }
+
+    fn building_condition(expression: &Expr) -> Option<bool> {
+        match expression {
+            Expr::Name(name) if name.id.as_str() == "building" => Some(true),
+            Expr::UnaryOp(unary)
+                if unary.op == UnaryOp::Not
+                    && matches!(&*unary.operand, Expr::Name(name) if name.id.as_str() == "building") =>
+            {
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    fn build_or_ephemeral_condition(&self, expression: &Expr) -> Option<String> {
+        let Expr::BoolOp(boolean) = expression else {
+            return None;
+        };
+        if boolean.op != rustpython_ast::BoolOp::Or || boolean.values.len() != 2 {
+            return None;
+        }
+        let mut building = false;
+        let mut ephemeral = None;
+        for value in &boolean.values {
+            if Self::building_condition(value) == Some(true) {
+                building = true;
+            } else if let Expr::Name(name) = value
+                && let Some(PythonValue::EphemeralMembership {
+                    name: ephemeral_name,
+                    expected: true,
+                }) = self.context.variables.get(name.id.as_str())
+            {
+                ephemeral = Some(ephemeral_name.clone());
+            }
+        }
+        if building { ephemeral } else { None }
     }
 
     /// Extract a Rex DSL command string from a single statement.
@@ -79,6 +189,57 @@ impl PythonAstParser {
     ) -> Result<Option<String>, RezCoreError> {
         match stmt {
             Stmt::If(if_stmt) => {
+                if let Some(ephemeral_name) = self.build_or_ephemeral_condition(&if_stmt.test) {
+                    if !if_stmt.orelse.is_empty() {
+                        return Err(RezCoreError::PackageParse(
+                            "Dynamic build/ephemeral command guards with else blocks are unsupported"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(Some(defer_unsupported_build_or_ephemeral(&ephemeral_name)));
+                }
+                if let Some((package_name, present_when_true)) =
+                    self.resolve_membership_condition(&if_stmt.test)?
+                {
+                    return self.defer_condition_branches(
+                        &if_stmt.body,
+                        &if_stmt.orelse,
+                        |condition_is_true, commands| {
+                            defer_resolve_membership(
+                                commands,
+                                &package_name,
+                                if condition_is_true {
+                                    present_when_true
+                                } else {
+                                    !present_when_true
+                                },
+                            )
+                        },
+                    );
+                }
+                if let Some(building_when_true) = Self::building_condition(&if_stmt.test) {
+                    let deferred = self.defer_condition_branches(
+                        &if_stmt.body,
+                        &if_stmt.orelse,
+                        |condition_is_true, commands| {
+                            defer_build_mode(
+                                commands,
+                                if condition_is_true {
+                                    building_when_true
+                                } else {
+                                    !building_when_true
+                                },
+                            )
+                        },
+                    );
+                    return match deferred {
+                        Ok(commands) => Ok(commands),
+                        Err(_) if building_when_true && if_stmt.orelse.is_empty() => {
+                            Ok(Some(defer_unsupported_build_mode()))
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
                 let statements = match self.evaluate_expression(&if_stmt.test)? {
                     super::types::PythonValue::Boolean(true) => &if_stmt.body,
                     super::types::PythonValue::Boolean(false) => &if_stmt.orelse,
@@ -88,14 +249,9 @@ impl PythonAstParser {
                         ));
                     }
                 };
-                let mut commands = Vec::new();
-                for statement in statements {
-                    if let Some(command) = self.extract_command_from_statement(statement)? {
-                        commands.push(command);
-                    }
-                }
+                let commands = self.commands_from_statements(statements)?;
                 if !commands.is_empty() {
-                    return Ok(Some(commands.join("\n")));
+                    return Ok(Some(commands));
                 }
             }
 
@@ -310,7 +466,9 @@ impl PythonAstParser {
                     )));
                 }
             }
-            Stmt::Import(_) | Stmt::ImportFrom(_) | Stmt::Pass(_) => {}
+            Stmt::Import(import) => self.process_import_statement(import)?,
+            Stmt::ImportFrom(import) => self.process_import_from_statement(import)?,
+            Stmt::Pass(_) => {}
             _ => {
                 return Err(RezCoreError::PackageParse(format!(
                     "Unsupported command statement: {stmt:?}"

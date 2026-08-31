@@ -9,6 +9,8 @@
 //! - Package validation
 //! - Package management operations
 
+#[doc(hidden)]
+pub mod deferred_commands;
 pub mod developer_package; // Developer package support (rez.developer_package)
 pub mod filter;
 pub mod install_layout;

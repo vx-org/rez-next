@@ -8,8 +8,14 @@ use rez_next_package::Package;
 use rez_next_version::Version;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolutionDecision {
+    version: Option<Version>,
+    variant_index: Option<usize>,
+}
+
 /// Internal state for the resolution process
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResolutionState {
     /// Original requirements to resolve
     pub(crate) original_requirements: Vec<Requirement>,
@@ -41,8 +47,8 @@ pub(crate) struct ResolutionState {
     /// Satisfied requirements (to avoid duplicates)
     pub(crate) satisfied_requirements: HashSet<String>,
 
-    /// Package versions rejected while backtracking this solve.
-    pub(crate) rejected_versions: HashMap<String, HashSet<Version>>,
+    /// Exact package version/variant decisions rejected while backtracking.
+    rejected_resolutions: HashMap<String, HashSet<ResolutionDecision>>,
 
     /// Dependency graph edges: package_name -> list of its direct requirements (package names)
     pub(crate) dep_graph: HashMap<String, Vec<String>>,
@@ -73,7 +79,7 @@ impl ResolutionState {
             package_requirements: HashMap::new(),
             package_conflict_requirements: HashMap::new(),
             satisfied_requirements: HashSet::new(),
-            rejected_versions: HashMap::new(),
+            rejected_resolutions: HashMap::new(),
             dep_graph: HashMap::new(),
             packages_considered: 0,
             variants_evaluated: 0,
@@ -176,27 +182,47 @@ impl ResolutionState {
             .collect();
     }
 
+    pub(crate) fn remove_resolved_package(&mut self, package_name: &str) {
+        self.resolved_packages
+            .retain(|resolved| resolved.package.name != package_name);
+        self.package_requirements.remove(package_name);
+        self.package_conflict_requirements.remove(package_name);
+        self.prune_orphaned_packages();
+        self.rebuild_constraints();
+        self.requeue_active_requirements();
+        self.satisfied_requirements.clear();
+        let failed_requirements = std::mem::take(&mut self.failed_requirements);
+        self.failed_requirements = failed_requirements
+            .into_iter()
+            .filter(|requirement| self.is_requirement_active(requirement))
+            .collect();
+    }
+
     pub(crate) fn is_requirement_active(&self, requirement: &Requirement) -> bool {
         self.active_requirements
             .get(&requirement.name)
             .is_some_and(|requirements| requirements.contains(requirement))
     }
 
-    pub(crate) fn reject_package(&mut self, package: &Package) {
-        if let Some(version) = &package.version {
-            self.rejected_versions
-                .entry(package.name.clone())
-                .or_default()
-                .insert(version.clone());
-        }
+    pub(crate) fn reject_resolution(&mut self, resolved: &ResolvedPackageInfo) {
+        self.rejected_resolutions
+            .entry(resolved.package.name.clone())
+            .or_default()
+            .insert(ResolutionDecision {
+                version: resolved.package.version.clone(),
+                variant_index: resolved.variant_index,
+            });
     }
 
-    pub(crate) fn is_package_rejected(&self, package: &Package) -> bool {
-        package.version.as_ref().is_some_and(|version| {
-            self.rejected_versions
-                .get(&package.name)
-                .is_some_and(|versions| versions.contains(version))
-        })
+    pub(crate) fn is_resolution_rejected(&self, resolved: &ResolvedPackageInfo) -> bool {
+        self.rejected_resolutions
+            .get(&resolved.package.name)
+            .is_some_and(|resolutions| {
+                resolutions.contains(&ResolutionDecision {
+                    version: resolved.package.version.clone(),
+                    variant_index: resolved.variant_index,
+                })
+            })
     }
 
     fn rebuild_constraints(&mut self) {

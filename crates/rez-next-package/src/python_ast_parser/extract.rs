@@ -79,23 +79,7 @@ impl PythonAstParser {
     /// Extract a list of strings from an expression
     pub(super) fn extract_string_list(&self, expr: &Expr) -> Result<Vec<String>, RezCoreError> {
         match self.evaluate_expression(expr) {
-            Ok(PythonValue::List(list)) => {
-                let mut result = Vec::new();
-                for item in list {
-                    match item {
-                        PythonValue::String(s) => result.push(s),
-                        PythonValue::Integer(i) => result.push(i.to_string()),
-                        PythonValue::Float(f) => result.push(f.to_string()),
-                        PythonValue::Boolean(b) => result.push(b.to_string()),
-                        _ => {
-                            return Err(RezCoreError::PackageParse(
-                                "List contains non-string values".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Ok(result)
-            }
+            Ok(value @ PythonValue::List(_)) => Self::string_list_from_value(value),
             _ => match expr {
                 Expr::List(list) => {
                     let mut result = Vec::new();
@@ -117,6 +101,26 @@ impl PythonAstParser {
                 ))),
             },
         }
+    }
+
+    pub(super) fn string_list_from_value(value: PythonValue) -> Result<Vec<String>, RezCoreError> {
+        let PythonValue::List(items) = value else {
+            return Err(RezCoreError::PackageParse(
+                "Expected a list of strings".to_string(),
+            ));
+        };
+        items
+            .into_iter()
+            .map(|item| match item {
+                PythonValue::String(value) => Ok(value),
+                PythonValue::Integer(value) => Ok(value.to_string()),
+                PythonValue::Float(value) => Ok(value.to_string()),
+                PythonValue::Boolean(value) => Ok(value.to_string()),
+                _ => Err(RezCoreError::PackageParse(
+                    "List contains non-string values".to_string(),
+                )),
+            })
+            .collect()
     }
 
     /// Extract variants — a list of lists of strings
@@ -147,9 +151,22 @@ impl PythonAstParser {
                 for (key, value) in dict {
                     let value_str = match value {
                         PythonValue::String(s) => s,
+                        PythonValue::Dict(mut definition) => match definition.remove("command") {
+                            Some(PythonValue::String(command)) => command,
+                            Some(_) => {
+                                return Err(RezCoreError::PackageParse(format!(
+                                    "Structured test command for '{key}' must be a string"
+                                )));
+                            }
+                            None => {
+                                return Err(RezCoreError::PackageParse(format!(
+                                    "Structured test definition for '{key}' is missing 'command'"
+                                )));
+                            }
+                        },
                         _ => {
                             return Err(RezCoreError::PackageParse(format!(
-                                "Unsupported test definition for '{key}': only string commands are supported"
+                                "Unsupported test definition for '{key}'"
                             )));
                         }
                     };
