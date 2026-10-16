@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.13](https://github.com/vx-org/rez-next/compare/v0.3.12...v0.3.13) (2026-10-16)
+
+
+### 🚀 Features
+
+* **config:** project config lookup and schema/validate/where subcommands ([#380](https://github.com/vx-org/rez-next/issues/380)) ([24f40d2](https://github.com/vx-org/rez-next/commit/24f40d2c2cb04327590d810e9363e99556ffa31d))
+
+
+### 🐛 Bug Fixes
+
+* **repository:** keep identifier-shaped paths out of the typed-spec branch ([800de98](https://github.com/vx-org/rez-next/commit/800de988684d7bce396b5b69f028444b446483ce))
+* **repository:** keep identifier-shaped paths out of the typed-spec branch ([e93866b](https://github.com/vx-org/rez-next/commit/e93866b58848f0237977c9509c2c72e1330fe350))
+* **repository:** report unknown package repository types in packages_path ([9edf85d](https://github.com/vx-org/rez-next/commit/9edf85d9755f1f0c5ecc50b0a94ec62bd2d01c96))
+* **repository:** report unknown package repository types in packages_path ([2425c7d](https://github.com/vx-org/rez-next/commit/2425c7d028d049a7734ccc6594b268aeee183dae))
+
+
+### 📚 Documentation
+
+* **contributing:** document the release PR draft workflow ([#393](https://github.com/vx-org/rez-next/issues/393)) ([e33eced](https://github.com/vx-org/rez-next/commit/e33eced50873cb4f5097f4631ee6d77cdc59dcc5))
+* **contributing:** state that clearing the release PR draft is durable ([#396](https://github.com/vx-org/rez-next/issues/396)) ([1176dfa](https://github.com/vx-org/rez-next/commit/1176dfabaa5a8317b8088ece5807d59cd4613647))
+
 ## [0.3.12](https://github.com/vx-org/rez-next/compare/v0.3.11...v0.3.12) (2026-10-13)
 
 
