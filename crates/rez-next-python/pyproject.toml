@@ -47,7 +47,11 @@ strip = false
 # `tomli` is only needed to read TOML on Python < 3.11; 3.11+ uses stdlib
 # `tomllib`. Declared explicitly so the manifest tests do not depend on it
 # being pulled in transitively.
-test = ["maturin>=1.0,<2.0", "pytest", "pytest-benchmark", "tomli; python_version < '3.11'"]
+# `pytest<9.2`: pytest 9.2 dropped the private Function._nodeid attribute that
+# pytest-benchmark reads at fixture setup (AttributeError on the benchmark
+# fixture). Bound it here so `pip install .[test]` / `uv sync` stay reproducible;
+# the CI jobs pin the same range explicitly.
+test = ["maturin>=1.0,<2.0", "pytest>=8,<9.2", "pytest-benchmark", "tomli; python_version < '3.11'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
