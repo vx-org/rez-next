@@ -1873,9 +1873,11 @@ mod tests {
 
     #[test]
     fn test_assign_cache_rejects_unknown_subkey_and_preserves_target() {
-        let mut target = CacheConfig::default();
-        target.memory_cache_size = 500;
-        target.enable_disk_cache = false;
+        let mut target = CacheConfig {
+            memory_cache_size: 500,
+            enable_disk_cache: false,
+            ..Default::default()
+        };
         let err = assign_cache(&mut target, &serde_json::json!({"typo": 1}))
             .expect_err("unknown cache subkey must be rejected");
         assert!(err.contains("unknown cache key 'typo'"), "{err}");
@@ -1886,9 +1888,11 @@ mod tests {
 
     #[test]
     fn test_assign_cache_rejects_non_object_and_preserves_target() {
-        let mut target = CacheConfig::default();
-        target.memory_cache_size = 500;
-        target.enable_disk_cache = false;
+        let mut target = CacheConfig {
+            memory_cache_size: 500,
+            enable_disk_cache: false,
+            ..Default::default()
+        };
         let err = assign_cache(&mut target, &serde_json::json!(7))
             .expect_err("a non-object cache override must be rejected");
         assert!(err.contains("invalid cache override"), "{err}");
@@ -1900,9 +1904,11 @@ mod tests {
     fn test_assign_cache_partial_patch_keeps_sibling_keys() {
         // Control: the already-fixed P2 behaviour still holds. Not new P3
         // coverage; it guards against a fix that breaks the merge semantics.
-        let mut target = CacheConfig::default();
-        target.memory_cache_size = 500;
-        target.enable_disk_cache = false;
+        let mut target = CacheConfig {
+            memory_cache_size: 500,
+            enable_disk_cache: false,
+            ..Default::default()
+        };
         assign_cache(&mut target, &serde_json::json!({"memory_cache_size": 999}))
             .expect("a partial cache patch must apply");
         assert_eq!(target.memory_cache_size, 999);
@@ -1953,11 +1959,8 @@ mod tests {
     fn test_unknown_cache_key_message_lists_derived_keys() {
         let serialized = serde_json::to_value(CacheConfig::default()).unwrap();
         let expected = expected_cache_keys(&serialized);
-        let err = assign_cache(
-            &mut CacheConfig::default(),
-            &serde_json::json!({"typo": 1}),
-        )
-        .expect_err("unknown cache subkey must be rejected");
+        let err = assign_cache(&mut CacheConfig::default(), &serde_json::json!({"typo": 1}))
+            .expect_err("unknown cache subkey must be rejected");
         assert!(err.contains(&expected), "{err}");
     }
 
@@ -1974,11 +1977,11 @@ mod tests {
             "A malformed override is reported to stderr instead of failing ",
             "hard"
         );
-        assert!(source.contains(corrected), "A2 corrected wording is missing");
-        let overclaim = concat!(
-            "rez raises `ConfigurationError` for the same ",
-            "condition"
+        assert!(
+            source.contains(corrected),
+            "A2 corrected wording is missing"
         );
+        let overclaim = concat!("rez raises `ConfigurationError` for the same ", "condition");
         assert!(
             !source.contains(overclaim),
             "A2 over-claim about rez equivalence is back"
