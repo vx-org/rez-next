@@ -363,6 +363,10 @@ jobs:
     name: Python Binding Tests (maturin + pytest)
     runs-on: ubuntu-latest
     strategy:
+      # Do not cancel the other matrix legs when one fails; each version's
+      # result should stand on its own so a single failure is not hidden behind
+      # a "cancelled" sibling.
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.12"]
     steps:
@@ -378,7 +382,11 @@ jobs:
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin pytest pytest-benchmark
+          # pytest 9.2 removed the private Function._nodeid attribute that
+          # pytest-benchmark still reads (AttributeError at benchmark fixture
+          # setup). Keep pytest on the 9.1 line until pytest-benchmark ships a
+          # compatible release; 9.1.1 works with both 5.2.3 and 5.3.0.
+          pip install maturin "pytest>=8,<9.2" pytest-benchmark
           echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> "$GITHUB_ENV"
           echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
       - name: Lint Python package
@@ -392,7 +400,9 @@ jobs:
         run: pip install ruff==0.15.21 && ruff check scripts/release.py tests/scripts/
       - name: Run vx extension script tests
         # No rez_next import required: the script's own logic is covered here.
-        run: pip install pytest && pytest tests/scripts -v --tb=short
+        # Keep the same pytest pin as the venv setup so this step never upgrades
+        # the shared venv to an incompatible pytest.
+        run: pip install "pytest>=8,<9.2" && pytest tests/scripts -v --tb=short
       - name: Build and install Python binding (dev mode)
         working-directory: crates/rez-next-python
         run: maturin develop --release
@@ -431,7 +441,9 @@ jobs:
           $venv = (Resolve-Path .venv).Path
           "$venv\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "VIRTUAL_ENV=$venv" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          & "$venv\Scripts\python.exe" -m pip install maturin pytest pytest-benchmark
+          # pytest 9.2 removed Function._nodeid, which pytest-benchmark reads
+          # during fixture setup. Stay below 9.2 until a compatible release.
+          & "$venv\Scripts\python.exe" -m pip install maturin "pytest>=8,<9.2" pytest-benchmark
       - name: Build and install Python binding
         working-directory: crates/rez-next-python
         run: maturin develop --release
