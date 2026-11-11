@@ -29,7 +29,7 @@ ahash = "0.8"
 smallvec = "1.15"
 futures = "0.3"
 dashmap = "6.1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 num_cpus = "1.17"
 tracing.workspace = true
 
