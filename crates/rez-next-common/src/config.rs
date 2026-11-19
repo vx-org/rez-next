@@ -81,19 +81,12 @@ pub struct RezCoreConfig {
     /// Terminal type
     pub terminal_emulator_command: String,
 
-    /// Packages implicitly added to every resolve (`implicit_packages`)
-    ///
-    /// Deliberate divergence: upstream rez 3.4.0 defaults this to
-    /// `["~platform=={system.platform}", "~arch=={system.arch}", "~os=={system.os}"]`,
-    /// but those are implicit-package request strings that rez-next cannot
-    /// parse yet. Defaulting to empty keeps the setting inert rather than
-    /// feeding unparseable requests into the solver; align with upstream once
-    /// that syntax is supported.
-    pub implicit_packages: Vec<String>,
-
     /// Environment variables treated as path-like and joined rather than
     /// replaced (`parent_variables`)
     pub parent_variables: Vec<String>,
+
+    /// Preserve the parent value for every variable touched by prepend/append.
+    pub all_parent_variables: bool,
 
     /// Environment variables replaced rather than appended to
     /// (`resetting_variables`)
@@ -182,10 +175,8 @@ impl Default for RezCoreConfig {
                 "xterm"
             }
             .to_string(),
-            // Upstream rez 3.4.0 defaults for the settings that were inert,
-            // except implicit_packages - see the note on that field.
-            implicit_packages: vec![],
             parent_variables: vec![],
+            all_parent_variables: false,
             resetting_variables: vec![],
             env_var_separators: default_env_var_separators(),
             platform_map: BTreeMap::new(),
@@ -632,6 +623,7 @@ impl RezCoreConfig {
             // Settings that were declared but never read; now overridable too.
             "implicit_packages" => assign_str_list(&mut self.implicit_packages, &value),
             "parent_variables" => assign_str_list(&mut self.parent_variables, &value),
+            "all_parent_variables" => assign(&mut self.all_parent_variables, &value),
             "resetting_variables" => assign_str_list(&mut self.resetting_variables, &value),
             "env_var_separators" => assign(&mut self.env_var_separators, &value),
             "platform_map" => assign(&mut self.platform_map, &value),
@@ -875,7 +867,7 @@ fn coerce_env_value(key: &str, raw: &str) -> serde_json::Value {
                     .collect(),
             )
         }
-        "default_relocatable" => parse_env_bool(raw),
+        "all_parent_variables" | "default_relocatable" => parse_env_bool(raw),
         "use_rust_version" | "use_rust_solver" | "use_rust_repository" | "rust_fallback" => {
             parse_env_bool(raw)
         }
@@ -1720,9 +1712,13 @@ mod tests {
     #[test]
     fn test_previously_inert_settings_have_upstream_defaults() {
         let cfg = RezCoreConfig::default();
-        // implicit_packages stays empty by design; see the field's doc comment.
-        assert!(cfg.implicit_packages.is_empty());
+        let system = SystemInfo::detect();
+        assert_eq!(
+            cfg.implicit_packages,
+            system.implicit_packages().into_iter().collect::<Vec<_>>()
+        );
         assert!(cfg.parent_variables.is_empty());
+        assert!(!cfg.all_parent_variables);
         assert!(cfg.resetting_variables.is_empty());
         assert!(cfg.platform_map.is_empty());
         assert!(cfg.default_relocatable);

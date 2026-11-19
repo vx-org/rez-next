@@ -146,8 +146,9 @@ impl PyResolvedContext {
         context.resolved_packages = resolution
             .resolved_packages
             .into_iter()
-            .map(|info| info.materialized_package())
-            .collect();
+            .map(|info| info.try_materialized_package())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
         context.resolved_ephemerals = resolution
             .resolved_ephemerals
             .iter()

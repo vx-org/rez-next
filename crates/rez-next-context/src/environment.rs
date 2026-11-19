@@ -300,8 +300,7 @@ impl EnvironmentManager {
                             2 => version.patch(),
                             _ => None,
                         })
-                        .unwrap_or_default()
-                        .to_string(),
+                        .map_or_else(String::new, |component| component.to_string()),
                 ),
                 source_package: Some(package.name.clone()),
                 priority,

@@ -818,14 +818,12 @@ mod tests {
 
     #[test]
     fn test_configured_implicit_requirements_expand_system_values_and_can_be_disabled() {
-        let config = RezCoreConfig {
-            implicit_packages: vec![
-                "~platform=={system.platform}".to_string(),
-                "~arch=={system.arch}".to_string(),
-                "~os=={system.os}".to_string(),
-            ],
-            ..RezCoreConfig::default()
-        };
+        let mut config = RezCoreConfig::default();
+        config.implicit_packages = vec![
+            "~platform=={system.platform}".to_string(),
+            "~arch=={system.arch}".to_string(),
+            "~os=={system.os}".to_string(),
+        ];
         let system = SystemInfo {
             platform: "test-platform".to_string(),
             arch: "test-arch".to_string(),
