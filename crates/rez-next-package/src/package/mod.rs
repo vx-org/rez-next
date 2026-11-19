@@ -12,7 +12,7 @@ pub use requirement::PackageRequirement;
 pub use test_runner::{
     PackageTestResults, PackageTestRunner, TestDefinition, TestResult, TestStatus,
 };
-pub use types::Package;
+pub use types::{Package, PackageTestDefinition, TestCommand, TestVariantFilter};
 
 #[cfg(test)]
 #[path = "tests.rs"]

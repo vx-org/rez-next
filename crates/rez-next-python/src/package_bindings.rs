@@ -2,9 +2,85 @@
 
 use crate::version_bindings::PyVersion;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict};
 use rez_next_package::serialization::PackageFormat;
-use rez_next_package::{Package, PackageRequirement};
+use rez_next_package::{
+    Package, PackageRequirement, PackageTestDefinition, TestCommand, TestVariantFilter,
+};
+
+fn extract_package_test_definition(value: &Bound<'_, PyAny>) -> PyResult<PackageTestDefinition> {
+    if let Ok(command) = value.extract::<String>() {
+        return Ok(PackageTestDefinition::from_command(TestCommand::String(
+            command,
+        )));
+    }
+    if let Ok(arguments) = value.extract::<Vec<String>>() {
+        return Ok(PackageTestDefinition::from_command(TestCommand::List(
+            arguments,
+        )));
+    }
+
+    let definition = value.cast::<PyDict>()?;
+    let command_value = definition
+        .get_item("command")?
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("test is missing command"))?;
+    let command = if let Ok(command) = command_value.extract::<String>() {
+        TestCommand::String(command)
+    } else {
+        TestCommand::List(command_value.extract::<Vec<String>>()?)
+    };
+    let requires = definition
+        .get_item("requires")?
+        .map(|value| value.extract::<Vec<String>>())
+        .transpose()?
+        .unwrap_or_default();
+    let run_on = match definition.get_item("run_on")? {
+        None => vec!["default".to_string()],
+        Some(value) => value
+            .extract::<String>()
+            .map(|tag| vec![tag])
+            .or_else(|_| value.extract::<Vec<String>>())?,
+    };
+    let on_variants = match definition.get_item("on_variants")? {
+        None => None,
+        Some(value) => {
+            if let Ok(enabled) = value.extract::<bool>() {
+                Some(TestVariantFilter::Enabled(enabled))
+            } else {
+                let filter = value.cast::<PyDict>()?;
+                let kind = filter
+                    .get_item("type")?
+                    .and_then(|value| value.extract::<String>().ok())
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "on_variants filter is missing type",
+                        )
+                    })?;
+                if kind != "requires" {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unsupported on_variants type '{kind}'"
+                    )));
+                }
+                let requirements = filter
+                    .get_item("value")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "on_variants filter is missing value",
+                        )
+                    })?
+                    .extract::<Vec<String>>()?;
+                Some(TestVariantFilter::Requires(requirements))
+            }
+        }
+    };
+
+    Ok(PackageTestDefinition {
+        command,
+        requires,
+        run_on,
+        on_variants,
+    })
+}
 
 /// Python-accessible Package class, compatible with rez.packages.Package
 #[pyclass(name = "Package", from_py_object)]
@@ -424,7 +500,13 @@ impl PyPackage {
 
         // Extract tests dict
         if let Some(val) = data.get_item("tests")? {
-            pkg.tests = val.extract()?;
+            let tests = val.cast::<PyDict>()?;
+            for (name, definition) in tests.iter() {
+                pkg.tests.insert(
+                    name.extract::<String>()?,
+                    extract_package_test_definition(&definition)?,
+                );
+            }
         }
 
         // Extract config dict

@@ -293,7 +293,7 @@ fn display_package_yaml(package: &Package, args: &ViewArgs) -> RezCoreResult<()>
         if !package.tests.is_empty() {
             println!("tests:");
             for (key, value) in &package.tests {
-                println!("  {}: {}", key, value);
+                println!("  {}: {}", key, value.command.as_string());
             }
         }
     }
@@ -392,7 +392,7 @@ fn display_package_python(package: &Package, args: &ViewArgs) -> RezCoreResult<(
         if !package.tests.is_empty() {
             println!("tests = {{");
             for (key, value) in &package.tests {
-                println!("    \"{}\": \"{}\",", key, value);
+                println!("    \"{}\": \"{}\",", key, value.command.as_string());
             }
             println!("}}");
         }

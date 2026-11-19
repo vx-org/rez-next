@@ -6,9 +6,11 @@ use crate::{
 };
 use rez_next_common::RezCoreError;
 use rez_next_context::{ContextConfig, EnvironmentManager, ShellExecutor, ShellType};
+use rez_next_package::{TestCommand, TestVariantFilter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -545,19 +547,7 @@ impl BuildProcess {
         _config: &BuildConfig,
     ) -> Result<(bool, String, String), RezCoreError> {
         let build_system = BuildSystem::detect_with_package(&request.source_dir, &request.package)?;
-        let mut install_result = build_system.install(request, environment).await?;
-
-        if install_result.success
-            && let Some(definition) = Self::install_package_definition(request, environment).await?
-        {
-            if !install_result.output.is_empty() {
-                install_result.output.push('\n');
-            }
-            install_result.output.push_str(&format!(
-                "Installed package definition: {}",
-                definition.display()
-            ));
-        }
+        let install_result = build_system.install(request, environment).await?;
 
         Ok((
             install_result.success,
@@ -570,25 +560,10 @@ impl BuildProcess {
         request: &BuildRequest,
         environment: &BuildEnvironment,
     ) -> Result<Option<PathBuf>, RezCoreError> {
-        let source = request
-            .package
-            .filepath
-            .as_deref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_file())
-            .or_else(|| {
-                ["package.py", "package.yaml", "package.yml"]
-                    .iter()
-                    .map(|name| request.source_dir.join(name))
-                    .find(|path| path.is_file())
-            });
-        let Some(source) = source else {
+        let Some((source, destination)) = Self::package_definition_paths(request, environment)
+        else {
             return Ok(None);
         };
-        let Some(file_name) = source.file_name() else {
-            return Ok(None);
-        };
-        let destination = environment.get_install_dir().join(file_name);
         if source == destination {
             return Ok(None);
         }
@@ -605,28 +580,44 @@ impl BuildProcess {
         Ok(Some(destination))
     }
 
+    fn package_definition_paths(
+        request: &BuildRequest,
+        environment: &BuildEnvironment,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let source = request
+            .package
+            .filepath
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                ["package.py", "package.yaml", "package.yml"]
+                    .iter()
+                    .map(|name| request.source_dir.join(name))
+                    .find(|path| path.is_file())
+            })?;
+        let file_name = source.file_name()?.to_owned();
+        Some((source, environment.get_install_dir().join(file_name)))
+    }
+
     async fn execute_package_test_step(
         request: &BuildRequest,
         environment: &BuildEnvironment,
     ) -> Result<(bool, String, String), RezCoreError> {
+        let install_dir = environment.get_install_dir();
+        let definition_destination = Self::package_definition_paths(request, environment)
+            .map(|(_, destination)| destination);
         if request.package.tests.is_empty() {
-            return Ok((true, "No package tests defined".to_string(), String::new()));
+            let output = match Self::install_package_definition(request, environment).await? {
+                Some(definition) => format!(
+                    "No package tests defined\nInstalled package definition: {}",
+                    definition.display()
+                ),
+                None => "No package tests defined".to_string(),
+            };
+            return Ok((true, output, String::new()));
         }
 
-        let install_dir = environment.get_install_dir();
-        let mut package = request.package.clone();
-        package.filepath = Some(
-            install_dir
-                .join("package.py")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        if let Some(pre_test_commands) = package.pre_test_commands.take() {
-            package.post_commands = Some(match package.post_commands.take() {
-                Some(post_commands) => format!("{post_commands}\n{pre_test_commands}"),
-                None => pre_test_commands,
-            });
-        }
         let mut base_environment = std::collections::HashMap::new();
         for (name, value) in std::env::vars().chain(environment.get_env_vars().clone()) {
             let name = if cfg!(windows) {
@@ -643,23 +634,97 @@ impl BuildProcess {
             },
             base_environment,
         );
-        let test_environment = manager.generate_environment(&[package]).await?;
-        let executor = ShellExecutor::with_shell(ShellType::detect())
-            .with_environment(test_environment)
-            .with_working_directory(request.source_dir.clone());
-
         let mut tests: Vec<_> = request.package.tests.iter().collect();
         tests.sort_by_key(|(name, _)| *name);
         let mut output = String::new();
-        for (name, command) in tests {
+        for (name, definition) in tests {
+            if !package_test_is_selected(request, definition) {
+                output.push_str(&format!("Skipping package test '{name}'\n"));
+                continue;
+            }
+
+            let mut package = request.package.clone();
+            package.filepath = definition_destination
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            if let Some(pre_test_commands) = package.pre_test_commands.take() {
+                package.post_commands = Some(match package.post_commands.take() {
+                    Some(post_commands) => format!("{post_commands}\n{pre_test_commands}"),
+                    None => pre_test_commands,
+                });
+            }
+            package.requires.extend(definition.requires.iter().cloned());
+            let test_environment = match manager.generate_environment(&[package]).await {
+                Ok(environment) => environment,
+                Err(error) => {
+                    let rollback_error = Self::rollback_install_dir(install_dir).await;
+                    return Ok((
+                        false,
+                        output,
+                        append_rollback_error(error.to_string(), rollback_error),
+                    ));
+                }
+            };
+            let executor = ShellExecutor::with_shell(ShellType::detect())
+                .with_environment(test_environment.clone())
+                .with_working_directory(request.source_dir.clone());
             let root = install_dir.to_string_lossy();
-            let command = command
-                .replace("{this.root}", &root)
-                .replace("{this.base}", &root)
-                .replace("{root}", &root)
-                .replace("{base}", &root);
-            output.push_str(&format!("Running package test '{name}': {command}\n"));
-            let result = executor.execute(&command).await?;
+            let expand = |value: &str| {
+                value
+                    .replace("{this.root}", &root)
+                    .replace("{this.base}", &root)
+                    .replace("{root}", &root)
+                    .replace("{base}", &root)
+            };
+            let result = match &definition.command {
+                TestCommand::String(command) => {
+                    let command = expand(command);
+                    output.push_str(&format!("Running package test '{name}': {command}\n"));
+                    executor.execute(&command).await
+                }
+                TestCommand::List(arguments) => {
+                    let arguments: Vec<_> = arguments.iter().map(|arg| expand(arg)).collect();
+                    let Some(program) = arguments.first() else {
+                        let errors = format!("Package test '{name}' has an empty argv command");
+                        let rollback_error = Self::rollback_install_dir(install_dir).await;
+                        return Ok((false, output, append_rollback_error(errors, rollback_error)));
+                    };
+                    output.push_str(&format!(
+                        "Running package test '{name}': {}\n",
+                        arguments.join(" ")
+                    ));
+                    let started_at = Instant::now();
+                    let result = tokio::process::Command::new(program)
+                        .args(&arguments[1..])
+                        .current_dir(&request.source_dir)
+                        .env_clear()
+                        .envs(&test_environment)
+                        .output()
+                        .await
+                        .map_err(|error| {
+                            RezCoreError::ExecutionError(format!(
+                                "Failed to execute package test '{name}': {error}"
+                            ))
+                        });
+                    result.map(|result| rez_next_context::CommandResult {
+                        exit_code: result.status.code().unwrap_or(-1),
+                        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+                        execution_time_ms: started_at.elapsed().as_millis() as u64,
+                    })
+                }
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let rollback_error = Self::rollback_install_dir(install_dir).await;
+                    return Ok((
+                        false,
+                        output,
+                        append_rollback_error(error.to_string(), rollback_error),
+                    ));
+                }
+            };
             output.push_str(&result.stdout);
             if !result.is_success() {
                 let errors = if result.stderr.trim().is_empty() {
@@ -670,11 +735,39 @@ impl BuildProcess {
                 } else {
                     result.stderr
                 };
-                return Ok((false, output, errors));
+                let rollback_error = Self::rollback_install_dir(install_dir).await;
+                return Ok((false, output, append_rollback_error(errors, rollback_error)));
             }
         }
 
-        Ok((true, output, String::new()))
+        match Self::install_package_definition(request, environment).await {
+            Ok(Some(definition)) => {
+                output.push_str(&format!(
+                    "Installed package definition: {}\n",
+                    definition.display()
+                ));
+                Ok((true, output, String::new()))
+            }
+            Ok(None) => Ok((true, output, String::new())),
+            Err(error) => {
+                let rollback_error = Self::rollback_install_dir(install_dir).await;
+                Ok((
+                    false,
+                    output,
+                    append_rollback_error(error.to_string(), rollback_error),
+                ))
+            }
+        }
+    }
+
+    async fn rollback_install_dir(install_dir: &std::path::Path) -> Option<String> {
+        if !install_dir.exists() {
+            return None;
+        }
+        tokio::fs::remove_dir_all(install_dir)
+            .await
+            .err()
+            .map(|error| format!("Failed to roll back installed payload: {error}"))
     }
 
     /// Execute cleanup step
@@ -694,6 +787,38 @@ impl BuildProcess {
         }
 
         Ok((true, "Cleanup completed".to_string(), String::new()))
+    }
+}
+
+fn package_test_is_selected(
+    request: &BuildRequest,
+    definition: &rez_next_package::PackageTestDefinition,
+) -> bool {
+    let run_on = if request.options.release_mode {
+        "pre_release"
+    } else {
+        "default"
+    };
+    if !definition.run_on.iter().any(|tag| tag == run_on) {
+        return false;
+    }
+
+    match definition.on_variants.as_ref() {
+        Some(TestVariantFilter::Enabled(true)) => true,
+        Some(filter @ TestVariantFilter::Requires(_)) => {
+            filter.matches_variant_requires(request.variant_requires.as_deref().unwrap_or_default())
+        }
+        Some(TestVariantFilter::Enabled(false)) | None => {
+            request.package.variants.len() <= 1
+                || request.variant_index.is_none_or(|index| index == 0)
+        }
+    }
+}
+
+fn append_rollback_error(errors: String, rollback_error: Option<String>) -> String {
+    match rollback_error {
+        Some(rollback_error) => format!("{errors}\n{rollback_error}"),
+        None => errors,
     }
 }
 

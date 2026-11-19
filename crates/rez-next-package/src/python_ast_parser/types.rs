@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::package::PackageTestDefinition;
+
 /// Context for tracking variables and imports during parsing
 #[derive(Debug, Default)]
 pub(crate) struct ParsingContext {
@@ -44,7 +46,7 @@ pub(crate) struct PackageData {
     pub post_commands: Option<String>,
     pub pre_test_commands: Option<String>,
     pub pre_build_commands: Option<String>,
-    pub tests: HashMap<String, String>,
+    pub tests: HashMap<String, PackageTestDefinition>,
     pub requires_rez_version: Option<String>,
     pub uuid: Option<String>,
     pub authors: Vec<String>,

@@ -34,7 +34,7 @@ impl PythonAstParser {
         }
     }
 
-    /// Parse a package.py file using Python AST
+    /// Parse a package.py file using Python AST.
     pub fn parse_package_py(content: &str) -> Result<Package, RezCoreError> {
         let mut parser = Self::new();
         parser.parse_package_py_with_context(content)
@@ -431,6 +431,7 @@ impl PythonAstParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{TestCommand, TestVariantFilter};
 
     #[test]
     fn test_parse_package_with_new_fields() {
@@ -749,8 +750,69 @@ tests = {
         .expect("structured test metadata should preserve its command");
 
         assert_eq!(
-            package.tests.get("unit").map(String::as_str),
-            Some("python -m pytest")
+            package
+                .tests
+                .get("unit")
+                .map(|test| test.command.as_string()),
+            Some("python -m pytest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_package_test_definitions_preserve_all_supported_shapes() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "test_package"
+version = "1.0.0"
+tests = {
+    "shell": "python -m unittest",
+    "argv": ["python", "-m", "pytest"],
+    "structured": {
+        "command": ["python", "-m", "coverage"],
+        "requires": ["coverage-7"],
+        "run_on": ["ci", "nightly"],
+        "on_variants": {"type": "requires", "value": ["python-3.11"]},
+    },
+}
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            package.tests["shell"].command,
+            TestCommand::String(ref command) if command == "python -m unittest"
+        ));
+        assert!(matches!(
+            package.tests["argv"].command,
+            TestCommand::List(ref command) if command == &["python", "-m", "pytest"]
+        ));
+        let structured = &package.tests["structured"];
+        assert_eq!(structured.requires, vec!["coverage-7"]);
+        assert_eq!(structured.run_on, vec!["ci", "nightly"]);
+        assert_eq!(
+            structured.on_variants,
+            Some(TestVariantFilter::Requires(vec!["python-3.11".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_package_test_run_on_accepts_a_single_tag() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "test_package"
+tests = {
+    "release": {
+        "command": "python -m pytest",
+        "run_on": "pre_release",
+    },
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            package.tests["release"].run_on,
+            vec!["pre_release".to_string()]
         );
     }
 
@@ -768,8 +830,11 @@ tests = {
         .unwrap();
 
         assert_eq!(
-            package.tests.get("import").map(String::as_str),
-            Some(r#"python -c "import test_package; print(test_package.VALUE)""#)
+            package
+                .tests
+                .get("import")
+                .map(|test| test.command.as_string()),
+            Some(r#"python -c "import test_package; print(test_package.VALUE)""#.to_string())
         );
     }
 }

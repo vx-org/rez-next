@@ -2,6 +2,7 @@
 
 use super::PythonAstParser;
 use super::types::PythonValue;
+use crate::package::{PackageTestDefinition, TestCommand, TestVariantFilter};
 use rez_next_common::RezCoreError;
 use rustpython_ast::{Constant, Expr};
 use std::collections::HashMap;
@@ -140,57 +141,149 @@ impl PythonAstParser {
         }
     }
 
-    /// Extract tests — a dictionary mapping test names to command strings
+    /// Extract Rez-compatible test definitions.
     pub(super) fn extract_tests(
         &self,
         expr: &Expr,
-    ) -> Result<HashMap<String, String>, RezCoreError> {
-        match self.evaluate_expression(expr) {
-            Ok(PythonValue::Dict(dict)) => {
-                let mut result = HashMap::new();
-                for (key, value) in dict {
-                    let value_str = match value {
-                        PythonValue::String(s) => s,
-                        PythonValue::Dict(mut definition) => match definition.remove("command") {
-                            Some(PythonValue::String(command)) => command,
-                            Some(_) => {
-                                return Err(RezCoreError::PackageParse(format!(
-                                    "Structured test command for '{key}' must be a string"
-                                )));
-                            }
-                            None => {
-                                return Err(RezCoreError::PackageParse(format!(
-                                    "Structured test definition for '{key}' is missing 'command'"
-                                )));
-                            }
-                        },
-                        _ => {
-                            return Err(RezCoreError::PackageParse(format!(
-                                "Unsupported test definition for '{key}'"
-                            )));
-                        }
-                    };
-                    result.insert(key, value_str);
-                }
-                Ok(result)
+    ) -> Result<HashMap<String, PackageTestDefinition>, RezCoreError> {
+        let PythonValue::Dict(definitions) = self.evaluate_expression(expr)? else {
+            return Err(RezCoreError::PackageParse(format!(
+                "Expected dictionary for tests, got: {:?}",
+                expr
+            )));
+        };
+
+        definitions
+            .into_iter()
+            .map(|(name, value)| {
+                self.extract_test_definition(&name, value)
+                    .map(|definition| (name, definition))
+            })
+            .collect()
+    }
+
+    fn extract_test_definition(
+        &self,
+        name: &str,
+        value: PythonValue,
+    ) -> Result<PackageTestDefinition, RezCoreError> {
+        match value {
+            PythonValue::String(command) => Ok(PackageTestDefinition::from_command(
+                TestCommand::String(command),
+            )),
+            PythonValue::List(arguments) => Ok(PackageTestDefinition::from_command(
+                TestCommand::List(Self::string_list_from_value(PythonValue::List(arguments))?),
+            )),
+            PythonValue::Dict(mut definition) => {
+                let command = definition.remove("command").ok_or_else(|| {
+                    RezCoreError::PackageParse(format!(
+                        "Structured test definition for '{name}' is missing 'command'"
+                    ))
+                })?;
+                let command = Self::test_command_from_value(name, command)?;
+                let requires = definition
+                    .remove("requires")
+                    .map(|value| Self::test_string_list_from_value(name, "requires", value))
+                    .transpose()?
+                    .unwrap_or_default();
+                let run_on = definition
+                    .remove("run_on")
+                    .map(|value| Self::test_run_on_from_value(name, value))
+                    .transpose()?
+                    .unwrap_or_else(|| vec!["default".to_string()]);
+                let on_variants = definition
+                    .remove("on_variants")
+                    .map(|value| Self::test_variant_filter_from_value(name, value))
+                    .transpose()?;
+
+                Ok(PackageTestDefinition {
+                    command,
+                    requires,
+                    run_on,
+                    on_variants,
+                })
             }
-            _ => match expr {
-                Expr::Dict(dict) => {
-                    let mut result = HashMap::new();
-                    for (key, value) in dict.keys.iter().zip(dict.values.iter()) {
-                        if let Some(key) = key {
-                            let key_str = self.extract_string_value(key)?;
-                            let value_str = self.extract_string_value(value)?;
-                            result.insert(key_str, value_str);
-                        }
+            _ => Err(RezCoreError::PackageParse(format!(
+                "Unsupported test definition for '{name}'"
+            ))),
+        }
+    }
+
+    fn test_command_from_value(
+        name: &str,
+        value: PythonValue,
+    ) -> Result<TestCommand, RezCoreError> {
+        match value {
+            PythonValue::String(command) => Ok(TestCommand::String(command)),
+            PythonValue::List(arguments) => Ok(TestCommand::List(Self::string_list_from_value(
+                PythonValue::List(arguments),
+            )?)),
+            _ => Err(RezCoreError::PackageParse(format!(
+                "Test command for '{name}' must be a string or list of strings"
+            ))),
+        }
+    }
+
+    fn test_string_list_from_value(
+        name: &str,
+        field: &str,
+        value: PythonValue,
+    ) -> Result<Vec<String>, RezCoreError> {
+        match value {
+            PythonValue::List(values) => values
+                .into_iter()
+                .map(|value| match value {
+                    PythonValue::String(value) => Ok(value),
+                    _ => Err(RezCoreError::PackageParse(format!(
+                        "Test '{name}' field '{field}' must contain only strings"
+                    ))),
+                })
+                .collect(),
+            _ => Err(RezCoreError::PackageParse(format!(
+                "Test '{name}' field '{field}' must be a list of strings"
+            ))),
+        }
+    }
+
+    fn test_run_on_from_value(name: &str, value: PythonValue) -> Result<Vec<String>, RezCoreError> {
+        match value {
+            PythonValue::String(tag) => Ok(vec![tag]),
+            value => Self::test_string_list_from_value(name, "run_on", value),
+        }
+    }
+
+    fn test_variant_filter_from_value(
+        name: &str,
+        value: PythonValue,
+    ) -> Result<TestVariantFilter, RezCoreError> {
+        match value {
+            PythonValue::Boolean(enabled) => Ok(TestVariantFilter::Enabled(enabled)),
+            PythonValue::Dict(mut filter) => {
+                let kind = match filter.remove("type") {
+                    Some(PythonValue::String(kind)) => kind,
+                    _ => {
+                        return Err(RezCoreError::PackageParse(format!(
+                            "Test '{name}' on_variants filter requires type='requires'"
+                        )));
                     }
-                    Ok(result)
+                };
+                if kind != "requires" {
+                    return Err(RezCoreError::PackageParse(format!(
+                        "Unsupported test '{name}' on_variants type '{kind}'"
+                    )));
                 }
-                _ => Err(RezCoreError::PackageParse(format!(
-                    "Expected dictionary for tests, got: {:?}",
-                    expr
-                ))),
-            },
+                let value = filter.remove("value").ok_or_else(|| {
+                    RezCoreError::PackageParse(format!(
+                        "Test '{name}' on_variants requires a value list"
+                    ))
+                })?;
+                Ok(TestVariantFilter::Requires(
+                    Self::test_string_list_from_value(name, "on_variants.value", value)?,
+                ))
+            }
+            _ => Err(RezCoreError::PackageParse(format!(
+                "Test '{name}' on_variants must be a boolean or requires filter"
+            ))),
         }
     }
 }

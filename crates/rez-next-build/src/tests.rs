@@ -7,8 +7,8 @@
 mod build_tests {
     use crate::*;
     use rez_next_context::{ContextConfig, ContextStatus, EnvironmentManager, ResolvedContext};
-    use rez_next_package::Package;
     use rez_next_package::PackageRequirement;
+    use rez_next_package::{Package, PackageTestDefinition, TestCommand};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::Command;
@@ -776,10 +776,14 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
 
     #[tokio::test]
     async fn test_custom_build_fails_when_package_test_fails() {
-        let mut manager = BuildManager::new();
         let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let mut config = BuildConfig::default();
+        config.build_dir = tmp.path().join("build");
+        let mut manager = BuildManager::with_config(config);
         std::fs::write(
-            tmp.path().join("package.py"),
+            source_dir.join("package.py"),
             "name = 'testedpkg'\nversion = '1.0.0'\n",
         )
         .unwrap();
@@ -790,14 +794,59 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
         } else {
             "echo package-test-failed >&2; exit 7"
         };
-        pkg.tests.insert("unit".to_string(), command.to_string());
-        let request = make_request_with_python_context(pkg, tmp.path().to_path_buf(), &tmp).await;
+        pkg.tests.insert(
+            "unit".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String(command.to_string())),
+        );
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
 
         let ids = manager.start_build(request).await.unwrap();
         let result = manager.wait_for_build(&ids[0]).await.unwrap();
 
         assert!(!result.success, "a failed package test must fail the build");
         assert!(result.errors.contains("package-test-failed"), "{result:?}");
+        assert!(
+            !tmp.path().join("build/testedpkg/install").exists(),
+            "a failed package test must roll back the installed payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_package_definition_is_published_after_package_tests_pass() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let mut config = BuildConfig::default();
+        config.build_dir = tmp.path().join("build");
+        let mut manager = BuildManager::with_config(config);
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'publishedpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+
+        let mut pkg = make_package("publishedpkg", "1.0.0");
+        pkg.tests.insert(
+            "definition-order".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String(
+                "python -c \"import os,sys; sys.exit(os.path.exists(os.path.join(os.environ['REZ_BUILD_INSTALL_PATH'], 'package.py')))\""
+                    .to_string(),
+            )),
+        );
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "package tests should run before definition publish: {}",
+            result.errors
+        );
+        assert!(
+            tmp.path()
+                .join("build/publishedpkg/install/package.py")
+                .is_file()
+        );
     }
 
     #[tokio::test]
@@ -812,7 +861,10 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
 
         let mut pkg = make_package("testedpkg", "1.0.0");
         pkg.commands = Some("unsupported_rex_operation()".to_string());
-        pkg.tests.insert("unit".to_string(), "echo ok".to_string());
+        pkg.tests.insert(
+            "unit".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String("echo ok".to_string())),
+        );
         let request = make_request_with_python_context(pkg, tmp.path().to_path_buf(), &tmp).await;
 
         let ids = manager.start_build(request).await.unwrap();

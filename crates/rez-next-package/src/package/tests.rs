@@ -3,7 +3,7 @@
 use rez_next_version::Version;
 
 use super::requirement::PackageRequirement;
-use super::types::Package;
+use super::types::{Package, TestVariantFilter};
 
 fn ver(s: &str) -> Version {
     Version::parse(s).unwrap()
@@ -110,6 +110,16 @@ fn test_conflict_takes_priority_over_weak() {
     let req = PackageRequirement::parse("!python").unwrap();
     assert!(req.conflict);
     assert!(!req.weak);
+}
+
+#[test]
+fn test_variant_filter_matches_positive_and_conflict_requirements() {
+    let filter = TestVariantFilter::Requires(vec!["python-3.11".to_string(), "!maya".to_string()]);
+    assert!(filter.matches_variant_requires(&["python-3.11".to_string()]));
+    assert!(
+        !filter.matches_variant_requires(&["python-3.11".to_string(), "maya-2024".to_string(),])
+    );
+    assert!(!filter.matches_variant_requires(&["python-3.10".to_string()]));
 }
 
 #[test]

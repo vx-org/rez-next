@@ -8,7 +8,7 @@
 //! See the Python bindings (`rez_next._native.test`) for usage examples.
 
 use crate::serialization::PackageSerializer;
-use crate::types::Package;
+use crate::types::{Package, TestCommand, TestVariantFilter};
 use rez_next_common::{RezCoreResult, error::RezCoreError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,17 +31,6 @@ pub enum TestStatus {
     Error,
 }
 
-// ── Test Command ───────────────────────────────────────────────────────────
-
-/// Test command format.
-#[derive(Debug, Clone)]
-pub enum TestCommand {
-    /// Simple string command (will be executed via shell).
-    String(String),
-    /// List of arguments (will be executed directly without shell).
-    List(Vec<String>),
-}
-
 // ── Test Definition ────────────────────────────────────────────────────────
 
 /// Test definition loaded from `package.py` `tests` field.
@@ -56,7 +45,7 @@ pub struct TestDefinition {
     /// Run tags for this test (e.g., "default", "ci", "nightly").
     pub run_on: Vec<String>,
     /// Whether to run on variants (False = once on preferred variant).
-    pub on_variants: Option<bool>,
+    pub on_variants: Option<TestVariantFilter>,
 }
 
 // ── Test Result ────────────────────────────────────────────────────────────
@@ -189,27 +178,15 @@ impl PackageTestRunner {
 
     /// Extract test definitions from a loaded package.
     fn extract_tests_from_package(&mut self, package: &Package) {
-        // Package.tests is HashMap<String, String> where value is the command
-        for (test_name, command_str) in &package.tests {
-            let cmd = if command_str.contains(' ') {
-                // Multi-word command, split it
-                let parts: Vec<String> = command_str
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-                TestCommand::List(parts)
-            } else {
-                TestCommand::String(command_str.clone())
-            };
-
+        for (test_name, definition) in &package.tests {
             self.test_definitions.insert(
                 test_name.clone(),
                 TestDefinition {
                     name: test_name.clone(),
-                    command: cmd,
-                    requires: vec![],
-                    run_on: vec!["default".to_string()],
-                    on_variants: None,
+                    command: definition.command.clone(),
+                    requires: definition.requires.clone(),
+                    run_on: definition.run_on.clone(),
+                    on_variants: definition.on_variants.clone(),
                 },
             );
         }
@@ -243,7 +220,14 @@ impl PackageTestRunner {
         let available_tests = self.get_test_names()?;
 
         if requested.is_empty() {
-            return Ok(available_tests);
+            return Ok(available_tests
+                .into_iter()
+                .filter(|name| {
+                    self.test_definitions.get(name).is_some_and(|definition| {
+                        definition.run_on.iter().any(|tag| tag == "default")
+                    })
+                })
+                .collect());
         }
 
         let mut matched_tests = Vec::new();

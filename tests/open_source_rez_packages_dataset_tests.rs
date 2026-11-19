@@ -491,12 +491,18 @@ fn vx_style_package_exposes_tests_field() {
     assert_eq!(package.build_requires, vec!["python-3+"]);
     assert_eq!(package.private_build_requires, vec!["rez_builder-0"]);
     assert_eq!(
-        package.tests.get("artifact").map(String::as_str),
-        Some("python tests/check_artifact.py")
+        package
+            .tests
+            .get("artifact")
+            .map(|test| test.command.as_string()),
+        Some("python tests/check_artifact.py".to_string())
     );
     assert_eq!(
-        package.tests.get("zipfile").map(String::as_str),
-        Some("python tests/check_zipfile.py")
+        package
+            .tests
+            .get("zipfile")
+            .map(|test| test.command.as_string()),
+        Some("python tests/check_zipfile.py".to_string())
     );
 }
 

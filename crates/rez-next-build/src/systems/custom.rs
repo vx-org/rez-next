@@ -622,6 +622,9 @@ impl CustomBuildSystem {
                 | ".svn"
                 | "build"
                 | ".rez_build"
+                | "package.py"
+                | "package.yaml"
+                | "package.yml"
                 | "dist"
                 | "__pycache__"
                 | ".pytest_cache"
@@ -765,7 +768,6 @@ mod tests {
 
     #[test]
     fn test_should_not_skip_normal_files() {
-        assert!(!CustomBuildSystem::should_skip_file("package.py"));
         assert!(!CustomBuildSystem::should_skip_file("README.md"));
         assert!(!CustomBuildSystem::should_skip_file("main.py"));
         assert!(!CustomBuildSystem::should_skip_file("lib.so"));

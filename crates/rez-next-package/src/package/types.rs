@@ -1,7 +1,276 @@
 //! Package type definition.
 
 use rez_next_version::Version;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::HashMap;
+
+use super::requirement::PackageRequirement;
+
+fn default_test_run_on() -> Vec<String> {
+    vec!["default".to_string()]
+}
+
+fn deserialize_test_run_on<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawRunOn {
+        String(String),
+        List(Vec<String>),
+    }
+
+    match RawRunOn::deserialize(deserializer)? {
+        RawRunOn::String(tag) => Ok(vec![tag]),
+        RawRunOn::List(tags) => Ok(tags),
+    }
+}
+
+/// Command representation used by a package test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestCommand {
+    /// Execute a shell command string.
+    String(String),
+    /// Execute an argv command without a shell.
+    List(Vec<String>),
+}
+
+impl TestCommand {
+    /// Render the command for display and legacy callers.
+    pub fn as_string(&self) -> String {
+        match self {
+            Self::String(command) => command.clone(),
+            Self::List(arguments) => arguments.join(" "),
+        }
+    }
+}
+
+impl Serialize for TestCommand {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::String(command) => serializer.serialize_str(command),
+            Self::List(arguments) => arguments.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TestCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawCommand {
+            String(String),
+            List(Vec<String>),
+        }
+
+        match RawCommand::deserialize(deserializer)? {
+            RawCommand::String(command) => Ok(Self::String(command)),
+            RawCommand::List(arguments) => Ok(Self::List(arguments)),
+        }
+    }
+}
+
+/// Variant selection rule for a package test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestVariantFilter {
+    /// Run once without requiring a variant-specific match.
+    Enabled(bool),
+    /// Run on variants whose requirements include all listed requirements.
+    Requires(Vec<String>),
+}
+
+impl TestVariantFilter {
+    /// Check whether a variant's direct requirements satisfy this filter.
+    ///
+    /// Rez variant filters use requirement strings such as `python-3.11` and
+    /// `!maya`. The filter is evaluated against the direct requirements of the
+    /// selected variant, before the test environment is resolved.
+    pub fn matches_variant_requires(&self, variant_requires: &[String]) -> bool {
+        match self {
+            Self::Enabled(enabled) => *enabled,
+            Self::Requires(filters) => {
+                let variant_requirements: Vec<_> = variant_requires
+                    .iter()
+                    .filter_map(|requirement| PackageRequirement::parse(requirement).ok())
+                    .collect();
+
+                filters.iter().all(|filter| {
+                    let Ok(filter) = PackageRequirement::parse(filter) else {
+                        return false;
+                    };
+                    if filter.conflict {
+                        !variant_requirements.iter().any(|variant| {
+                            !variant.conflict && requirements_match(&filter, variant)
+                        })
+                    } else {
+                        variant_requirements.iter().any(|variant| {
+                            !variant.conflict && requirements_match(&filter, variant)
+                        })
+                    }
+                })
+            }
+        }
+    }
+}
+
+fn requirements_match(filter: &PackageRequirement, variant: &PackageRequirement) -> bool {
+    if filter.name != variant.name {
+        return false;
+    }
+
+    match filter.version_spec() {
+        None => true,
+        Some(filter_version) => variant.version_spec().is_some_and(|variant_version| {
+            if filter_version == variant_version {
+                return true;
+            }
+            let Ok(version) = Version::parse(variant_version) else {
+                return false;
+            };
+            filter.satisfied_by(&version)
+        }),
+    }
+}
+
+impl Serialize for TestVariantFilter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Enabled(enabled) => serializer.serialize_bool(*enabled),
+            Self::Requires(requirements) => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("TestVariantFilter", 2)?;
+                state.serialize_field("type", "requires")?;
+                state.serialize_field("value", requirements)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TestVariantFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawFilter {
+            Enabled(bool),
+            Requires {
+                #[serde(rename = "type")]
+                kind: String,
+                value: Vec<String>,
+            },
+        }
+
+        match RawFilter::deserialize(deserializer)? {
+            RawFilter::Enabled(enabled) => Ok(Self::Enabled(enabled)),
+            RawFilter::Requires { kind, value } if kind == "requires" => Ok(Self::Requires(value)),
+            RawFilter::Requires { kind, .. } => Err(de::Error::custom(format!(
+                "unsupported test on_variants type '{kind}'"
+            ))),
+        }
+    }
+}
+
+/// Rez-compatible definition for one package test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageTestDefinition {
+    /// Command to execute.
+    pub command: TestCommand,
+    /// Additional packages required by this test.
+    pub requires: Vec<String>,
+    /// Tags on which the test is selected.
+    pub run_on: Vec<String>,
+    /// Variant selection rule.
+    pub on_variants: Option<TestVariantFilter>,
+}
+
+impl PackageTestDefinition {
+    /// Build a legacy string test definition with Rez defaults.
+    pub fn from_command(command: TestCommand) -> Self {
+        Self {
+            command,
+            requires: Vec::new(),
+            run_on: default_test_run_on(),
+            on_variants: None,
+        }
+    }
+}
+
+impl Serialize for PackageTestDefinition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let is_simple = self.requires.is_empty()
+            && self.run_on == default_test_run_on()
+            && self.on_variants.is_none();
+        if is_simple {
+            return self.command.serialize(serializer);
+        }
+
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PackageTestDefinition", 4)?;
+        state.serialize_field("command", &self.command)?;
+        state.serialize_field("requires", &self.requires)?;
+        state.serialize_field("run_on", &self.run_on)?;
+        state.serialize_field("on_variants", &self.on_variants)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PackageTestDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawDefinition {
+            String(String),
+            List(Vec<String>),
+            Structured {
+                command: TestCommand,
+                #[serde(default)]
+                requires: Vec<String>,
+                #[serde(
+                    default = "default_test_run_on",
+                    deserialize_with = "deserialize_test_run_on"
+                )]
+                run_on: Vec<String>,
+                #[serde(default)]
+                on_variants: Option<TestVariantFilter>,
+            },
+        }
+
+        match RawDefinition::deserialize(deserializer)? {
+            RawDefinition::String(command) => Ok(Self::from_command(TestCommand::String(command))),
+            RawDefinition::List(arguments) => Ok(Self::from_command(TestCommand::List(arguments))),
+            RawDefinition::Structured {
+                command,
+                requires,
+                run_on,
+                on_variants,
+            } => Ok(Self {
+                command,
+                requires,
+                run_on,
+                on_variants,
+            }),
+        }
+    }
+}
 
 /// High-performance package representation compatible with rez
 #[derive(Debug, Clone, Default)]
@@ -41,7 +310,7 @@ pub struct Package {
     /// Pre build commands (executed before build)
     pub pre_build_commands: Option<String>,
     /// Package tests
-    pub tests: HashMap<String, String>,
+    pub tests: HashMap<String, PackageTestDefinition>,
     /// Required rez version
     pub requires_rez_version: Option<String>,
     /// Package UUID
