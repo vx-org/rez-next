@@ -39,6 +39,19 @@ branches.
 
 ## Known parity gaps
 
+## Console-script compatibility
+
+The official installers place the upstream `rez-*` entry-point names beside
+the `rez-next` and `rez` binaries. Implemented names dispatch to the matching
+Clap command, `rez-python` starts the host Python interpreter, and `rezolve`
+invokes the root `rez` interface. `rez-yaml2py` and `rez-selftest` retain the
+upstream spellings while dispatching to `yaml2py` and `self-test`.
+
+`rez-interpret`, `rez-memcache`, `rez-benchmark`, and `rez-pkg-ignore` fail
+with an explicit status message because their native implementations are not
+available. This keeps scripts from silently selecting an incompatible
+operation.
+
 These official Rez surfaces are not yet claimed as fully compatible:
 
 | Surface | Current boundary |

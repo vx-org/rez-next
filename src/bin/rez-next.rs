@@ -6,6 +6,7 @@
 use clap::Parser;
 use std::env;
 use std::process;
+use std::process::Command;
 
 // Import CLI from the library
 use rez_core::cli::{RezCli, RezCommand};
@@ -13,7 +14,21 @@ use rez_core::cli::{RezCli, RezCommand};
 fn main() {
     rez_core::cli::commands::completions::complete_from_env();
 
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    let entrypoint = entrypoint_name(&args);
+
+    if rez_core::cli::is_python_entrypoint(&entrypoint) {
+        run_python(&args[1..]);
+    }
+
+    if let Some(message) = rez_core::cli::unsupported_entrypoint_message(&entrypoint) {
+        eprintln!("Error: {message}");
+        process::exit(2);
+    }
+
+    if let Some(command) = rez_core::cli::subcommand_for_entrypoint(&entrypoint) {
+        args.insert(1, command.to_string());
+    }
 
     // Check if this is a command that supports grouped arguments (with '--')
     let grouped_command = args
@@ -25,12 +40,57 @@ fn main() {
         handle_grouped_command(args);
     } else {
         // Standard argument parsing
-        let cli = RezCli::parse();
-        if let Err(e) = cli.run() {
-            eprintln!("Error: {}", e);
-            process::exit(e.exit_code());
+        match RezCli::try_parse_from(args) {
+            Ok(cli) => {
+                if let Err(e) = cli.run() {
+                    eprintln!("Error: {}", e);
+                    process::exit(e.exit_code());
+                }
+            }
+            Err(error) => {
+                let code = if error.use_stderr() { 1 } else { 0 };
+                error.print().ok();
+                process::exit(code);
+            }
         }
     }
+}
+
+fn entrypoint_name(args: &[String]) -> String {
+    env::var("REZ_NEXT_ENTRYPOINT")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            args.first().and_then(|argument| {
+                std::path::Path::new(argument)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(str::to_string)
+            })
+        })
+        .unwrap_or_else(|| "rez-next".to_string())
+}
+
+fn run_python(args: &[String]) -> ! {
+    let candidates = if cfg!(windows) {
+        ["python", "py"]
+    } else {
+        ["python3", "python"]
+    };
+
+    for candidate in candidates {
+        match Command::new(candidate).args(args).status() {
+            Ok(status) => process::exit(status.code().unwrap_or(1)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!("Error: failed to start {candidate}: {error}");
+                process::exit(1);
+            }
+        }
+    }
+
+    eprintln!("Error: no Python interpreter was found for rez-python");
+    process::exit(1);
 }
 
 fn handle_grouped_command(args: Vec<String>) {

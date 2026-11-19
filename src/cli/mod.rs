@@ -12,6 +12,61 @@ use rez_next_common::{RezCoreError, error::RezCoreResult};
 pub mod commands;
 pub mod utils;
 
+/// Resolve a legacy `rez-*` console-script name to the corresponding clap
+/// subcommand. The installer sets `REZ_NEXT_ENTRYPOINT` for wrapper scripts,
+/// while Unix users may invoke the binary through a symlink.
+#[must_use]
+pub fn subcommand_for_entrypoint(name: &str) -> Option<&'static str> {
+    match name {
+        "rez-bind" => Some("bind"),
+        "rez-build" => Some("build"),
+        "rez-config" => Some("config"),
+        "rez-context" => Some("context"),
+        "rez-cp" => Some("cp"),
+        "rez-depends" => Some("depends"),
+        "rez-diff" => Some("diff"),
+        "rez-env" => Some("env"),
+        "rez-gui" => Some("gui"),
+        "rez-help" => Some("pkg-help"),
+        "rez-mv" => Some("mv"),
+        "rez-pip" => Some("pip"),
+        "rez-pkg-cache" => Some("pkg-cache"),
+        "rez-plugins" => Some("plugins"),
+        "rez-release" => Some("release"),
+        "rez-rm" => Some("rm"),
+        "rez-search" => Some("search"),
+        "rez-selftest" => Some("self-test"),
+        "rez-status" => Some("status"),
+        "rez-suite" => Some("suites"),
+        "rez-test" => Some("test"),
+        "rez-view" => Some("view"),
+        "rez-yaml2py" => Some("yaml2py"),
+        "rez-bundle" => Some("bundle"),
+        _ => None,
+    }
+}
+
+/// Whether an entry point should launch the host Python interpreter.
+#[must_use]
+pub fn is_python_entrypoint(name: &str) -> bool {
+    name == "rez-python"
+}
+
+/// Return a stable error for an upstream entry point that has no native
+/// implementation in rez-next yet.
+#[must_use]
+pub fn unsupported_entrypoint_message(name: &str) -> Option<&'static str> {
+    match name {
+        "rez-interpret" => Some("rez-interpret is not implemented by rez-next yet"),
+        "rez-memcache" => {
+            Some("rez-memcache is unavailable because rez-next has no Memcached backend")
+        }
+        "rez-benchmark" => Some("rez-benchmark is not implemented by rez-next yet"),
+        "rez-pkg-ignore" => Some("rez-pkg-ignore is not implemented by rez-next yet"),
+        _ => None,
+    }
+}
+
 /// Rez Core CLI Application
 #[derive(Parser)]
 #[command(
@@ -460,5 +515,38 @@ impl RezCli {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_python_entrypoint, subcommand_for_entrypoint, unsupported_entrypoint_message};
+
+    #[test]
+    fn legacy_console_scripts_map_to_clap_commands() {
+        for (entrypoint, command) in [
+            ("rez-build", "build"),
+            ("rez-pip", "pip"),
+            ("rez-search", "search"),
+            ("rez-yaml2py", "yaml2py"),
+            ("rez-selftest", "self-test"),
+        ] {
+            assert_eq!(subcommand_for_entrypoint(entrypoint), Some(command));
+        }
+    }
+
+    #[test]
+    fn legacy_python_script_is_explicitly_external() {
+        assert!(is_python_entrypoint("rez-python"));
+        assert!(!is_python_entrypoint("rez-pip"));
+    }
+
+    #[test]
+    fn unsupported_legacy_scripts_fail_with_a_stable_message() {
+        let message = unsupported_entrypoint_message("rez-memcache").unwrap();
+        assert!(message.contains("Memcached"));
+        assert!(unsupported_entrypoint_message("rez-benchmark").is_some());
+        assert!(unsupported_entrypoint_message("rez-pkg-ignore").is_some());
+        assert!(unsupported_entrypoint_message("rez-build").is_none());
     }
 }

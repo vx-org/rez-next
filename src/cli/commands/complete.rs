@@ -3,9 +3,11 @@
 //! Tab completion support for rez commands.
 //! Provides shell completion scripts and dynamic completion for packages, versions, etc.
 
-use clap::Args;
+use clap::{Args, CommandFactory};
 use rez_next_common::{RezCoreConfig, error::RezCoreResult};
 use rez_next_repository::simple_repository::RepositoryManager;
+
+use crate::cli::RezCli;
 
 /// Arguments for the complete command
 #[derive(Args, Clone)]
@@ -86,8 +88,38 @@ pub fn execute(args: CompleteArgs) -> RezCoreResult<()> {
 
 /// Print shell completion script for a given shell
 fn print_completion_script(shell: &str) {
+    let command_names = get_subcommand_names().join(" ");
+    let zsh_commands = get_subcommand_descriptions()
+        .iter()
+        .map(|(name, description)| {
+            format!(
+                "                '{}[{}]'",
+                name,
+                description.replace('\'', "\\'")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fish_commands = get_subcommand_descriptions()
+        .iter()
+        .map(|(name, description)| {
+            format!(
+                "complete -c rez -f -n '__fish_use_subcommand' -a {} -d '{}'",
+                name,
+                description.replace('\'', "\\'")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let powershell_commands = get_subcommand_names()
+        .iter()
+        .map(|name| format!("                  '{name}'"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+
     match shell {
         "bash" => println!(
+            "{}",
             r#"# rez bash completion
 _rez_complete() {{
     local cur prev
@@ -95,7 +127,7 @@ _rez_complete() {{
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "env build release test search bind depends solve cp mv rm status diff view config context pkg-cache pkg-help plugins suites bundle pip complete" -- "$cur") )
+        COMPREPLY=( $(compgen -W "__REZ_COMMANDS__" -- "$cur") )
     elif [[ "$prev" == "env" || "$prev" == "build" || "$prev" == "search" || "$prev" == "depends" ]]; then
         local pkgs
         pkgs=$(rez complete --complete-packages --current "$cur" 2>/dev/null)
@@ -104,8 +136,12 @@ _rez_complete() {{
 }}
 complete -F _rez_complete rez
 "#
+            .replace("__REZ_COMMANDS__", &command_names)
+            .replace("{{", "{")
+            .replace("}}", "}")
         ),
         "zsh" => println!(
+            "{}",
             r#"# rez zsh completion
 _rez() {{
     local state
@@ -117,27 +153,7 @@ _rez() {{
     case $state in
         cmds)
             _values 'commands' \
-                'env[resolve packages and spawn shell]' \
-                'build[build package from source]' \
-                'release[release a package]' \
-                'test[run package tests]' \
-                'search[search for packages]' \
-                'bind[bind system software as rez package]' \
-                'depends[reverse dependency lookup]' \
-                'solve[solve package dependencies]' \
-                'cp[copy packages]' \
-                'mv[move packages]' \
-                'rm[remove packages]' \
-                'status[show status]' \
-                'diff[compare packages]' \
-                'view[view package info]' \
-                'config[show configuration]' \
-                'context[show context info]' \
-                'pkg-cache[manage package cache]' \
-                'plugins[list plugins]' \
-                'suites[manage suites]' \
-                'bundle[create bundle]' \
-                'pip[install pip package]'
+__REZ_ZSH_COMMANDS__
             ;;
         args)
             local pkgs
@@ -148,37 +164,27 @@ _rez() {{
 }}
 compdef _rez rez
 "#
+            .replace("__REZ_ZSH_COMMANDS__", &zsh_commands)
+            .replace("{{", "{")
+            .replace("}}", "}")
         ),
         "fish" => println!(
+            "{}",
             r#"# rez fish completion
-complete -c rez -f -n '__fish_use_subcommand' -a env -d 'Resolve packages and spawn shell'
-complete -c rez -f -n '__fish_use_subcommand' -a build -d 'Build package from source'
-complete -c rez -f -n '__fish_use_subcommand' -a release -d 'Release a package'
-complete -c rez -f -n '__fish_use_subcommand' -a test -d 'Run package tests'
-complete -c rez -f -n '__fish_use_subcommand' -a search -d 'Search for packages'
-complete -c rez -f -n '__fish_use_subcommand' -a bind -d 'Bind system software as rez package'
-complete -c rez -f -n '__fish_use_subcommand' -a depends -d 'Reverse dependency lookup'
-complete -c rez -f -n '__fish_use_subcommand' -a solve -d 'Solve package dependencies'
-complete -c rez -f -n '__fish_use_subcommand' -a cp -d 'Copy packages'
-complete -c rez -f -n '__fish_use_subcommand' -a mv -d 'Move packages'
-complete -c rez -f -n '__fish_use_subcommand' -a rm -d 'Remove packages'
-complete -c rez -f -n '__fish_use_subcommand' -a status -d 'Show status'
-complete -c rez -f -n '__fish_use_subcommand' -a diff -d 'Compare packages'
-complete -c rez -f -n '__fish_use_subcommand' -a view -d 'View package info'
-complete -c rez -f -n '__fish_use_subcommand' -a config -d 'Show configuration'
-complete -c rez -f -n '__fish_use_subcommand' -a context -d 'Show context info'
-complete -c rez -f -n '__fish_use_subcommand' -a suites -d 'Manage suites'
-complete -c rez -f -n '__fish_use_subcommand' -a bundle -d 'Create bundle'
-complete -c rez -f -n '__fish_use_subcommand' -a pip -d 'Install pip package'
+__REZ_FISH_COMMANDS__
 "#
+            .replace("__REZ_FISH_COMMANDS__", &fish_commands)
+            .replace("{{", "{")
+            .replace("}}", "}")
         ),
         "powershell" => println!(
+            "{}",
             r#"# rez PowerShell completion
 Register-ArgumentCompleter -Native -CommandName rez -ScriptBlock {{
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('env','build','release','test','search','bind','depends','solve',
-                  'cp','mv','rm','status','diff','view','config','context',
-                  'pkg-cache','pkg-help','plugins','suites','bundle','pip','complete')
+    $commands = @(
+__REZ_POWERSHELL_COMMANDS__
+    )
     if ($commandAst.CommandElements.Count -le 2) {{
         $commands | Where-Object {{ $_ -like "$wordToComplete*" }} |
             ForEach-Object {{ [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_) }}
@@ -189,6 +195,9 @@ Register-ArgumentCompleter -Native -CommandName rez -ScriptBlock {{
     }}
 }}
 "#
+            .replace("__REZ_POWERSHELL_COMMANDS__", &powershell_commands)
+            .replace("{{", "{")
+            .replace("}}", "}")
         ),
         _ => eprintln!(
             "Unknown shell: {}. Supported: bash, zsh, fish, powershell",
@@ -289,38 +298,26 @@ fn complete_dynamic(comp_line: &str, comp_point: usize) -> RezCoreResult<()> {
 }
 
 /// Get the list of available subcommand names.
-fn get_subcommand_names() -> Vec<&'static str> {
-    vec![
-        "env",
-        "solve",
-        "build",
-        "release",
-        "status",
-        "search",
-        "view",
-        "diff",
-        "cp",
-        "mv",
-        "rm",
-        "bundle",
-        "config",
-        "selftest",
-        "gui",
-        "context",
-        "suites",
-        "interpret",
-        "depends",
-        "pip",
-        "forward",
-        "benchmark",
-        "complete",
-        "source",
-        "bind",
-        "test",
-        "pkg-cache",
-        "plugins",
-        "yaml2py",
-    ]
+fn get_subcommand_names() -> Vec<String> {
+    get_subcommand_descriptions()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn get_subcommand_descriptions() -> Vec<(String, String)> {
+    RezCli::command()
+        .get_subcommands()
+        .map(|command| {
+            (
+                command.get_name().to_string(),
+                command
+                    .get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -551,7 +548,7 @@ mod tests {
     fn test_get_subcommand_names_not_empty() {
         let names = get_subcommand_names();
         assert!(!names.is_empty());
-        assert!(names.contains(&"env"));
-        assert!(names.contains(&"build"));
+        assert!(names.contains(&"env".to_string()));
+        assert!(names.contains(&"build".to_string()));
     }
 }

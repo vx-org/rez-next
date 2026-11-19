@@ -226,6 +226,26 @@ fn dynamic_shell_engine_lists_the_complete_command_surface() {
 }
 
 #[test]
+fn legacy_completion_script_uses_the_current_command_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rez-next"))
+        .args(["complete", "--print-script", "--shell", "bash"])
+        .output()
+        .expect("static completion generation should run");
+    assert!(output.status.success());
+    let script = String::from_utf8_lossy(&output.stdout);
+
+    for command in ["info", "which", "completions", "self-test", "self-update"] {
+        assert!(script.contains(command), "missing command {command:?}");
+    }
+    for stale_command in ["interpret", "benchmark", "source", "selftest"] {
+        assert!(
+            !script.contains(stale_command),
+            "stale command {stale_command:?} in {script}"
+        );
+    }
+}
+
+#[test]
 fn installers_enable_dynamic_completions_with_an_opt_out() {
     let unix_installer = include_str!("../install.sh");
     for shell in ["bash", "zsh", "fish"] {
@@ -240,4 +260,27 @@ fn installers_enable_dynamic_completions_with_an_opt_out() {
     assert!(powershell_installer.contains("completions shell --shell powershell"));
     assert!(powershell_installer.contains("$PROFILE.CurrentUserAllHosts"));
     assert!(powershell_installer.contains("REZ_NEXT_NO_COMPLETIONS"));
+}
+
+#[test]
+fn installers_provide_upstream_console_script_aliases() {
+    let unix_installer = include_str!("../install.sh");
+    let windows_installer = include_str!("../install.ps1");
+    for alias in [
+        "rezolve",
+        "rez-interpret",
+        "rez-memcache",
+        "rez-python",
+        "rez-yaml2py",
+        "rez-benchmark",
+        "rez-pkg-ignore",
+        "rez-search",
+        "rez-pip",
+    ] {
+        assert!(unix_installer.contains(alias), "missing Unix alias {alias}");
+        assert!(
+            windows_installer.contains(alias),
+            "missing Windows alias {alias}"
+        );
+    }
 }

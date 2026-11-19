@@ -12,6 +12,22 @@ set -eu
 REPO="vx-org/rez-next"
 BINARY_NAME="rez-next"
 
+create_compatibility_wrappers() {
+    for alias in \
+        rezolve rez-bind rez-build rez-config rez-context rez-cp rez-depends \
+        rez-diff rez-env rez-gui rez-help rez-interpret rez-memcache rez-mv \
+        rez-pip rez-pkg-cache rez-pkg-ignore rez-plugins rez-python \
+        rez-release rez-rm rez-search rez-selftest rez-status rez-suite \
+        rez-test rez-view rez-yaml2py rez-bundle rez-benchmark; do
+        cat > "$INSTALL_DIR/$alias" <<EOF
+#!/bin/sh
+export REZ_NEXT_ENTRYPOINT="$alias"
+exec "\$(dirname "\$0")/$BINARY_NAME" "\$@"
+EOF
+        chmod +x "$INSTALL_DIR/$alias"
+    done
+}
+
 # --- Logging helpers ---
 info() { printf '\033[0;34minfo:\033[0m %s\n' "$*"; }
 success() { printf '\033[0;32msuccess:\033[0m %s\n' "$*"; }
@@ -251,6 +267,22 @@ install() {
 
     chmod +x "$binary_path"
     mv "$binary_path" "$INSTALL_DIR/$BINARY_NAME"
+
+    local rez_binary_path
+    rez_binary_path=$(find "$tmpdir" -name "rez" -type f | head -1)
+    if [ -z "$rez_binary_path" ]; then
+        rez_binary_path=$(find "$tmpdir" -name "rez.exe" -type f | head -1)
+    fi
+    if [ -n "$rez_binary_path" ]; then
+        chmod +x "$rez_binary_path"
+        local rez_binary_name="rez"
+        case "$rez_binary_path" in
+            *.exe) rez_binary_name="rez.exe" ;;
+        esac
+        mv "$rez_binary_path" "$INSTALL_DIR/$rez_binary_name"
+    fi
+
+    create_compatibility_wrappers
     success "${BINARY_NAME} v${VERSION} installed to ${INSTALL_DIR}/${BINARY_NAME}"
 
     # Show upgrade info

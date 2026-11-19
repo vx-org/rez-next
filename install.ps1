@@ -11,6 +11,30 @@ $ErrorActionPreference = 'Stop'
 $Repo = "vx-org/rez-next"
 $BinaryName = "rez-next"
 
+function New-CompatibilityWrappers {
+    param([string]$InstallDirectory)
+
+    $aliases = @(
+        "rezolve", "rez-bind", "rez-build", "rez-config", "rez-context",
+        "rez-cp", "rez-depends", "rez-diff", "rez-env", "rez-gui",
+        "rez-help", "rez-interpret", "rez-memcache", "rez-mv", "rez-pip",
+        "rez-pkg-cache", "rez-pkg-ignore", "rez-plugins", "rez-python",
+        "rez-release", "rez-rm", "rez-search", "rez-selftest", "rez-status",
+        "rez-suite", "rez-test", "rez-view", "rez-yaml2py", "rez-bundle",
+        "rez-benchmark"
+    )
+
+    foreach ($alias in $aliases) {
+        $wrapperPath = Join-Path $InstallDirectory "$alias.cmd"
+        @"
+@echo off
+set "REZ_NEXT_ENTRYPOINT=$alias"
+"%~dp0$BinaryName.exe" %*
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path $wrapperPath -Encoding ascii
+    }
+}
+
 function Write-Info { param([string]$Message); Write-Host "info: " -ForegroundColor Blue -NoNewline; Write-Host $Message }
 function Write-Success { param([string]$Message); Write-Host "success: " -ForegroundColor Green -NoNewline; Write-Host $Message }
 function Write-Warn { param([string]$Message); Write-Host "warn: " -ForegroundColor Yellow -NoNewline; Write-Host $Message }
@@ -174,6 +198,15 @@ function Install-RezNext {
         # Install
         $destPath = Join-Path $installDir "$BinaryName.exe"
         Copy-Item -Path $binaryPath.FullName -Destination $destPath -Force
+
+        $rezBinaryPath = Get-ChildItem -Path $tmpDir -Recurse -Filter "rez.exe" |
+            Where-Object { $_.FullName -ne $binaryPath.FullName } |
+            Select-Object -First 1
+        if ($null -ne $rezBinaryPath) {
+            Copy-Item -Path $rezBinaryPath.FullName -Destination (Join-Path $installDir "rez.exe") -Force
+        }
+
+        New-CompatibilityWrappers -InstallDirectory $installDir
         Write-Success "rez-next v$version installed to $destPath"
 
         # Show upgrade info if applicable
