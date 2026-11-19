@@ -60,6 +60,14 @@ pub struct RezCoreConfig {
     /// Plugin paths
     pub plugin_path: Vec<String>,
 
+    /// Plugin-specific configuration, including `plugins.release_vcs`.
+    ///
+    /// Plugin settings are intentionally kept as JSON values because plugins
+    /// own their schemas. Keeping the mapping here preserves those settings
+    /// for native consumers without making the core config depend on a
+    /// particular plugin implementation.
+    pub plugins: BTreeMap<String, serde_json::Value>,
+
     /// Release hooks run during package releases.
     pub release_hooks: Vec<String>,
 
@@ -172,6 +180,7 @@ impl Default for RezCoreConfig {
             default_shell: if cfg!(windows) { "cmd" } else { "bash" }.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             plugin_path: vec![],
+            plugins: BTreeMap::new(),
             release_hooks: vec![],
             package_cache_path: vec!["~/.rez/cache".to_string()],
             tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
@@ -1827,6 +1836,28 @@ mod tests {
             // Unknown keys warn but never fail the load.
             let cfg = RezCoreConfig::try_load().expect("unknown key must not be fatal");
             assert!(!cfg.packages_path.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_plugin_release_vcs_config_is_preserved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "release-vcs.yaml",
+            "plugins:\n  release_vcs:\n    releasable_branches:\n      - '^release/'\n    git:\n      allow_no_upstream: true\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("plugin config must load");
+            assert_eq!(
+                cfg.get_field("plugins.release_vcs.releasable_branches"),
+                Some(serde_json::json!(["^release/"]))
+            );
+            assert_eq!(
+                cfg.get_field("plugins.release_vcs.git.allow_no_upstream"),
+                Some(serde_json::json!(true))
+            );
         });
     }
 

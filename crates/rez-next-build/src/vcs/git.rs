@@ -4,7 +4,10 @@
 
 #[cfg(feature = "git")]
 use git2;
-use rez_next_common::RezCoreError;
+#[cfg(feature = "git")]
+use regex::Regex;
+#[cfg(feature = "git")]
+use rez_next_common::{RezCoreError, config::RezCoreConfig};
 use std::path::PathBuf;
 
 #[cfg(feature = "git")]
@@ -12,18 +15,46 @@ use std::path::PathBuf;
 pub struct GitVCS {
     /// Repository root path
     repo_root: PathBuf,
+    release_settings: Option<GitReleaseSettings>,
+}
+
+#[cfg(feature = "git")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GitReleaseSettings {
+    allow_no_upstream: bool,
+    releasable_branches: Vec<String>,
 }
 
 #[cfg(feature = "git")]
 impl GitVCS {
     /// Create a new GitVCS
     pub fn new(repo_root: PathBuf) -> Result<Self, RezCoreError> {
-        // Verify this is a git repository
-        if !repo_root.join(".git").exists() {
+        // Keep marker-based discovery compatible with callers that need
+        // validation to report an invalid repository. A bare repository has
+        // no `.git` marker, so accept it when libgit2 can open the path and
+        // let `validate_repo_state` report the release-specific error.
+        if !repo_root.join(".git").exists() && git2::Repository::open(&repo_root).is_err() {
             return Err(RezCoreError::BuildError("Not a git repository".to_string()));
         }
 
-        Ok(Self { repo_root })
+        Ok(Self {
+            repo_root,
+            release_settings: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_release_settings(
+        repo_root: PathBuf,
+        allow_no_upstream: bool,
+        releasable_branches: Vec<String>,
+    ) -> Result<Self, RezCoreError> {
+        let mut vcs = Self::new(repo_root)?;
+        vcs.release_settings = Some(GitReleaseSettings {
+            allow_no_upstream,
+            releasable_branches,
+        });
+        Ok(vcs)
     }
 
     /// Get the tracking branch for the current branch
@@ -92,6 +123,155 @@ impl GitVCS {
 
         None
     }
+
+    fn load_release_settings() -> Result<GitReleaseSettings, RezCoreError> {
+        let config = RezCoreConfig::try_load().map_err(|e| {
+            RezCoreError::BuildError(format!(
+                "GitVCS: failed to load release VCS configuration: {}",
+                e
+            ))
+        })?;
+
+        let allow_no_upstream = config
+            .get_field("plugins.release_vcs.git.allow_no_upstream")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let releasable_branches = match config.get_field("plugins.release_vcs.releasable_branches") {
+            None => Vec::new(),
+            Some(value) => value
+                .as_array()
+                .ok_or_else(|| {
+                    RezCoreError::BuildError(
+                        "GitVCS: plugins.release_vcs.releasable_branches must be a list of regular expressions"
+                            .to_string(),
+                    )
+                })?
+                .iter()
+                .map(|pattern| {
+                    pattern.as_str().map(str::to_owned).ok_or_else(|| {
+                        RezCoreError::BuildError(
+                            "GitVCS: plugins.release_vcs.releasable_branches must contain only strings"
+                                .to_string(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        Ok(GitReleaseSettings {
+            allow_no_upstream,
+            releasable_branches,
+        })
+    }
+
+    fn release_settings(&self) -> Result<GitReleaseSettings, RezCoreError> {
+        self.release_settings
+            .clone()
+            .map_or_else(Self::load_release_settings, Ok)
+    }
+
+    fn open_repository(&self) -> Result<git2::Repository, RezCoreError> {
+        git2::Repository::open(&self.repo_root).map_err(|e| {
+            RezCoreError::BuildError(format!(
+                "GitVCS: failed to open repository at '{}': {}",
+                self.repo_root.display(),
+                e
+            ))
+        })
+    }
+
+    fn fetch_remote(&self, repo: &git2::Repository, remote_name: &str) -> Result<(), RezCoreError> {
+        let mut remote = repo.find_remote(remote_name).map_err(|e| {
+            RezCoreError::BuildError(format!(
+                "GitVCS: failed to find tracking remote '{}': {}",
+                remote_name, e
+            ))
+        })?;
+        let refspecs: [&str; 0] = [];
+        remote
+            .fetch(&refspecs, None, Some("rez-next release validation"))
+            .map_err(|e| {
+                RezCoreError::BuildError(format!(
+                    "GitVCS: failed to update tracking remote '{}': {}",
+                    remote_name, e
+                ))
+            })
+    }
+
+    fn validate_remote_state(
+        &self,
+        repo: &git2::Repository,
+        tracking_branch: &str,
+    ) -> Result<(), RezCoreError> {
+        let Some((remote_name, _branch_name)) = tracking_branch.split_once('/') else {
+            return Err(RezCoreError::BuildError(format!(
+                "GitVCS: invalid tracking branch '{}', expected '<remote>/<branch>'",
+                tracking_branch
+            )));
+        };
+
+        self.fetch_remote(repo, remote_name)?;
+
+        let head = repo
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .map_err(|e| {
+                RezCoreError::BuildError(format!(
+                    "GitVCS: failed to read HEAD while validating remote state: {}",
+                    e
+                ))
+            })?;
+        let upstream_ref = format!("refs/remotes/{}", tracking_branch);
+        let upstream = repo
+            .find_reference(&upstream_ref)
+            .and_then(|reference| reference.peel_to_commit())
+            .map_err(|e| {
+                RezCoreError::BuildError(format!(
+                    "GitVCS: failed to read tracking branch '{}': {}",
+                    tracking_branch, e
+                ))
+            })?;
+        let (ahead, behind) = repo
+            .graph_ahead_behind(head.id(), upstream.id())
+            .map_err(|e| {
+                RezCoreError::BuildError(format!(
+                    "GitVCS: failed to compare HEAD with '{}': {}",
+                    tracking_branch, e
+                ))
+            })?;
+
+        match (ahead, behind) {
+            (0, 0) => Ok(()),
+            (ahead, 0) => Err(RezCoreError::BuildError(format!(
+                "Could not release: {} commits ahead of {}.",
+                ahead, tracking_branch
+            ))),
+            (0, behind) => Err(RezCoreError::BuildError(format!(
+                "Could not release: {} commits behind {}.",
+                behind, tracking_branch
+            ))),
+            (ahead, behind) => Err(RezCoreError::BuildError(format!(
+                "Could not release: {} commits ahead of and {} commits behind {}.",
+                ahead, behind, tracking_branch
+            ))),
+        }
+    }
+
+    fn branch_matches_policy(branch: &str, patterns: &[String]) -> Result<bool, RezCoreError> {
+        for pattern in patterns {
+            let regex = Regex::new(pattern).map_err(|e| {
+                RezCoreError::BuildError(format!(
+                    "GitVCS: invalid releasable branch pattern '{}': {}",
+                    pattern, e
+                ))
+            })?;
+            if regex.is_match(branch) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(feature = "git")]
@@ -105,13 +285,7 @@ impl super::ReleaseVCS for GitVCS {
     }
 
     fn is_clean(&self) -> Result<bool, RezCoreError> {
-        let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
-                "GitVCS: failed to open repository at '{}': {}",
-                self.repo_root.display(),
-                e
-            ))
-        })?;
+        let repo = self.open_repository()?;
 
         let mut status_opts = git2::StatusOptions::new();
         status_opts.include_untracked(true);
@@ -127,6 +301,52 @@ impl super::ReleaseVCS for GitVCS {
 
         // Repository is clean if there are no status entries
         Ok(statuses.is_empty())
+    }
+
+    fn validate_repo_state(&self) -> Result<(), RezCoreError> {
+        let repo = self.open_repository()?;
+        if repo.is_bare() {
+            return Err(RezCoreError::BuildError(
+                "Could not release: bare git repository".to_string(),
+            ));
+        }
+
+        let settings = self.release_settings()?;
+        let branch_name = repo
+            .head()
+            .ok()
+            .and_then(|head| head.shorthand().map(str::to_owned));
+        let tracking_branch = self.get_tracking_branch(&repo, branch_name.as_deref());
+
+        if tracking_branch.is_none() && !settings.allow_no_upstream {
+            return Err(RezCoreError::BuildError(
+                "Release cancelled: there is no upstream branch (git cannot see a remote - you should probably FIX THIS FIRST!). To allow the release, set the config entry 'plugins.release_vcs.git.allow_no_upstream' to true."
+                    .to_string(),
+            ));
+        }
+
+        if !settings.releasable_branches.is_empty() {
+            let current_branch = self.get_current_branch()?;
+            if !self.is_releasable_branch()?.unwrap_or(true) {
+                return Err(RezCoreError::BuildError(format!(
+                    "Could not release: current branch is {}, must match one of: {}",
+                    current_branch,
+                    settings.releasable_branches.join(", ")
+                )));
+            }
+        }
+
+        if !self.is_clean()? {
+            return Err(RezCoreError::BuildError(
+                "Could not release: there are uncommitted changes".to_string(),
+            ));
+        }
+
+        if let Some(tracking_branch) = tracking_branch {
+            self.validate_remote_state(&repo, &tracking_branch)?;
+        }
+
+        Ok(())
     }
 
     fn get_current_branch(&self) -> Result<String, RezCoreError> {
@@ -570,10 +790,13 @@ impl super::ReleaseVCS for GitVCS {
 
     fn is_releasable_branch(&self) -> Result<Option<bool>, RezCoreError> {
         let branch = self.get_current_branch()?;
-        // In Git, "main" and "master" are the main releasable branches
-        // Also allow branches starting with "release/"
-        Ok(Some(
-            branch == "main" || branch == "master" || branch.starts_with("release/"),
-        ))
+        let settings = self.release_settings()?;
+        if settings.releasable_branches.is_empty() {
+            return Ok(Some(true));
+        }
+        Ok(Some(Self::branch_matches_policy(
+            &branch,
+            &settings.releasable_branches,
+        )?))
     }
 }

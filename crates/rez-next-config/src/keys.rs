@@ -938,6 +938,7 @@ mod tests {
         "local_packages_path",
         "release_packages_path",
         "plugin_path",
+        "plugins",
         "package_cache_path",
         "default_shell",
         "tmpdir",

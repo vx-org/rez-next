@@ -614,6 +614,46 @@ mod tests {
     }
 
     #[cfg(feature = "git")]
+    fn create_temp_git_repo_with_upstream()
+    -> (tempfile::TempDir, tempfile::TempDir, git2::Repository) {
+        let (local_dir, repo) = create_temp_git_repo();
+        let remote_dir = tempfile::TempDir::new().unwrap();
+        let _remote_repo = git2::Repository::init_bare(remote_dir.path()).unwrap();
+        let remote_url = remote_dir.path().to_string_lossy().into_owned();
+        repo.remote_with_fetch("origin", &remote_url, "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
+        repo.find_remote("origin")
+            .unwrap()
+            .push(&["refs/heads/main:refs/heads/main"], None)
+            .unwrap();
+        repo.find_branch("main", git2::BranchType::Local)
+            .unwrap()
+            .set_upstream(Some("origin/main"))
+            .unwrap();
+        (local_dir, remote_dir, repo)
+    }
+
+    #[cfg(feature = "git")]
+    fn create_commit(repo: &git2::Repository, message: &str) {
+        let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree_id = {
+            let mut index = repo.index().unwrap();
+            index.write_tree().unwrap()
+        };
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "git")]
     #[test]
     fn test_git_vcs_creation() {
         let (_temp_dir, repo) = create_temp_git_repo();
@@ -986,8 +1026,103 @@ mod tests {
         let repo_root = repo.workdir().unwrap().to_path_buf();
         let vcs = git::GitVCS::new(repo_root).unwrap();
 
-        // Fresh repo should pass validation
+        // Rez's default policy requires an upstream branch.
+        let error = vcs.validate_repo_state().unwrap_err().to_string();
+        assert!(
+            error.contains("no upstream branch"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_validate_repo_state_accepts_clean_synced_upstream() {
+        let (_local_dir, _remote_dir, repo) = create_temp_git_repo_with_upstream();
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs = git::GitVCS::new(repo_root).unwrap();
+
         assert!(vcs.validate_repo_state().is_ok());
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_validate_repo_state_rejects_local_commits_ahead_of_upstream() {
+        let (_local_dir, _remote_dir, repo) = create_temp_git_repo_with_upstream();
+        create_commit(&repo, "local commit");
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs = git::GitVCS::new(repo_root).unwrap();
+
+        let error = vcs.validate_repo_state().unwrap_err().to_string();
+        assert!(
+            error.contains("ahead of origin/main"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_validate_repo_state_allows_configured_no_upstream() {
+        let (_temp_dir, repo) = create_temp_git_repo();
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs = git::GitVCS::with_release_settings(repo_root, true, vec![]).unwrap();
+
+        assert!(vcs.validate_repo_state().is_ok());
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_validate_repo_state_enforces_configured_branch_patterns() {
+        let (_temp_dir, repo) = create_temp_git_repo();
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature/test", &commit, false).unwrap();
+        repo.set_head("refs/heads/feature/test").unwrap();
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs = git::GitVCS::with_release_settings(
+            repo_root.clone(),
+            true,
+            vec!["^release/".to_string()],
+        )
+        .unwrap();
+
+        let error = vcs.validate_repo_state().unwrap_err().to_string();
+        assert!(
+            error.contains("current branch is feature/test"),
+            "unexpected error: {error}"
+        );
+
+        let vcs =
+            git::GitVCS::with_release_settings(repo_root, true, vec!["^feature/".to_string()])
+                .unwrap();
+        assert!(vcs.validate_repo_state().is_ok());
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_rejects_invalid_branch_pattern() {
+        let (_temp_dir, repo) = create_temp_git_repo();
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs = git::GitVCS::with_release_settings(repo_root, true, vec!["[invalid".to_string()])
+            .unwrap();
+
+        let error = vcs.validate_repo_state().unwrap_err().to_string();
+        assert!(
+            error.contains("invalid releasable branch pattern"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_rejects_bare_repository_during_validation() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        git2::Repository::init_bare(temp_dir.path()).unwrap();
+        let vcs = git::GitVCS::new(temp_dir.path().to_path_buf()).unwrap();
+
+        let error = vcs.validate_repo_state().unwrap_err().to_string();
+        assert!(
+            error.contains("bare git repository"),
+            "unexpected error: {error}"
+        );
     }
 
     #[cfg(feature = "git")]
@@ -1000,5 +1135,20 @@ mod tests {
         // Default branch should be releasable
         let result = vcs.is_releasable_branch().unwrap();
         assert_eq!(result, Some(true));
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn test_git_vcs_is_releasable_branch_uses_configured_patterns() {
+        let (_temp_dir, repo) = create_temp_git_repo();
+        let commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature/test", &commit, false).unwrap();
+        repo.set_head("refs/heads/feature/test").unwrap();
+        let repo_root = repo.workdir().unwrap().to_path_buf();
+        let vcs =
+            git::GitVCS::with_release_settings(repo_root, true, vec!["^release/".to_string()])
+                .unwrap();
+
+        assert_eq!(vcs.is_releasable_branch().unwrap(), Some(false));
     }
 }
