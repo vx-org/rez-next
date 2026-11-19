@@ -42,6 +42,20 @@ def test_plugin_override_is_restored_after_context():
     assert config.plugins.data()["release_vcs"]["tag_name"] == "old"
 
 
+def test_memcached_settings_warn_when_loaded(tmp_path):
+    import pytest
+
+    path = tmp_path / "memcached.py"
+    path.write_text(
+        "memcached_uri = ['127.0.0.1:11211']\n"
+        "memcached_resolve_min_compress_len = 2\n"
+    )
+
+    with pytest.warns(RuntimeWarning, match="Memcached settings"):
+        config = Config([str(path)])
+        assert config.memcached_uri == ["127.0.0.1:11211"]
+
+
 def test_copied_overrides_do_not_change_original():
     original = Config([], overrides={"build_directory": "original"})
     assert original.build_directory == "original"

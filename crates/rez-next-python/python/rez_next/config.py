@@ -23,6 +23,7 @@ import copy
 import os
 import re
 import sys as _sys
+import warnings
 from contextlib import contextmanager
 from functools import cached_property, lru_cache
 from inspect import ismodule
@@ -46,6 +47,16 @@ except ImportError:
 
 
 T = TypeVar("T")
+
+_UNSUPPORTED_MEMCACHED_KEYS = frozenset(
+    {
+        "memcached_uri",
+        "memcached_package_file_min_compress_len",
+        "memcached_context_file_min_compress_len",
+        "memcached_listdir_min_compress_len",
+        "memcached_resolve_min_compress_len",
+    }
+)
 
 
 # ====================================================================
@@ -1125,6 +1136,14 @@ def _load_config_from_filepaths(filepaths):
                             pre_formatted=True,
                             filename=f,
                         )
+                unsupported = sorted(_UNSUPPORTED_MEMCACHED_KEYS.intersection(d))
+                if unsupported:
+                    warnings.warn(
+                        "Memcached settings are retained but unsupported by rez-next: "
+                        + ", ".join(unsupported),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
             deep_update(data, d)
             sourced.append(f)
             break

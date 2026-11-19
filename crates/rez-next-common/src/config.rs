@@ -147,6 +147,17 @@ const CACHE_KEYS: [&str; 4] = [
     "cache_ttl_seconds",
 ];
 
+/// Rez settings for the optional Memcached backend, which rez-next does not
+/// implement yet. They remain in the generic configuration map so callers can
+/// inspect them, but no native cache operation consumes them.
+const UNSUPPORTED_MEMCACHED_KEYS: [&str; 5] = [
+    "memcached_uri",
+    "memcached_package_file_min_compress_len",
+    "memcached_context_file_min_compress_len",
+    "memcached_listdir_min_compress_len",
+    "memcached_resolve_min_compress_len",
+];
+
 /// Cache configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -543,6 +554,14 @@ impl RezCoreConfig {
         for key in Self::unknown_keys(&merged) {
             eprintln!("rez-next: preserving unknown config key {key:?} for generic consumers");
         }
+        for key in UNSUPPORTED_MEMCACHED_KEYS {
+            if merged.contains_key(key) {
+                eprintln!(
+                    "rez-next: config key {key:?} is retained but unsupported; \
+                     the native cache has no Memcached backend"
+                );
+            }
+        }
 
         let mut config: Self = serde_json::from_value(serde_json::Value::Object(merged))?;
         config.apply_env_overrides_and_report();
@@ -685,6 +704,12 @@ impl RezCoreConfig {
             "cache" => assign_cache(&mut self.cache, &value),
             "plugins" => assign(&mut self.plugins, &value),
             other if rez_next_config::keys::find(other).is_some() => {
+                if UNSUPPORTED_MEMCACHED_KEYS.contains(&other) {
+                    eprintln!(
+                        "rez-next: environment setting {other:?} is retained but unsupported; \
+                         the native cache has no Memcached backend"
+                    );
+                }
                 self.extra.insert(other.to_string(), value);
                 Ok(())
             }
