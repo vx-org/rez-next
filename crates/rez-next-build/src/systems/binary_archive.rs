@@ -12,14 +12,21 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tar::Archive;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 use tokio::sync::Mutex;
+use url::Url;
 
 const ARTIFACT_ENV: &str = "REZ_BINARY_ARCHIVE_ARTIFACT";
 const URL_ENV: &str = "REZ_BINARY_ARCHIVE_URL";
 const SHA256_ENV: &str = "REZ_BINARY_ARCHIVE_SHA256";
 const PAYLOAD_PREFIX_ENV: &str = "REZ_BINARY_ARCHIVE_PAYLOAD_PREFIX";
+const ALLOW_HTTP_ENV: &str = "REZ_BINARY_ARCHIVE_ALLOW_HTTP";
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DOWNLOAD_SIZE: u64 = 512 * 1024 * 1024;
 
 /// Native build system for prebuilt binary archives.
 #[derive(Debug, Clone)]
@@ -170,25 +177,104 @@ impl BinaryArchiveBuildSystem {
                     "binary_archive requires {ARTIFACT_ENV} or {URL_ENV}"
                 ))
             })?;
-        let filename = url
-            .rsplit('/')
-            .next()
-            .filter(|name| !name.is_empty())
+        let parsed_url = validate_download_url(url, env.get(ALLOW_HTTP_ENV))?;
+        let filename = parsed_url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .and_then(|name| Path::new(name).file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
             .unwrap_or("artifact.bin");
         let destination = work_dir.join(filename);
 
-        let response = reqwest::get(url).await.map_err(|err| {
-            RezCoreError::BuildError(format!("Failed to download binary archive {url}: {err}"))
+        let client = reqwest::Client::builder()
+            .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+            .timeout(DOWNLOAD_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| {
+                RezCoreError::BuildError(format!(
+                    "Failed to configure binary archive download: {err}"
+                ))
+            })?;
+        let response = client.get(parsed_url.clone()).send().await.map_err(|err| {
+            RezCoreError::BuildError(format!(
+                "Failed to download binary archive {parsed_url}: {err}"
+            ))
         })?;
-        let bytes = response.bytes().await.map_err(|err| {
-            RezCoreError::BuildError(format!("Failed to read binary archive response: {err}"))
+        if response.status().is_redirection() {
+            return Err(RezCoreError::BuildError(format!(
+                "binary archive download refused redirect from {parsed_url}"
+            )));
+        }
+        let response = response.error_for_status().map_err(|err| {
+            RezCoreError::BuildError(format!(
+                "Failed to download binary archive {parsed_url}: {err}"
+            ))
         })?;
-        tokio::fs::write(&destination, bytes).await.map_err(|err| {
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_DOWNLOAD_SIZE)
+        {
+            return Err(RezCoreError::BuildError(format!(
+                "binary archive download exceeds the {} MiB limit",
+                MAX_DOWNLOAD_SIZE / (1024 * 1024)
+            )));
+        }
+
+        let mut output = tokio::fs::File::create(&destination).await.map_err(|err| {
             RezCoreError::BuildError(format!("Failed to write downloaded archive: {err}"))
+        })?;
+        let mut downloaded = 0_u64;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(|err| {
+            RezCoreError::BuildError(format!("Failed to read binary archive response: {err}"))
+        })? {
+            downloaded = downloaded.saturating_add(chunk.len() as u64);
+            if downloaded > MAX_DOWNLOAD_SIZE {
+                return Err(RezCoreError::BuildError(format!(
+                    "binary archive download exceeds the {} MiB limit",
+                    MAX_DOWNLOAD_SIZE / (1024 * 1024)
+                )));
+            }
+            output.write_all(&chunk).await.map_err(|err| {
+                RezCoreError::BuildError(format!("Failed to write downloaded archive: {err}"))
+            })?;
+        }
+        output.flush().await.map_err(|err| {
+            RezCoreError::BuildError(format!("Failed to flush downloaded archive: {err}"))
         })?;
 
         Ok(destination)
     }
+}
+
+fn validate_download_url(value: &str, allow_http: Option<&String>) -> Result<Url, RezCoreError> {
+    let url = Url::parse(value).map_err(|err| {
+        RezCoreError::BuildError(format!("Invalid binary archive URL {value}: {err}"))
+    })?;
+    let is_http = url.scheme() == "http";
+    if url.scheme() != "https" && !(is_http && http_downloads_allowed(allow_http)) {
+        return Err(RezCoreError::BuildError(format!(
+            "binary archive URL must use HTTPS: {value}"
+        )));
+    }
+    if url.host_str().is_none() {
+        return Err(RezCoreError::BuildError(format!(
+            "binary archive URL has no host: {value}"
+        )));
+    }
+    Ok(url)
+}
+
+fn http_downloads_allowed(value: Option<&String>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 impl Default for BinaryArchiveBuildSystem {
@@ -461,7 +547,9 @@ fn copy_file_preserving_permissions(source: &Path, destination: &Path) -> Result
 mod tests {
     #[cfg(unix)]
     use super::extract_zip;
-    use super::{copy_tree_contents, extract_archive};
+    use super::{
+        copy_tree_contents, extract_archive, http_downloads_allowed, validate_download_url,
+    };
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -573,5 +661,20 @@ mod tests {
             std::fs::read(destination.join("tool")).unwrap(),
             b"seven zip payload"
         );
+    }
+
+    #[test]
+    fn download_url_requires_https_by_default() {
+        assert!(validate_download_url("https://example.com/tool.tar", None).is_ok());
+        assert!(validate_download_url("http://example.com/tool.tar", None).is_err());
+        assert!(validate_download_url("ftp://example.com/tool.tar", None).is_err());
+    }
+
+    #[test]
+    fn download_url_allows_http_only_when_explicitly_enabled() {
+        let enabled = String::from("true");
+        assert!(validate_download_url("http://example.com/tool.tar", Some(&enabled)).is_ok());
+        assert!(http_downloads_allowed(Some(&String::from("yes"))));
+        assert!(!http_downloads_allowed(Some(&String::from("false"))));
     }
 }
