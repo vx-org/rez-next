@@ -36,11 +36,31 @@ pub struct MercurialVCS {
 }
 
 impl MercurialVCS {
+    /// Return whether `path` contains a Mercurial repository.
+    pub fn is_valid_root(path: &std::path::Path) -> bool {
+        path.join(".hg").exists()
+    }
+
+    /// Mercurial repositories may be discovered in parent directories.
+    pub fn search_parents_for_root() -> bool {
+        true
+    }
+
+    /// Find the nearest Mercurial root and preserve its parent distance.
+    pub fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)> {
+        super::find_vcs_root(path, Self::search_parents_for_root(), Self::is_valid_root)
+    }
+
+    /// Find the Mercurial executable in `PATH`.
+    pub fn find_executable(name: &str) -> Result<PathBuf, RezCoreError> {
+        super::find_vcs_executable(name)
+    }
+
     /// Create a new MercurialVCS
     pub fn new(repo_root: PathBuf) -> Result<Self, RezCoreError> {
         // Verify this is a mercurial repository
         if !repo_root.join(".hg").exists() {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Not a mercurial repository".to_string(),
             ));
         }
@@ -55,7 +75,7 @@ impl MercurialVCS {
             .current_dir(&self.repo_root)
             .output()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "MercurialVCS: failed to run hg command '{:?}' in repository at '{}': {}",
                     args,
                     self.repo_root.display(),
@@ -65,7 +85,7 @@ impl MercurialVCS {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "MercurialVCS: hg command '{:?}' failed in repository at '{}': {}",
                 args,
                 self.repo_root.display(),
@@ -78,6 +98,34 @@ impl MercurialVCS {
 }
 
 impl super::ReleaseVCS for MercurialVCS {
+    fn is_valid_root(path: &std::path::Path) -> bool
+    where
+        Self: Sized,
+    {
+        MercurialVCS::is_valid_root(path)
+    }
+
+    fn search_parents_for_root() -> bool
+    where
+        Self: Sized,
+    {
+        MercurialVCS::search_parents_for_root()
+    }
+
+    fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)>
+    where
+        Self: Sized,
+    {
+        MercurialVCS::find_vcs_root(path)
+    }
+
+    fn find_executable(name: &str) -> Result<PathBuf, RezCoreError>
+    where
+        Self: Sized,
+    {
+        MercurialVCS::find_executable(name)
+    }
+
     fn get_type_name(&self) -> &str {
         "hg"
     }
@@ -121,20 +169,33 @@ impl super::ReleaseVCS for MercurialVCS {
         Ok(())
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
-        let from = from_rev.unwrap_or(".");
-        let to = to_rev.unwrap_or("tip");
+        let from = previous_revision.unwrap_or("beginning");
+        let revspec = previous_revision
+            .map(|revision| format!("{}::tip", revision))
+            .unwrap_or_else(|| "all()".to_string());
+        let limit = max_revisions.map(|value| value.to_string());
+        let mut args = vec![
+            "log",
+            "-r",
+            revspec.as_str(),
+            "--template",
+            "{node|short} {desc}\n",
+        ];
+        if let Some(limit) = limit.as_deref() {
+            args.extend(["--limit", limit]);
+        }
+        let changelog = self.run_hg(&args)?;
 
-        // `hg log -r <from>::<to> --template "{node|short} {desc}\n"`
-        let revspec = format!("{}::{}", from, to);
-        let changelog =
-            self.run_hg(&["log", "-r", &revspec, "--template", "{node|short} {desc}\n"])?;
-
-        Ok(format!("Changelog from {} to {}:\n{}", from, to, changelog))
+        Ok(format!("Changelog since {}:\n{}", from, changelog))
     }
 
     fn get_metadata(&self) -> Result<super::VCSMetadata, RezCoreError> {
@@ -248,7 +309,7 @@ impl super::ReleaseVCS for MercurialVCS {
 
         // Validate target path
         if path.exists() {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Export path '{}' already exists",
                 path.display()
             )));
@@ -256,7 +317,7 @@ impl super::ReleaseVCS for MercurialVCS {
 
         // Create target directory
         fs::create_dir_all(path).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "Failed to create export directory '{}': {}",
                 path.display(),
                 e
@@ -270,7 +331,7 @@ impl super::ReleaseVCS for MercurialVCS {
             .current_dir(&self.repo_root)
             .output()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "Failed to run `hg archive` for repository at '{}': {}",
                     self.repo_root.display(),
                     e
@@ -279,7 +340,7 @@ impl super::ReleaseVCS for MercurialVCS {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Failed to export Mercurial repository at '{}' to '{}': {}",
                 self.repo_root.display(),
                 path.display(),
@@ -299,7 +360,7 @@ impl super::ReleaseVCS for MercurialVCS {
     fn validate_repo_state(&self) -> Result<(), RezCoreError> {
         // Check if repo is clean
         if !self.is_clean()? {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Mercurial repository is not clean".to_string(),
             ));
         }
@@ -309,7 +370,7 @@ impl super::ReleaseVCS for MercurialVCS {
         if let Some(ref series) = patches
             && !series.is_empty()
         {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Mercurial repository has active mq patches".to_string(),
             ));
         }

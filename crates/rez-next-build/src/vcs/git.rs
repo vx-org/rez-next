@@ -27,6 +27,26 @@ pub(crate) struct GitReleaseSettings {
 
 #[cfg(feature = "git")]
 impl GitVCS {
+    /// Return whether `path` contains a Git working tree.
+    pub fn is_valid_root(path: &std::path::Path) -> bool {
+        path.join(".git").exists()
+    }
+
+    /// Git repositories may be discovered in parent directories.
+    pub fn search_parents_for_root() -> bool {
+        true
+    }
+
+    /// Find the nearest Git root and preserve its parent distance.
+    pub fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)> {
+        super::find_vcs_root(path, Self::search_parents_for_root(), Self::is_valid_root)
+    }
+
+    /// Find the Git executable in `PATH`.
+    pub fn find_executable(name: &str) -> Result<PathBuf, RezCoreError> {
+        super::find_vcs_executable(name)
+    }
+
     /// Create a new GitVCS
     pub fn new(repo_root: PathBuf) -> Result<Self, RezCoreError> {
         // Keep marker-based discovery compatible with callers that need
@@ -34,7 +54,9 @@ impl GitVCS {
         // no `.git` marker, so accept it when libgit2 can open the path and
         // let `validate_repo_state` report the release-specific error.
         if !repo_root.join(".git").exists() && git2::Repository::open(&repo_root).is_err() {
-            return Err(RezCoreError::BuildError("Not a git repository".to_string()));
+            return Err(RezCoreError::ReleaseVCSError(
+                "Not a git repository".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -126,7 +148,7 @@ impl GitVCS {
 
     fn load_release_settings() -> Result<GitReleaseSettings, RezCoreError> {
         let config = RezCoreConfig::try_load().map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to load release VCS configuration: {}",
                 e
             ))
@@ -142,7 +164,7 @@ impl GitVCS {
             Some(value) => value
                 .as_array()
                 .ok_or_else(|| {
-                    RezCoreError::BuildError(
+                    RezCoreError::ReleaseVCSError(
                         "GitVCS: plugins.release_vcs.releasable_branches must be a list of regular expressions"
                             .to_string(),
                     )
@@ -150,7 +172,7 @@ impl GitVCS {
                 .iter()
                 .map(|pattern| {
                     pattern.as_str().map(str::to_owned).ok_or_else(|| {
-                        RezCoreError::BuildError(
+                        RezCoreError::ReleaseVCSError(
                             "GitVCS: plugins.release_vcs.releasable_branches must contain only strings"
                                 .to_string(),
                         )
@@ -173,7 +195,7 @@ impl GitVCS {
 
     fn open_repository(&self) -> Result<git2::Repository, RezCoreError> {
         git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -183,7 +205,7 @@ impl GitVCS {
 
     fn fetch_remote(&self, repo: &git2::Repository, remote_name: &str) -> Result<(), RezCoreError> {
         let mut remote = repo.find_remote(remote_name).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to find tracking remote '{}': {}",
                 remote_name, e
             ))
@@ -192,7 +214,7 @@ impl GitVCS {
         remote
             .fetch(&refspecs, None, Some("rez-next release validation"))
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: failed to update tracking remote '{}': {}",
                     remote_name, e
                 ))
@@ -205,7 +227,7 @@ impl GitVCS {
         tracking_branch: &str,
     ) -> Result<(), RezCoreError> {
         let Some((remote_name, _branch_name)) = tracking_branch.split_once('/') else {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: invalid tracking branch '{}', expected '<remote>/<branch>'",
                 tracking_branch
             )));
@@ -217,7 +239,7 @@ impl GitVCS {
             .head()
             .and_then(|head| head.peel_to_commit())
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: failed to read HEAD while validating remote state: {}",
                     e
                 ))
@@ -227,7 +249,7 @@ impl GitVCS {
             .find_reference(&upstream_ref)
             .and_then(|reference| reference.peel_to_commit())
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: failed to read tracking branch '{}': {}",
                     tracking_branch, e
                 ))
@@ -235,7 +257,7 @@ impl GitVCS {
         let (ahead, behind) = repo
             .graph_ahead_behind(head.id(), upstream.id())
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: failed to compare HEAD with '{}': {}",
                     tracking_branch, e
                 ))
@@ -243,15 +265,15 @@ impl GitVCS {
 
         match (ahead, behind) {
             (0, 0) => Ok(()),
-            (ahead, 0) => Err(RezCoreError::BuildError(format!(
+            (ahead, 0) => Err(RezCoreError::ReleaseVCSError(format!(
                 "Could not release: {} commits ahead of {}.",
                 ahead, tracking_branch
             ))),
-            (0, behind) => Err(RezCoreError::BuildError(format!(
+            (0, behind) => Err(RezCoreError::ReleaseVCSError(format!(
                 "Could not release: {} commits behind {}.",
                 behind, tracking_branch
             ))),
-            (ahead, behind) => Err(RezCoreError::BuildError(format!(
+            (ahead, behind) => Err(RezCoreError::ReleaseVCSError(format!(
                 "Could not release: {} commits ahead of and {} commits behind {}.",
                 ahead, behind, tracking_branch
             ))),
@@ -261,7 +283,7 @@ impl GitVCS {
     fn branch_matches_policy(branch: &str, patterns: &[String]) -> Result<bool, RezCoreError> {
         for pattern in patterns {
             let regex = Regex::new(pattern).map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: invalid releasable branch pattern '{}': {}",
                     pattern, e
                 ))
@@ -276,6 +298,34 @@ impl GitVCS {
 
 #[cfg(feature = "git")]
 impl super::ReleaseVCS for GitVCS {
+    fn is_valid_root(path: &std::path::Path) -> bool
+    where
+        Self: Sized,
+    {
+        GitVCS::is_valid_root(path)
+    }
+
+    fn search_parents_for_root() -> bool
+    where
+        Self: Sized,
+    {
+        GitVCS::search_parents_for_root()
+    }
+
+    fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)>
+    where
+        Self: Sized,
+    {
+        GitVCS::find_vcs_root(path)
+    }
+
+    fn find_executable(name: &str) -> Result<PathBuf, RezCoreError>
+    where
+        Self: Sized,
+    {
+        GitVCS::find_executable(name)
+    }
+
     fn get_type_name(&self) -> &str {
         "git"
     }
@@ -292,7 +342,7 @@ impl super::ReleaseVCS for GitVCS {
         status_opts.include_ignored(false);
 
         let statuses = repo.statuses(Some(&mut status_opts)).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to get status for repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -306,7 +356,7 @@ impl super::ReleaseVCS for GitVCS {
     fn validate_repo_state(&self) -> Result<(), RezCoreError> {
         let repo = self.open_repository()?;
         if repo.is_bare() {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Could not release: bare git repository".to_string(),
             ));
         }
@@ -319,7 +369,7 @@ impl super::ReleaseVCS for GitVCS {
         let tracking_branch = self.get_tracking_branch(&repo, branch_name.as_deref());
 
         if tracking_branch.is_none() && !settings.allow_no_upstream {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Release cancelled: there is no upstream branch (git cannot see a remote - you should probably FIX THIS FIRST!). To allow the release, set the config entry 'plugins.release_vcs.git.allow_no_upstream' to true."
                     .to_string(),
             ));
@@ -328,7 +378,7 @@ impl super::ReleaseVCS for GitVCS {
         if !settings.releasable_branches.is_empty() {
             let current_branch = self.get_current_branch()?;
             if !self.is_releasable_branch()?.unwrap_or(true) {
-                return Err(RezCoreError::BuildError(format!(
+                return Err(RezCoreError::ReleaseVCSError(format!(
                     "Could not release: current branch is {}, must match one of: {}",
                     current_branch,
                     settings.releasable_branches.join(", ")
@@ -337,7 +387,7 @@ impl super::ReleaseVCS for GitVCS {
         }
 
         if !self.is_clean()? {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Could not release: there are uncommitted changes".to_string(),
             ));
         }
@@ -351,12 +401,12 @@ impl super::ReleaseVCS for GitVCS {
 
     fn get_current_branch(&self) -> Result<String, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!("Failed to open git repository: {}", e))
+            RezCoreError::ReleaseVCSError(format!("Failed to open git repository: {}", e))
         })?;
 
         let head = repo
             .head()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to get HEAD: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to get HEAD: {}", e)))?;
 
         // Check if HEAD is a branch reference
         if head.is_branch()
@@ -367,7 +417,7 @@ impl super::ReleaseVCS for GitVCS {
 
         // Detached HEAD state
         let commit = head.peel_to_commit().map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to peel to commit for repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -378,7 +428,7 @@ impl super::ReleaseVCS for GitVCS {
 
     fn get_latest_commit(&self) -> Result<String, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -387,18 +437,18 @@ impl super::ReleaseVCS for GitVCS {
 
         let head = repo
             .head()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to get HEAD: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to get HEAD: {}", e)))?;
 
         let commit = head
             .peel_to_commit()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to get commit: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to get commit: {}", e)))?;
 
         Ok(commit.id().to_string())
     }
 
     fn tag_exists(&self, tag: &str) -> Result<bool, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -411,7 +461,7 @@ impl super::ReleaseVCS for GitVCS {
         match repo.find_reference(&tag_ref_name) {
             Ok(_) => Ok(true),
             Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(false),
-            Err(e) => Err(RezCoreError::BuildError(format!(
+            Err(e) => Err(RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to check tag '{}' in repository at '{}': {}",
                 tag,
                 self.repo_root.display(),
@@ -422,7 +472,7 @@ impl super::ReleaseVCS for GitVCS {
 
     fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
@@ -431,7 +481,7 @@ impl super::ReleaseVCS for GitVCS {
 
         // Get the current HEAD commit
         let head = repo.head().map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to get HEAD for tag '{}' in repository at '{}': {}",
                 tag,
                 self.repo_root.display(),
@@ -439,7 +489,7 @@ impl super::ReleaseVCS for GitVCS {
             ))
         })?;
         let commit = head.peel_to_commit().map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to peel to commit for tag '{}' in repository at '{}': {}",
                 tag,
                 self.repo_root.display(),
@@ -449,7 +499,7 @@ impl super::ReleaseVCS for GitVCS {
 
         // Create signature for tag
         let sig = git2::Signature::now("Rez Next Build", "rez-next@build").map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to create signature for tag '{}': {}",
                 tag, e
             ))
@@ -460,7 +510,7 @@ impl super::ReleaseVCS for GitVCS {
         let obj = repo
             .find_object(oid, Some(git2::ObjectType::Commit))
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "GitVCS: failed to find commit object for tag '{}' in repository at '{}': {}",
                     tag,
                     self.repo_root.display(),
@@ -469,7 +519,7 @@ impl super::ReleaseVCS for GitVCS {
             })?;
 
         repo.tag(tag, &obj, &sig, message, false).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to create tag '{}' in repository at '{}': {}",
                 tag,
                 self.repo_root.display(),
@@ -481,37 +531,43 @@ impl super::ReleaseVCS for GitVCS {
         Ok(())
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
             ))
         })?;
 
-        let from = from_rev.unwrap_or("HEAD~10");
-        let to = to_rev.unwrap_or("HEAD");
+        let from = previous_revision.unwrap_or("beginning");
+        let to = "HEAD";
 
         // Resolve revisions to commits
         let to_obj = repo.revparse_single(to).map_err(|e| {
-            RezCoreError::BuildError(format!("Failed to parse 'to' revision: {}", e))
+            RezCoreError::ReleaseVCSError(format!("Failed to parse 'to' revision: {}", e))
         })?;
 
         // Walk commits from to to from
-        let mut revwalk = repo
-            .revwalk()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to create revwalk: {}", e)))?;
-        revwalk
-            .push(to_obj.id())
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to push to revwalk: {}", e)))?;
+        let mut revwalk = repo.revwalk().map_err(|e| {
+            RezCoreError::ReleaseVCSError(format!("Failed to create revwalk: {}", e))
+        })?;
+        revwalk.push(to_obj.id()).map_err(|e| {
+            RezCoreError::ReleaseVCSError(format!("Failed to push to revwalk: {}", e))
+        })?;
 
-        // Try to hide from_rev, but don't fail if it doesn't exist
-        if let Ok(from_obj) = repo.revparse_single(from)
+        // Try to hide the previous revision, but keep producing a useful log
+        // when it is no longer reachable from the current branch.
+        if let Some(previous_revision) = previous_revision
+            && let Ok(from_obj) = repo.revparse_single(previous_revision)
             && let Ok(from_commit) = from_obj.peel_to_commit()
         {
             let _ = revwalk.hide(from_commit.id());
@@ -520,13 +576,13 @@ impl super::ReleaseVCS for GitVCS {
         let mut changelog = String::new();
         changelog.push_str(&format!("Changelog from {} to {}:\n", from, to));
 
-        for id in revwalk {
+        for id in revwalk.take(max_revisions.unwrap_or(usize::MAX)) {
             let id = id.map_err(|e| {
-                RezCoreError::BuildError(format!("Failed to walk revisions: {}", e))
+                RezCoreError::ReleaseVCSError(format!("Failed to walk revisions: {}", e))
             })?;
-            let commit = repo
-                .find_commit(id)
-                .map_err(|e| RezCoreError::BuildError(format!("Failed to find commit: {}", e)))?;
+            let commit = repo.find_commit(id).map_err(|e| {
+                RezCoreError::ReleaseVCSError(format!("Failed to find commit: {}", e))
+            })?;
 
             let message = commit.message().unwrap_or("(no message)");
             let short_id = &id.to_string()[..8];
@@ -542,16 +598,16 @@ impl super::ReleaseVCS for GitVCS {
 
     fn get_metadata(&self) -> Result<super::VCSMetadata, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!("Failed to open git repository: {}", e))
+            RezCoreError::ReleaseVCSError(format!("Failed to open git repository: {}", e))
         })?;
 
         // Get latest commit
         let head = repo
             .head()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to get HEAD: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to get HEAD: {}", e)))?;
         let commit = head
             .peel_to_commit()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to get commit: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to get commit: {}", e)))?;
 
         // Get branch name
         let branch = if head.is_branch() {
@@ -628,19 +684,19 @@ impl super::ReleaseVCS for GitVCS {
     /// - `metadata`: branch name, tags, etc.
     fn get_current_revision(&self) -> Result<super::VCSRevision, RezCoreError> {
         let repo = git2::Repository::open(&self.repo_root).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "GitVCS: failed to open repository at '{}': {}",
                 self.repo_root.display(),
                 e
             ))
         })?;
 
-        let head = repo
-            .head()
-            .map_err(|e| RezCoreError::BuildError(format!("GitVCS: failed to get HEAD: {}", e)))?;
+        let head = repo.head().map_err(|e| {
+            RezCoreError::ReleaseVCSError(format!("GitVCS: failed to get HEAD: {}", e))
+        })?;
 
         let commit = head.peel_to_commit().map_err(|e| {
-            RezCoreError::BuildError(format!("GitVCS: failed to get commit: {}", e))
+            RezCoreError::ReleaseVCSError(format!("GitVCS: failed to get commit: {}", e))
         })?;
 
         let commit_hash = commit.id().to_string();
@@ -713,7 +769,7 @@ impl super::ReleaseVCS for GitVCS {
 
         // Validate target path
         if path.exists() {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Export path '{}' already exists",
                 path.display()
             )));
@@ -723,7 +779,7 @@ impl super::ReleaseVCS for GitVCS {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Parent directory '{}' does not exist",
                 parent.display()
             )));
@@ -731,7 +787,7 @@ impl super::ReleaseVCS for GitVCS {
 
         // Create target directory
         fs::create_dir_all(path).map_err(|e| {
-            RezCoreError::BuildError(format!(
+            RezCoreError::ReleaseVCSError(format!(
                 "Failed to create export directory '{}': {}",
                 path.display(),
                 e
@@ -749,7 +805,7 @@ impl super::ReleaseVCS for GitVCS {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "Failed to start `git archive` for repository at '{}': {}",
                     self.repo_root.display(),
                     e
@@ -763,7 +819,7 @@ impl super::ReleaseVCS for GitVCS {
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "Failed to run `tar` for export to '{}': {}",
                     path.display(),
                     e
@@ -772,7 +828,7 @@ impl super::ReleaseVCS for GitVCS {
 
         if !tar_output.status.success() {
             let stderr = String::from_utf8_lossy(&tar_output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Failed to extract archive for export to '{}': {}",
                 path.display(),
                 stderr

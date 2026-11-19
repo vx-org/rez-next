@@ -486,12 +486,30 @@ impl ReleaseVCS for PythonReleaseVCS {
         Ok(())
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
     fn get_changelog(
         &self,
-        _from_rev: Option<&str>,
-        _to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
-        self.string_result("get_changelog")
+        let value = Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("previous_revision", previous_revision)
+                .map_err(|error| python_vcs_error("get_changelog", error))?;
+            kwargs
+                .set_item("max_revisions", max_revisions)
+                .map_err(|error| python_vcs_error("get_changelog", error))?;
+            self.inner
+                .bind(py)
+                .call_method("get_changelog", (), Some(&kwargs))
+                .map(|value| value.unbind())
+                .map_err(|error| python_vcs_error("get_changelog", error))
+        })?;
+        Python::attach(|py| python_value_to_string("get_changelog", value.bind(py)))
     }
 
     fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError> {
@@ -541,7 +559,7 @@ impl ReleaseVCS for PythonReleaseVCS {
 }
 
 fn python_vcs_error(operation: &str, error: PyErr) -> RezCoreError {
-    RezCoreError::BuildError(format!(
+    RezCoreError::ReleaseVCSError(format!(
         "Python VCS operation '{operation}' failed: {error}"
     ))
 }
@@ -609,9 +627,27 @@ impl PyReleaseVCS {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
-    pub fn get_changelog(&self, from_rev: Option<&str>, to_rev: Option<&str>) -> PyResult<String> {
+    #[pyo3(signature = (previous_revision=None, max_revisions=None))]
+    pub fn get_changelog(
+        &self,
+        previous_revision: Option<&Bound<'_, PyAny>>,
+        max_revisions: Option<usize>,
+    ) -> PyResult<String> {
+        let previous_revision = previous_revision
+            .map(|revision| {
+                if let Ok(revision_id) = revision.getattr("revision_id") {
+                    revision_id.extract::<String>()
+                } else if let Ok(revision_id) = revision.extract::<String>() {
+                    Ok(revision_id)
+                } else {
+                    revision
+                        .str()
+                        .map(|value| value.to_string_lossy().into_owned())
+                }
+            })
+            .transpose()?;
         self.require_inner()?
-            .get_changelog(from_rev, to_rev)
+            .get_changelog(previous_revision.as_deref(), max_revisions)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
@@ -625,6 +661,14 @@ impl PyReleaseVCS {
     pub fn validate_repo_state(&self) -> PyResult<()> {
         self.require_inner()?
             .validate_repo_state()
+            .map(|_| ())
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Validate repository state using Rez's upstream method spelling.
+    pub fn validate_repostate(&self) -> PyResult<()> {
+        self.require_inner()?
+            .validate_repostate()
             .map(|_| ())
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
@@ -822,6 +866,7 @@ pub struct PyReleaseManager {
     pub(crate) skip_build: bool,
     pub(crate) skip_tests: bool,
     pub(crate) variants: Option<Vec<usize>>,
+    pub(crate) skip_repo_errors: bool,
     pub(crate) skip_vcs_validation: bool,
     pub(crate) ensure_latest: bool,
 }
@@ -836,6 +881,7 @@ impl PyReleaseManager {
             skip_build,
             skip_tests,
             variants: None,
+            skip_repo_errors: false,
             skip_vcs_validation: false,
             ensure_latest: true,
         }
@@ -844,6 +890,11 @@ impl PyReleaseManager {
     /// Skip repository-state validation before releasing.
     pub fn set_skip_vcs_validation(&mut self, skip: bool) {
         self.skip_vcs_validation = skip;
+    }
+
+    /// Downgrade only dedicated VCS failures to warnings during a release.
+    pub fn set_skip_repo_errors(&mut self, skip: bool) {
+        self.skip_repo_errors = skip;
     }
 
     /// Select the zero-based variants to release. `None` releases all variants.
@@ -892,6 +943,7 @@ impl PyReleaseManager {
         // Create Rust ReleaseManager
         let mut rust_manager = RustReleaseManager::new(mode, self.skip_build, self.skip_tests);
         rust_manager.set_skip_vcs_validation(self.skip_vcs_validation);
+        rust_manager.set_skip_repo_errors(self.skip_repo_errors);
         rust_manager.set_ignore_existing_tag(ignore_existing_tag);
         rust_manager.set_ensure_latest(self.ensure_latest);
         rust_manager.set_variants(self.variants.clone());

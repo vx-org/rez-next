@@ -426,7 +426,7 @@ class BuildProcessHelper(BuildProcess):
             from rez_next.release import ReleaseManager
 
             manager = ReleaseManager()
-            manager.set_skip_vcs_validation(self._skip_repo_errors)
+            manager.set_skip_repo_errors(self._skip_repo_errors)
             manager.set_ensure_latest(self._ensure_latest)
             manager.set_variants(list(variants) if variants is not None else None)
             result = manager.release(

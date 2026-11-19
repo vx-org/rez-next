@@ -97,7 +97,7 @@ pub fn execute(args: ReleaseArgs) -> RezCoreResult<()> {
         ReleaseMode::Release
     };
     let mut manager = ReleaseManager::new(mode, false, false);
-    manager.set_skip_vcs_validation(args.skip_repo_errors);
+    manager.set_skip_repo_errors(args.skip_repo_errors);
     manager.set_ignore_existing_tag(Some(args.ignore_existing_tag));
     manager.set_ensure_latest(!args.no_latest);
     manager.set_variants(selected_variants);
@@ -153,15 +153,23 @@ fn create_vcs_backend(
     working_dir: &Path,
 ) -> RezCoreResult<Box<dyn ReleaseVCS + Send + Sync>> {
     match vcs_type {
-        "git" => GitVCS::new(working_dir.to_path_buf())
-            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
-            .map_err(|error| RezCoreError::BuildError(error.to_string())),
-        "hg" => MercurialVCS::new(working_dir.to_path_buf())
-            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
-            .map_err(|error| RezCoreError::BuildError(error.to_string())),
-        "svn" => SvnVCS::new(working_dir.to_path_buf())
-            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
-            .map_err(|error| RezCoreError::BuildError(error.to_string())),
+        "git" => GitVCS::find_vcs_root(working_dir)
+            .map(|(root, _)| root)
+            .ok_or_else(|| RezCoreError::ReleaseVCSError("No Git repository found".to_string()))
+            .and_then(GitVCS::new)
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>),
+        "hg" => MercurialVCS::find_vcs_root(working_dir)
+            .map(|(root, _)| root)
+            .ok_or_else(|| {
+                RezCoreError::ReleaseVCSError("No Mercurial repository found".to_string())
+            })
+            .and_then(MercurialVCS::new)
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>),
+        "svn" => SvnVCS::find_vcs_root(working_dir)
+            .map(|(root, _)| root)
+            .ok_or_else(|| RezCoreError::ReleaseVCSError("No SVN repository found".to_string()))
+            .and_then(SvnVCS::new)
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>),
         _ => Err(RezCoreError::BuildError(format!(
             "Release VCS '{vcs_type}' is not supported"
         ))),

@@ -327,12 +327,11 @@ class _NativeReleaseVCS(ReleaseVCS):
         previous_revision: Any = None,
         max_revisions: int | None = None,
     ) -> str:
-        """Return the native changelog for the requested revision range."""
-        del max_revisions
+        """Return the native changelog since a revision, optionally capped."""
         revision_id = None if previous_revision is None else str(previous_revision)
         if hasattr(previous_revision, "revision_id"):
             revision_id = str(previous_revision.revision_id)
-        return self._call_native("get_changelog", revision_id, None)
+        return self._call_native("get_changelog", revision_id, max_revisions)
 
     def tag_exists(self, tag_name: str) -> bool:
         """Return whether a release tag exists."""

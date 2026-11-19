@@ -83,7 +83,7 @@ impl ReleaseVCS for DownstreamVCS {
 
     fn create_tag(&self, tag: &str, _message: &str) -> Result<(), RezCoreError> {
         if self.tag_exists {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "tag '{}' already exists",
                 tag
             )));
@@ -97,8 +97,8 @@ impl ReleaseVCS for DownstreamVCS {
 
     fn get_changelog(
         &self,
-        _from_rev: Option<&str>,
-        _to_rev: Option<&str>,
+        _previous_revision: Option<&str>,
+        _max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
         Ok("downstream changelog".to_string())
     }

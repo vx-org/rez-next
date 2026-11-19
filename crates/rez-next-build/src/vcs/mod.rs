@@ -26,6 +26,75 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// The result of VCS root discovery.
+///
+/// `levels_up` preserves the proximity information exposed by Rez's
+/// `find_vcs_root()` contract. A caller can use it to prefer the nearest
+/// repository when several VCS types are available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VCSRoot {
+    /// Absolute path to the repository root.
+    pub path: PathBuf,
+    /// Number of parent directories traversed from the input path.
+    pub levels_up: usize,
+}
+
+/// Find a repository root by checking the input path and, optionally, parents.
+pub fn find_vcs_root(
+    path: &Path,
+    search_parents: bool,
+    is_valid_root: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, usize)> {
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut current = std::fs::canonicalize(&absolute_path).unwrap_or(absolute_path);
+    if current.is_file() {
+        current = current.parent()?.to_path_buf();
+    }
+
+    for levels_up in 0.. {
+        if is_valid_root(&current) {
+            return Some((current, levels_up));
+        }
+        if !search_parents {
+            return None;
+        }
+        let parent = current.parent()?.to_path_buf();
+        if parent == current {
+            return None;
+        }
+        current = parent;
+    }
+
+    None
+}
+
+/// Find an executable in `PATH` for a release VCS implementation.
+pub fn find_vcs_executable(name: &str) -> Result<PathBuf, RezCoreError> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+
+        #[cfg(windows)]
+        {
+            let candidate = directory.join(format!("{name}.exe"));
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(RezCoreError::ReleaseVCSError(format!(
+        "VCS executable not found: {name}"
+    )))
+}
+
 // ============================================================================
 // VCS Revision
 // ============================================================================
@@ -86,8 +155,10 @@ impl VCSRevision {
 /// [`ReleaseVCS::is_clean`], [`ReleaseVCS::get_current_branch`],
 /// [`ReleaseVCS::get_latest_commit`], [`ReleaseVCS::tag_exists`],
 /// [`ReleaseVCS::create_tag`], [`ReleaseVCS::get_changelog`] and
-/// [`ReleaseVCS::get_metadata`] are required; the rest have default
-/// implementations.
+/// [`ReleaseVCS::get_metadata`] are required. Root discovery and the
+/// upstream spelling of repository validation are available as additive
+/// hooks, so a custom provider can be ported without reimplementing path
+/// walking or executable lookup.
 ///
 /// Three behaviours the release flow depends on:
 ///
@@ -100,19 +171,67 @@ impl VCSRevision {
 ///   [`ReleaseVCS::create_tag`] is the exception — its `Err` is recorded as a
 ///   release error and makes the release unsuccessful.
 /// - [`ReleaseVCS::validate_repo_state`] failing aborts the release, but only
-///   when VCS validation is enabled; it is skipped when
-///   [`ReleaseManager::set_skip_vcs_validation`](crate::ReleaseManager::set_skip_vcs_validation)
-///   has been set to `true`.
+///   when VCS validation is enabled. Dedicated [`RezCoreError::ReleaseVCSError`]
+///   values can be downgraded with
+///   [`ReleaseManager::set_skip_repo_errors`](crate::ReleaseManager::set_skip_repo_errors).
 ///
 /// The trait is already blanket-implemented for `Box<dyn ReleaseVCS + Send +
 /// Sync>` and `Arc<dyn ReleaseVCS + Send + Sync>`, so a trait object can stand
 /// in for an owned implementation.
 pub trait ReleaseVCS: Send + Sync {
+    /// Return whether `path` is a root for this VCS.
+    ///
+    /// This is an associated hook because root discovery happens before an
+    /// implementation instance exists. The default keeps older providers
+    /// source-compatible and reports no root until they opt in.
+    fn is_valid_root(_path: &Path) -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Return whether parent directories should be searched for a root.
+    fn search_parents_for_root() -> bool
+    where
+        Self: Sized,
+    {
+        true
+    }
+
+    /// Find this VCS's nearest root and preserve its parent distance.
+    fn find_vcs_root(path: &Path) -> Option<(PathBuf, usize)>
+    where
+        Self: Sized,
+    {
+        find_vcs_root(path, Self::search_parents_for_root(), Self::is_valid_root)
+    }
+
+    /// Find a VCS executable by name.
+    fn find_executable(name: &str) -> Result<PathBuf, RezCoreError>
+    where
+        Self: Sized,
+    {
+        find_vcs_executable(name)
+    }
+
     /// Get the VCS type name
     fn get_type_name(&self) -> &str;
 
     /// Get the repository root path
     fn get_repo_root(&self) -> Result<PathBuf, RezCoreError>;
+
+    /// Get the repository root together with the discovery distance.
+    ///
+    /// Instances created with an explicit root have a distance of zero. A
+    /// factory that discovers a root should retain the tuple returned by
+    /// [`ReleaseVCS::find_vcs_root`] when it needs to compare providers.
+    fn get_repo_root_info(&self) -> Result<VCSRoot, RezCoreError> {
+        Ok(VCSRoot {
+            path: self.get_repo_root()?,
+            levels_up: 0,
+        })
+    }
 
     /// Check if the repository is clean (no uncommitted changes)
     fn is_clean(&self) -> Result<bool, RezCoreError>;
@@ -126,33 +245,48 @@ pub trait ReleaseVCS: Send + Sync {
     /// Check if a tag exists
     fn tag_exists(&self, tag: &str) -> Result<bool, RezCoreError>;
 
-    /// Create a new tag
-    fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError>;
+    /// Create a new tag using the Rust-friendly method name.
+    ///
+    /// The default delegates to [`ReleaseVCS::create_release_tag`], which
+    /// allows an upstream-style provider to implement its original method
+    /// name. Existing Rust providers can continue implementing `create_tag`.
+    fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError> {
+        self.create_release_tag(tag, Some(message))
+    }
 
-    /// Get changelog between two revisions
+    /// Create a release tag using Rez's upstream method name.
+    fn create_release_tag(&self, _tag: &str, _message: Option<&str>) -> Result<(), RezCoreError> {
+        Err(RezCoreError::ReleaseVCSError(
+            "create_release_tag() not implemented for this VCS".to_string(),
+        ))
+    }
+
+    /// Get changelog since a previous revision, optionally capped.
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError>;
 
     /// Get VCS metadata for release
     fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError>;
 
-    /// Validate repository state for release
+    /// Validate repository state for release using the upstream method name.
     ///
-    /// Checks that the repository is in a valid state for releasing:
-    /// - Working directory is clean
-    /// - On a valid release branch (if applicable)
-    /// - No pending changes or conflicts.
-    fn validate_repo_state(&self) -> Result<(), RezCoreError> {
-        // Default implementation: check if repo is clean
+    /// Older Rust callers can use [`ReleaseVCS::validate_repo_state`], which
+    /// delegates here.
+    fn validate_repostate(&self) -> Result<(), RezCoreError> {
         if !self.is_clean()? {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Repository is not clean".to_string(),
             ));
         }
         Ok(())
+    }
+
+    /// Validate repository state using the Rust-friendly spelling.
+    fn validate_repo_state(&self) -> Result<(), RezCoreError> {
+        self.validate_repostate()
     }
 
     /// Check if the current branch is a releasable branch
@@ -184,8 +318,10 @@ pub trait ReleaseVCS: Send + Sync {
 
     /// Export the repository at the given revision to the given path.
     ///
-    /// This aligns with Rez's `ReleaseVCS.export()` classmethod.
-    /// Exports the repository to the given path at the given revision.
+    /// Export the repository through an instance backend.
+    ///
+    /// The additive [`ReleaseVCS::export_revision`] hook mirrors Rez's
+    /// classmethod when a provider can export from the revision alone.
     ///
     /// # Arguments
     ///
@@ -196,8 +332,23 @@ pub trait ReleaseVCS: Send + Sync {
     ///
     /// `Ok(())` on success, or `RezCoreError` on failure.
     fn export(&self, _revision: &VCSRevision, _path: &Path) -> Result<(), RezCoreError> {
-        Err(RezCoreError::BuildError(
+        Err(RezCoreError::ReleaseVCSError(
             "export() not implemented for this VCS".to_string(),
+        ))
+    }
+
+    /// Export a revision through a class-level provider hook.
+    ///
+    /// Rust release flows use [`ReleaseVCS::export`] because a trait object
+    /// carries the repository instance. This associated hook mirrors Rez's
+    /// classmethod for providers whose revision object contains all export
+    /// information.
+    fn export_revision(_revision: &VCSRevision, _path: &Path) -> Result<(), RezCoreError>
+    where
+        Self: Sized,
+    {
+        Err(RezCoreError::ReleaseVCSError(
+            "export_revision() not implemented for this VCS".to_string(),
         ))
     }
 }
@@ -291,10 +442,14 @@ impl ReleaseVCS for StubVCS {
         Ok(()) // Stub always succeeds
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
     fn get_changelog(
         &self,
-        _from_rev: Option<&str>,
-        _to_rev: Option<&str>,
+        _previous_revision: Option<&str>,
+        _max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
         Ok("Stub changelog".to_string())
     }
@@ -345,12 +500,16 @@ impl ReleaseVCS for Box<dyn ReleaseVCS + Send + Sync> {
         (**self).create_tag(tag, message)
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        (**self).create_release_tag(tag, message)
+    }
+
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
-        (**self).get_changelog(from_rev, to_rev)
+        (**self).get_changelog(previous_revision, max_revisions)
     }
 
     fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError> {
@@ -400,12 +559,16 @@ impl ReleaseVCS for std::sync::Arc<dyn ReleaseVCS + Send + Sync> {
         (**self).create_tag(tag, message)
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        (**self).create_release_tag(tag, message)
+    }
+
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
-        (**self).get_changelog(from_rev, to_rev)
+        (**self).get_changelog(previous_revision, max_revisions)
     }
 
     fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError> {
@@ -451,7 +614,7 @@ pub fn detect_vcs(
         .collect();
 
         if markers.len() > 1 {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Ambiguous VCS repositories at '{}': {}",
                 current.display(),
                 markers.join(", ")
@@ -549,6 +712,44 @@ mod tests {
         let vcs = StubVCS::new(PathBuf::from("/tmp/repo"));
         let changelog = vcs.get_changelog(None, None).unwrap();
         assert!(changelog.contains("Stub changelog"));
+    }
+
+    #[test]
+    fn test_root_discovery_preserves_parent_distance() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repository = temp_dir.path().join("repository");
+        let package = repository.join("packages").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir(repository.join(".hg")).unwrap();
+
+        let found = MercurialVCS::find_vcs_root(&package).unwrap();
+        assert_eq!(&found.0, &std::fs::canonicalize(&repository).unwrap());
+        assert_eq!(found.1, 2);
+        assert_eq!(
+            <MercurialVCS as ReleaseVCS>::find_vcs_root(&package),
+            Some(found)
+        );
+    }
+
+    #[test]
+    fn test_root_discovery_can_check_only_the_requested_path() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let repository = temp_dir.path().join("repository");
+        let package = repository.join("packages").join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir(repository.join(".svn")).unwrap();
+
+        assert!(
+            find_vcs_root(&package, false, SvnVCS::is_valid_root).is_none(),
+            "a non-parent search must not select an ancestor repository"
+        );
+    }
+
+    #[test]
+    fn test_release_vcs_error_is_distinct_from_build_error() {
+        let error = RezCoreError::ReleaseVCSError("repository is dirty".to_string());
+        assert!(error.to_string().contains("Release VCS error"));
+        assert!(!matches!(error, RezCoreError::BuildError(_)));
     }
 
     #[test]

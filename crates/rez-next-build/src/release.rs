@@ -138,7 +138,10 @@ pub struct ReleaseManager {
     mode: ReleaseMode,
     skip_build: bool,
     skip_tests: bool, // now used in release() method
+    /// Legacy opt-out that bypasses repository validation entirely.
     skip_vcs_validation: bool,
+    /// Suppress only failures reported by a release VCS backend.
+    skip_repo_errors: bool,
     /// How to treat an already-existing release tag.
     ///
     /// - `Some(false)`: hard-fail (the CLI default).
@@ -161,6 +164,7 @@ impl ReleaseManager {
             skip_build,
             skip_tests,
             skip_vcs_validation: false,
+            skip_repo_errors: false,
             ignore_existing_tag: None,
             release_hooks: None,
             ensure_latest: true,
@@ -171,6 +175,12 @@ impl ReleaseManager {
     /// Set whether to skip VCS validation
     pub fn set_skip_vcs_validation(&mut self, skip: bool) {
         self.skip_vcs_validation = skip;
+    }
+
+    /// Set whether dedicated release VCS errors should be downgraded to
+    /// warnings while the workflow continues.
+    pub fn set_skip_repo_errors(&mut self, skip: bool) {
+        self.skip_repo_errors = skip;
     }
 
     /// Set how an existing release tag is treated.
@@ -244,10 +254,12 @@ impl ReleaseManager {
     /// * `vcs` — the VCS to drive the release with. `None` falls back to
     ///   [`detect_vcs`]; when that finds nothing the release proceeds without
     ///   one, recording a warning and skipping metadata, changelog, and the tag.
-    ///   A supplied VCS is validated in step 2 **unless VCS validation has been
-    ///   disabled** with
+    ///   A supplied VCS is validated in step 2. Dedicated VCS failures can be
+    ///   downgraded with
+    ///   [`set_skip_repo_errors(true)`](Self::set_skip_repo_errors). The legacy
+    ///   explicit validation bypass remains available through
     ///   [`set_skip_vcs_validation(true)`](Self::set_skip_vcs_validation), in
-    ///   which case injecting one does bypass the repository-state check.
+    ///   which case injecting one bypasses the repository-state check.
     ///
     /// # Steps
     ///
@@ -363,8 +375,10 @@ impl ReleaseManager {
                 if !self.skip_vcs_validation
                     && let Err(e) = vcs_impl.validate_repo_state()
                 {
-                    result.errors.push(format!("VCS validation failed: {}", e));
-                    return Ok(result);
+                    if !self.skip_repo_error("validate repository state", &e, &mut result) {
+                        result.errors.push(format!("VCS validation failed: {}", e));
+                        return Ok(result);
+                    }
                 }
                 match vcs_impl.get_metadata() {
                     Ok(metadata) => result.vcs_metadata = Some(metadata),
@@ -579,12 +593,21 @@ impl ReleaseManager {
         source_dir: &Path,
         result: &mut ReleaseResult,
     ) -> Result<Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>>, RezCoreError> {
-        match detect_vcs(source_dir)? {
-            Some(vcs_impl) => {
+        match detect_vcs(source_dir) {
+            Err(error) => {
+                if self.skip_repo_error("detect repository", &error, result) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            }
+            Ok(Some(vcs_impl)) => {
                 // Validate repo state
                 if let Err(e) = vcs_impl.validate_repo_state() {
-                    result.errors.push(format!("VCS validation failed: {}", e));
-                    return Ok(None);
+                    if !self.skip_repo_error("validate repository state", &e, result) {
+                        result.errors.push(format!("VCS validation failed: {}", e));
+                        return Ok(None);
+                    }
                 }
 
                 // Get metadata
@@ -601,12 +624,30 @@ impl ReleaseManager {
 
                 Ok(Some(vcs_impl.into()))
             }
-            None => {
+            Ok(None) => {
                 result
                     .warnings
                     .push("No VCS detected in source directory".to_string());
                 Ok(None)
             }
+        }
+    }
+
+    /// Downgrade a dedicated VCS failure when the caller requested the
+    /// upstream `skip_repo_errors` policy.
+    fn skip_repo_error(
+        &self,
+        operation: &str,
+        error: &RezCoreError,
+        result: &mut ReleaseResult,
+    ) -> bool {
+        if self.skip_repo_errors && matches!(error, RezCoreError::ReleaseVCSError(_)) {
+            result
+                .warnings
+                .push(format!("Skipped VCS operation '{operation}': {error}"));
+            true
+        } else {
+            false
         }
     }
 
@@ -836,9 +877,11 @@ impl ReleaseManager {
                     .push(format!("Created VCS tag: {}", tag_name));
             }
             Err(e) => {
-                result
-                    .errors
-                    .push(format!("Failed to create VCS tag: {}", e));
+                if !self.skip_repo_error("create release tag", &e, result) {
+                    result
+                        .errors
+                        .push(format!("Failed to create VCS tag: {}", e));
+                }
             }
         }
 
@@ -1527,6 +1570,26 @@ version = "{}"
     }
 
     #[test]
+    fn test_skip_repo_errors_only_suppresses_release_vcs_errors() {
+        let mut manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
+        manager.set_skip_repo_errors(true);
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.skip_repo_error(
+            "validate",
+            &RezCoreError::ReleaseVCSError("repository unavailable".to_string()),
+            &mut result
+        ));
+        assert!(!manager.skip_repo_error(
+            "validate",
+            &RezCoreError::BuildError("build unavailable".to_string()),
+            &mut result
+        ));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("repository unavailable"));
+    }
+
+    #[test]
     fn test_release_manager_can_disable_latest_version_check() {
         let mut manager = ReleaseManager::new(ReleaseMode::Release, false, false);
         manager.set_ensure_latest(false);
@@ -1911,8 +1974,8 @@ version = "1.0.0"
         }
         fn get_changelog(
             &self,
-            _from: Option<&str>,
-            _to: Option<&str>,
+            _previous_revision: Option<&str>,
+            _max_revisions: Option<usize>,
         ) -> Result<String, RezCoreError> {
             Ok(String::new())
         }
@@ -2018,7 +2081,7 @@ version = "1.0.0"
         }
         fn create_tag(&self, tag: &str, _message: &str) -> Result<(), RezCoreError> {
             if self.refuse_existing && self.tag_exists {
-                return Err(RezCoreError::BuildError(format!(
+                return Err(RezCoreError::ReleaseVCSError(format!(
                     "tag '{}' already exists",
                     tag
                 )));
@@ -2028,8 +2091,8 @@ version = "1.0.0"
         }
         fn get_changelog(
             &self,
-            _from: Option<&str>,
-            _to: Option<&str>,
+            _previous_revision: Option<&str>,
+            _max_revisions: Option<usize>,
         ) -> Result<String, RezCoreError> {
             Ok(String::new())
         }
