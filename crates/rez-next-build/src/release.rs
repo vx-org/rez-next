@@ -531,7 +531,7 @@ impl ReleaseManager {
         source_dir: &Path,
         result: &mut ReleaseResult,
     ) -> Result<Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>>, RezCoreError> {
-        match detect_vcs(source_dir) {
+        match detect_vcs(source_dir)? {
             Some(vcs_impl) => {
                 // Validate repo state
                 if let Err(e) = vcs_impl.validate_repo_state() {

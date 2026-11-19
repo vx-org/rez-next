@@ -421,36 +421,80 @@ impl ReleaseVCS for std::sync::Arc<dyn ReleaseVCS + Send + Sync> {
     }
 }
 
-/// Detect VCS type from repository path
-pub fn detect_vcs(repo_path: &Path) -> Option<Box<dyn ReleaseVCS + Send + Sync>> {
-    // Check for Git
-    if repo_path.join(".git").exists() {
-        #[cfg(feature = "git")]
-        return Some(Box::new(git::GitVCS::new(repo_path.to_path_buf()).ok()?));
+/// Detect the nearest supported VCS repository containing `repo_path`.
+///
+/// The search starts at `repo_path` and walks toward the filesystem root. If
+/// multiple VCS markers occur at the same depth, the result is ambiguous and
+/// the caller must choose a repository explicitly.
+pub fn detect_vcs(
+    repo_path: &Path,
+) -> Result<Option<Box<dyn ReleaseVCS + Send + Sync>>, RezCoreError> {
+    let canonical_path =
+        std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let mut current = if canonical_path.is_file() {
+        canonical_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(canonical_path)
+    } else {
+        canonical_path
+    };
 
-        // A Git repository cannot be handled truthfully without Git support.
-        #[cfg(not(feature = "git"))]
-        return None;
+    loop {
+        let markers: Vec<&str> = [
+            ("git", current.join(".git").exists()),
+            ("hg", current.join(".hg").exists()),
+            ("svn", current.join(".svn").exists()),
+        ]
+        .into_iter()
+        .filter_map(|(name, found)| found.then_some(name))
+        .collect();
+
+        if markers.len() > 1 {
+            return Err(RezCoreError::BuildError(format!(
+                "Ambiguous VCS repositories at '{}': {}",
+                current.display(),
+                markers.join(", ")
+            )));
+        }
+
+        if let Some(marker) = markers.first() {
+            let repository = match *marker {
+                "git" => {
+                    #[cfg(feature = "git")]
+                    {
+                        Box::new(git::GitVCS::new(current.clone())?)
+                            as Box<dyn ReleaseVCS + Send + Sync>
+                    }
+                    #[cfg(not(feature = "git"))]
+                    {
+                        return Ok(None);
+                    }
+                }
+                "hg" => Box::new(hg::MercurialVCS::new(current.clone())?)
+                    as Box<dyn ReleaseVCS + Send + Sync>,
+                "svn" => Box::new(svn::SvnVCS::new(current.clone())?)
+                    as Box<dyn ReleaseVCS + Send + Sync>,
+                _ => unreachable!("VCS marker list only contains supported markers"),
+            };
+            return Ok(Some(repository));
+        }
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
     }
 
-    // Check for Mercurial
-    if repo_path.join(".hg").exists() {
-        return Some(Box::new(
-            hg::MercurialVCS::new(repo_path.to_path_buf()).ok()?,
-        ));
-    }
-
-    // Check for SVN
-    if repo_path.join(".svn").exists() {
-        return Some(Box::new(svn::SvnVCS::new(repo_path.to_path_buf()).ok()?));
-    }
-
-    None
+    Ok(None)
 }
 
 /// Get VCS metadata for a package repository
 pub fn get_vcs_metadata(repo_path: &Path) -> Result<Option<VCSMetadata>, RezCoreError> {
-    if let Some(vcs) = detect_vcs(repo_path) {
+    if let Some(vcs) = detect_vcs(repo_path)? {
         let metadata = vcs.get_metadata()?;
         Ok(Some(metadata))
     } else {
@@ -510,7 +554,7 @@ mod tests {
     #[test]
     fn test_detect_vcs_no_vcs() {
         let path = PathBuf::from("/tmp/non-repo");
-        let result = detect_vcs(&path);
+        let result = detect_vcs(&path).unwrap();
         assert!(result.is_none());
     }
 
@@ -519,7 +563,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         std::fs::write(temp_dir.path().join(".stub"), "").unwrap();
 
-        assert!(detect_vcs(temp_dir.path()).is_none());
+        assert!(detect_vcs(temp_dir.path()).unwrap().is_none());
     }
 
     #[test]
@@ -741,9 +785,53 @@ mod tests {
         let (_temp_dir, repo) = create_temp_git_repo();
         let repo_root = repo.workdir().unwrap().to_path_buf();
 
-        let vcs_opt = detect_vcs(&repo_root);
+        let vcs_opt = detect_vcs(&repo_root).unwrap();
         assert!(vcs_opt.is_some());
         assert_eq!(vcs_opt.unwrap().get_type_name(), "git");
+    }
+
+    #[test]
+    fn test_detect_vcs_searches_parent_directories() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages").join("demo");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir(temp_dir.path().join(".hg")).unwrap();
+
+        let vcs = detect_vcs(&package_dir).unwrap().unwrap();
+
+        assert_eq!(vcs.get_type_name(), "hg");
+    }
+
+    #[test]
+    fn test_detect_vcs_prefers_the_nearest_ancestor() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let nested_repo = temp_dir.path().join("nested");
+        let package_dir = nested_repo.join("packages").join("demo");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir(temp_dir.path().join(".git")).unwrap();
+        std::fs::create_dir(nested_repo.join(".svn")).unwrap();
+
+        let vcs = detect_vcs(&package_dir).unwrap().unwrap();
+
+        assert_eq!(vcs.get_type_name(), "svn");
+    }
+
+    #[test]
+    fn test_detect_vcs_reports_ambiguous_markers() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages").join("demo");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::create_dir(temp_dir.path().join(".git")).unwrap();
+        std::fs::create_dir(temp_dir.path().join(".hg")).unwrap();
+
+        let error = match detect_vcs(&package_dir) {
+            Ok(_) => panic!("multiple VCS markers must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("Ambiguous VCS repositories"));
+        assert!(error.to_string().contains("git"));
+        assert!(error.to_string().contains("hg"));
     }
 
     // --- MercurialVCS tests ---
@@ -805,7 +893,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join(".hg")).unwrap();
 
-        let vcs_opt = detect_vcs(temp_dir.path());
+        let vcs_opt = detect_vcs(temp_dir.path()).unwrap();
         assert!(vcs_opt.is_some());
         assert_eq!(vcs_opt.unwrap().get_type_name(), "hg");
     }
@@ -869,7 +957,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join(".svn")).unwrap();
 
-        let vcs_opt = detect_vcs(temp_dir.path());
+        let vcs_opt = detect_vcs(temp_dir.path()).unwrap();
         assert!(vcs_opt.is_some());
         assert_eq!(vcs_opt.unwrap().get_type_name(), "svn");
     }
