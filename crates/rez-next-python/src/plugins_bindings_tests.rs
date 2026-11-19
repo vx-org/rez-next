@@ -343,11 +343,14 @@ mod test_cycle_115 {
             "at least one release_hook plugin must exist"
         );
         let names: Vec<_> = hooks.iter().map(|h| h.name.as_str()).collect();
-        assert!(
-            names.contains(&"emailer") || names.contains(&"command"),
-            "known release hooks must be registered, got: {:?}",
-            names
-        );
+        let registry_names = rez_next_release_hook::get_release_hook_types();
+        for registry_name in registry_names {
+            assert!(
+                names.contains(&registry_name.as_str()),
+                "registry hook {registry_name:?} must be advertised, got: {:?}",
+                names
+            );
+        }
     }
 
     #[test]

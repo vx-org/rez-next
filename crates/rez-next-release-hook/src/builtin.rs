@@ -8,28 +8,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Configuration for EmailHook.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-struct EmailHookConfig {
-    smtp_server: String,
-    smtp_port: u16,
-    from_address: String,
-    to_addresses: Vec<String>,
-    use_tls: bool,
-}
-
-impl Default for EmailHookConfig {
-    fn default() -> Self {
-        Self {
-            smtp_server: "localhost".to_string(),
-            smtp_port: 25,
-            from_address: "rez@localhost".to_string(),
-            to_addresses: vec![],
-            use_tls: false,
-        }
-    }
-}
-
 /// Configuration for WebHook.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct WebHookConfig {
@@ -175,22 +153,20 @@ impl ReleaseHook for LoggingHook {
     }
 }
 
-/// An email release hook that sends notifications via SMTP.
+/// An email release hook placeholder.
 ///
-/// This hook sends email notifications before and after the release process.
-/// Configuration is read from a file at `source_path` (JSON/TOML format).
-pub struct EmailHook {
-    config: EmailHookConfig,
-}
+/// SMTP delivery is intentionally rejected until the crate has a transport
+/// implementation. Returning an error prevents a configured notification
+/// from being reported as successful when no message was sent.
+pub struct EmailHook;
 
 impl ReleaseHook for EmailHook {
     fn name() -> String {
         "email".to_string()
     }
 
-    fn new(source_path: PathBuf) -> Result<Self> {
-        let config = Self::read_config(&source_path).unwrap_or_default();
-        Ok(Self { config })
+    fn new(_source_path: PathBuf) -> Result<Self> {
+        Ok(Self)
     }
 
     fn pre_build(
@@ -203,11 +179,7 @@ impl ReleaseHook for EmailHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "EmailHook: pre_build - would send email to {:?}",
-            self.config.to_addresses
-        );
-        Ok(())
+        Self::unsupported()
     }
 
     fn pre_release(
@@ -220,11 +192,7 @@ impl ReleaseHook for EmailHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "EmailHook: pre_release - would send email to {:?}",
-            self.config.to_addresses
-        );
-        Ok(())
+        Self::unsupported()
     }
 
     fn post_release(
@@ -237,34 +205,23 @@ impl ReleaseHook for EmailHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "EmailHook: post_release - would send email to {:?}",
-            self.config.to_addresses
-        );
-        Ok(())
+        Self::unsupported()
     }
 }
 
 impl EmailHook {
-    /// Read configuration from a file.
-    fn read_config(path: &std::path::Path) -> Option<EmailHookConfig> {
-        if !path.exists() {
-            return None;
-        }
-        let content = std::fs::read_to_string(path).ok()?;
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            serde_json::from_str(&content).ok()
-        } else {
-            // Assume TOML
-            toml::from_str(&content).ok()
-        }
+    fn unsupported() -> Result<()> {
+        Err(crate::ReleaseHookError::Error(
+            "EmailHook is unavailable: SMTP delivery is not implemented".to_string(),
+        ))
     }
 }
 
-/// A webhook release hook that sends HTTP requests.
+/// A webhook release hook placeholder.
 ///
-/// This hook sends HTTP requests to a configured URL before and after release.
-/// Configuration is read from a file at `source_path` (JSON/TOML format).
+/// HTTP delivery is intentionally rejected until the crate has a transport
+/// implementation. Returning an error prevents a configured notification
+/// from being reported as successful when no request was sent.
 pub struct WebHook {
     config: WebHookConfig,
 }
@@ -294,12 +251,7 @@ impl ReleaseHook for WebHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "WebHook: pre_build - would send {} request to {}",
-            self.config.method,
-            self.config.url
-        );
-        Ok(())
+        self.unsupported()
     }
 
     fn pre_release(
@@ -312,12 +264,7 @@ impl ReleaseHook for WebHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "WebHook: pre_release - would send {} request to {}",
-            self.config.method,
-            self.config.url
-        );
-        Ok(())
+        self.unsupported()
     }
 
     fn post_release(
@@ -330,16 +277,18 @@ impl ReleaseHook for WebHook {
         _previous_version: Option<&str>,
         _previous_revision: Option<&str>,
     ) -> Result<()> {
-        tracing::info!(
-            "WebHook: post_release - would send {} request to {}",
-            self.config.method,
-            self.config.url
-        );
-        Ok(())
+        self.unsupported()
     }
 }
 
 impl WebHook {
+    fn unsupported(&self) -> Result<()> {
+        Err(crate::ReleaseHookError::Error(format!(
+            "WebHook is unavailable: HTTP delivery is not implemented for {} {}",
+            self.config.method, self.config.url
+        )))
+    }
+
     /// Read configuration from a file.
     fn read_config(path: &std::path::Path) -> Option<WebHookConfig> {
         if !path.exists() {
@@ -712,7 +661,12 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("email delivery must be rejected until SMTP exists")
+                .to_string()
+                .contains("SMTP delivery is not implemented")
+        );
     }
 
     #[test]
@@ -727,7 +681,12 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("email delivery must be rejected until SMTP exists")
+                .to_string()
+                .contains("SMTP delivery is not implemented")
+        );
     }
 
     #[test]
@@ -742,7 +701,12 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("email delivery must be rejected until SMTP exists")
+                .to_string()
+                .contains("SMTP delivery is not implemented")
+        );
     }
 
     #[test]
@@ -778,7 +742,12 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("webhook delivery must be rejected until HTTP exists")
+                .to_string()
+                .contains("HTTP delivery is not implemented")
+        );
     }
 
     #[test]
@@ -799,7 +768,12 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("webhook delivery must be rejected until HTTP exists")
+                .to_string()
+                .contains("HTTP delivery is not implemented")
+        );
     }
 
     #[test]
@@ -820,6 +794,11 @@ mod tests {
             None,
             None,
         );
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("webhook delivery must be rejected until HTTP exists")
+                .to_string()
+                .contains("HTTP delivery is not implemented")
+        );
     }
 }
