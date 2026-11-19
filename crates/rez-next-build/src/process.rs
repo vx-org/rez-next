@@ -8,6 +8,7 @@ use rez_next_common::RezCoreError;
 use rez_next_context::{ContextConfig, EnvironmentManager, ShellExecutor, ShellType};
 use rez_next_package::serialization::{PackageFormat, PackageSerializer};
 use rez_next_package::{Package, TestCommand, TestVariantFilter};
+use rez_next_rex::{RexEnvironment, RexExecutor};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -143,7 +144,7 @@ impl BuildProcess {
         // Start build in background
         let build_id = self.build_id.clone();
         let request = self.request.clone();
-        let environment = self.environment.clone();
+        let mut environment = self.environment.clone();
         let config = self.config.clone();
         let status = self.status.clone();
         let output = self.output.clone();
@@ -154,7 +155,7 @@ impl BuildProcess {
             let result = Self::run_build_steps(
                 &build_id,
                 &request,
-                &environment,
+                &mut environment,
                 &config,
                 output.clone(),
                 errors.clone(),
@@ -264,7 +265,7 @@ impl BuildProcess {
     async fn run_build_steps(
         build_id: &str,
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         config: &BuildConfig,
         output: Arc<Mutex<String>>,
         errors: Arc<Mutex<String>>,
@@ -401,7 +402,7 @@ impl BuildProcess {
     async fn execute_build_step(
         step: &BuildStep,
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         config: &BuildConfig,
         child_process: Arc<Mutex<Option<Child>>>,
     ) -> Result<BuildStepResult, RezCoreError> {
@@ -481,9 +482,10 @@ impl BuildProcess {
     /// Execute configure step
     async fn execute_configure_step(
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         _config: &BuildConfig,
     ) -> Result<(bool, String, String), RezCoreError> {
+        apply_pre_build_commands(request, environment)?;
         // Detect and configure build system
         let build_system = BuildSystem::detect_with_package(&request.source_dir, &request.package)?;
         let configure_result = build_system.configure(request, environment).await?;
@@ -818,6 +820,74 @@ impl BuildProcess {
     }
 }
 
+fn apply_pre_build_commands(
+    request: &BuildRequest,
+    environment: &mut BuildEnvironment,
+) -> Result<(), RezCoreError> {
+    let Some(commands) = request
+        .package
+        .pre_build_commands
+        .as_deref()
+        .filter(|commands| !commands.trim().is_empty())
+    else {
+        return Ok(());
+    };
+
+    let root = request.source_dir.to_string_lossy();
+    let build_path = environment.get_build_dir().to_string_lossy();
+    let install_path = environment.get_install_dir().to_string_lossy();
+    let build_type = environment
+        .get_env_vars()
+        .get("REZ_BUILD_TYPE")
+        .map(String::as_str)
+        .unwrap_or("local");
+    let install = environment
+        .get_env_vars()
+        .get("REZ_BUILD_INSTALL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+
+    let mut executor = RexExecutor::new();
+    executor.set_context_var("this.root", root.as_ref());
+    executor.set_context_var("this.name", &request.package.name);
+    if let Some(version) = request.package.version.as_ref() {
+        executor.set_context_var("this.version", version.as_str());
+    }
+    executor.set_context_var("build.type", build_type);
+    executor.set_context_var("build.install", install.to_string());
+    executor.set_context_var("build.path", build_path.as_ref());
+    executor.set_context_var("build.install_path", install_path.as_ref());
+    executor.execute_commands(
+        commands,
+        &request.package.name,
+        Some(root.as_ref()),
+        request
+            .package
+            .version
+            .as_ref()
+            .map(|version| version.as_str()),
+    )?;
+
+    let mut resolved = RexEnvironment::new();
+    resolved.vars = environment.get_env_vars().clone();
+    resolved.apply(executor.get_actions());
+
+    let existing_keys = environment
+        .get_env_vars()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in existing_keys {
+        if !resolved.vars.contains_key(&key) {
+            environment.remove_env_var(&key);
+        }
+    }
+    for (key, value) in resolved.vars {
+        environment.add_env_var(key, value);
+    }
+    Ok(())
+}
+
 fn package_timestamp(package: &Package) -> i64 {
     package.timestamp.unwrap_or_else(|| {
         std::env::var("SOURCE_DATE_EPOCH")
@@ -911,4 +981,41 @@ fn emit_build_event(
         duration_ms,
         timestamp_ms,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildEnvironment, BuildRequest, apply_pre_build_commands};
+    use rez_next_package::Package;
+    use tempfile::tempdir;
+
+    #[test]
+    fn pre_build_commands_update_the_build_environment() {
+        let temp = tempdir().unwrap();
+        let mut package = Package::new("pre-build-package".to_string());
+        package.pre_build_commands = Some(
+            "env.setenv('PRE_BUILD_ROOT', '{this.root}')\n\
+             env.setenv('PRE_BUILD_PATH', '{build.path}')\n\
+             env.setenv('PRE_BUILD_TYPE', '{build.type}')"
+                .replace("             ", ""),
+        );
+        let request = BuildRequest::new(package, None, temp.path().to_path_buf());
+        let mut environment =
+            BuildEnvironment::new(&request.package, &temp.path().join("build"), None).unwrap();
+
+        apply_pre_build_commands(&request, &mut environment).unwrap();
+
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_ROOT"),
+            Some(&temp.path().to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_PATH"),
+            Some(&environment.get_build_dir().to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_TYPE"),
+            Some(&"local".to_string())
+        );
+    }
 }
