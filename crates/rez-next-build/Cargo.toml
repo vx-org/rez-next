@@ -28,6 +28,7 @@ async-trait = "0.1"
 sha2 = "0.11"
 hex = "0.4"
 flate2 = "1.1"
+zstd = "0.14"
 tar = "0.4"
 zip = "9.0"
 

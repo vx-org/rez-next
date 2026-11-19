@@ -242,6 +242,8 @@ fn extract_archive(artifact: &Path, destination: &Path) -> Result<(), RezCoreErr
         extract_zip(artifact, destination)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         extract_tar_gz(artifact, destination)
+    } else if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
+        extract_tar_zstd(artifact, destination)
     } else {
         Err(RezCoreError::BuildError(format!(
             "unsupported binary archive format: {}",
@@ -304,6 +306,19 @@ fn extract_tar_gz(artifact: &Path, destination: &Path) -> Result<(), RezCoreErro
     archive
         .unpack(destination)
         .map_err(|err| RezCoreError::BuildError(format!("Failed to unpack tar.gz archive: {err}")))
+}
+
+fn extract_tar_zstd(artifact: &Path, destination: &Path) -> Result<(), RezCoreError> {
+    let file = fs::File::open(artifact).map_err(|err| {
+        RezCoreError::BuildError(format!("Failed to open tar.zst archive: {err}"))
+    })?;
+    let decoder = zstd::stream::read::Decoder::new(file).map_err(|err| {
+        RezCoreError::BuildError(format!("Failed to read tar.zst archive: {err}"))
+    })?;
+    let mut archive = Archive::new(decoder);
+    archive
+        .unpack(destination)
+        .map_err(|err| RezCoreError::BuildError(format!("Failed to unpack tar.zst archive: {err}")))
 }
 
 fn copy_tree_contents(source: &Path, destination: &Path) -> Result<(), RezCoreError> {
@@ -377,12 +392,16 @@ fn copy_file_preserving_permissions(source: &Path, destination: &Path) -> Result
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use super::{copy_tree_contents, extract_zip};
+    #[cfg(unix)]
+    use super::extract_zip;
+    use super::{copy_tree_contents, extract_archive};
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     #[test]
     fn extract_zip_restores_unix_executable_permissions() {
         let temp = tempfile::tempdir().unwrap();
@@ -405,5 +424,40 @@ mod tests {
             .permissions()
             .mode();
         assert_ne!(mode & 0o111, 0, "installed tool must remain executable");
+    }
+
+    #[test]
+    fn extract_tar_zstd_supports_tar_zst_and_tzst_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("payload.tar.zst");
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/tool").unwrap();
+        header.set_size(3);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append(&header, &b"run"[..]).unwrap();
+        let tar_bytes = tar.into_inner().unwrap();
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(file, 0).unwrap();
+        encoder.write_all(&tar_bytes).unwrap();
+        encoder.finish().unwrap();
+
+        let destination = temp.path().join("extract");
+        extract_archive(&archive_path, &destination).unwrap();
+        assert_eq!(std::fs::read(destination.join("bin/tool")).unwrap(), b"run");
+
+        let tzst_path = temp.path().join("payload.tzst");
+        std::fs::copy(&archive_path, &tzst_path).unwrap();
+        let second_destination = temp.path().join("extract-tzst");
+        extract_archive(&tzst_path, &second_destination).unwrap();
+        assert_eq!(
+            std::fs::read(second_destination.join("bin/tool")).unwrap(),
+            b"run"
+        );
+
+        let install = temp.path().join("install");
+        copy_tree_contents(&destination, &install).unwrap();
+        assert_eq!(std::fs::read(install.join("bin/tool")).unwrap(), b"run");
     }
 }
