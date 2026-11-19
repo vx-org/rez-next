@@ -550,6 +550,93 @@ if not source_path or not os.path.isdir(source_path):
     }
 
     #[tokio::test]
+    async fn test_custom_script_uses_resolved_path_and_build_directory() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'contextpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("rezbuild.py"),
+            r#"
+import os
+import subprocess
+import sys
+
+expected = os.path.normcase(os.path.normpath(os.environ["REZ_BUILD_PATH"]))
+actual = os.path.normcase(os.path.normpath(os.getcwd()))
+if actual != expected:
+    print(f"unexpected build cwd: {actual!r} != {expected!r}", file=sys.stderr)
+    sys.exit(1)
+if not os.environ.get("PATH"):
+    print("resolved context did not provide PATH", file=sys.stderr)
+    sys.exit(1)
+try:
+    subprocess.run(["python", "--version"], check=True, stdout=subprocess.DEVNULL)
+except (OSError, subprocess.CalledProcessError) as error:
+    print(f"resolved PATH cannot execute python: {error}", file=sys.stderr)
+    sys.exit(1)
+"#,
+        )
+        .unwrap();
+
+        let mut config = BuildConfig::default();
+        config.build_dir = tmp.path().join("build");
+        let mut manager = BuildManager::with_config(config);
+        let pkg = make_package("contextpkg", "1.0.0");
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "custom script should run in the resolved build context: {}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn test_custom_script_restores_host_path_without_context() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'hostpathpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("rezbuild.py"),
+            r#"
+import os
+import sys
+
+if not os.environ.get("PATH"):
+    print("custom script PATH was not restored", file=sys.stderr)
+    sys.exit(1)
+"#,
+        )
+        .unwrap();
+
+        let mut config = BuildConfig::default();
+        config.build_dir = tmp.path().join("build");
+        let mut manager = BuildManager::with_config(config);
+        let pkg = make_package("hostpathpkg", "1.0.0");
+        let request = BuildRequest::new(pkg, None, source_dir);
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "custom script should receive the host PATH when no context exists: {}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
     async fn test_build_manager_passes_request_env_vars_to_rezbuild() {
         let mut manager = BuildManager::new();
         let tmp = TempDir::new().unwrap();

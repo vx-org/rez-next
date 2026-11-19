@@ -282,8 +282,7 @@ impl CustomBuildSystem {
         })?;
 
         let exec_command = if self.script_name.ends_with(".py") {
-            return Self::execute_python_build_script(request, environment, &script_path, command)
-                .await;
+            return Self::execute_python_build_script(environment, &script_path, command).await;
         } else if self.script_name.ends_with(".sh") {
             format!("bash {} {}", script_path.to_string_lossy(), command)
         } else {
@@ -292,7 +291,7 @@ impl CustomBuildSystem {
 
         let executor = ShellExecutor::with_shell(rez_next_context::ShellType::detect())
             .with_environment(Self::script_env(environment))
-            .with_working_directory(request.source_dir.clone());
+            .with_working_directory(environment.get_build_dir().clone());
         let result = executor.execute(&exec_command).await?;
         let success = result.is_success();
         let output = format!(
@@ -316,7 +315,6 @@ impl CustomBuildSystem {
     }
 
     async fn execute_python_build_script(
-        request: &BuildRequest,
         environment: &BuildEnvironment,
         script_path: &Path,
         command: &str,
@@ -332,7 +330,7 @@ impl CustomBuildSystem {
             .arg(command)
             .env_clear()
             .envs(Self::script_env(environment))
-            .current_dir(&request.source_dir)
+            .current_dir(environment.get_build_dir())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -478,8 +476,21 @@ impl CustomBuildSystem {
     fn script_env(environment: &BuildEnvironment) -> std::collections::HashMap<String, String> {
         let mut env = environment.get_env_vars().clone();
         Self::add_rez_next_pythonpath(&mut env);
+        Self::add_host_path(&mut env);
         Self::add_windows_runtime_env(&mut env);
         env
+    }
+
+    fn add_host_path(env: &mut std::collections::HashMap<String, String>) {
+        let has_path = if cfg!(windows) {
+            env.keys().any(|key| key.eq_ignore_ascii_case("PATH"))
+        } else {
+            env.contains_key("PATH")
+        };
+
+        if !has_path && let Some(path) = std::env::var_os("PATH") {
+            env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+        }
     }
 
     fn add_rez_next_pythonpath(env: &mut std::collections::HashMap<String, String>) {
