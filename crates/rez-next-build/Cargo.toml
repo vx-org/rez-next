@@ -35,6 +35,7 @@ flate2 = "1.1"
 zstd = "0.14"
 tar = "0.4"
 zip = "9.0"
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress", "util"] }
 
 [features]
 git = ["dep:git2"]

@@ -232,24 +232,75 @@ fn verify_sha256(path: &Path, expected_sha256: &str) -> Result<(), RezCoreError>
 }
 
 fn extract_archive(artifact: &Path, destination: &Path) -> Result<(), RezCoreError> {
+    match detect_archive_format(artifact)? {
+        ArchiveFormat::Zip => extract_zip(artifact, destination),
+        ArchiveFormat::TarGz => extract_tar_gz(artifact, destination),
+        ArchiveFormat::TarZstd => extract_tar_zstd(artifact, destination),
+        ArchiveFormat::Tar => extract_tar(artifact, destination),
+        ArchiveFormat::SevenZip => extract_7z(artifact, destination),
+        ArchiveFormat::RawFile => {
+            let file_name = artifact.file_name().ok_or_else(|| {
+                RezCoreError::BuildError(format!(
+                    "binary archive artifact has no file name: {}",
+                    artifact.display()
+                ))
+            })?;
+            fs::create_dir_all(destination).map_err(|err| {
+                RezCoreError::BuildError(format!(
+                    "Failed to create raw binary destination {}: {err}",
+                    destination.display()
+                ))
+            })?;
+            copy_file_preserving_permissions(artifact, &destination.join(file_name))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveFormat {
+    Zip,
+    TarGz,
+    TarZstd,
+    Tar,
+    SevenZip,
+    RawFile,
+}
+
+fn detect_archive_format(artifact: &Path) -> Result<ArchiveFormat, RezCoreError> {
     let name = artifact
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let mut header = [0_u8; 512];
+    let mut file = fs::File::open(artifact).map_err(|err| {
+        RezCoreError::BuildError(format!("Failed to inspect binary archive: {err}"))
+    })?;
+    let bytes_read = file.read(&mut header).map_err(|err| {
+        RezCoreError::BuildError(format!("Failed to inspect binary archive: {err}"))
+    })?;
+    let header = &header[..bytes_read];
 
-    if name.ends_with(".zip") {
-        extract_zip(artifact, destination)
-    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        extract_tar_gz(artifact, destination)
-    } else if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
-        extract_tar_zstd(artifact, destination)
-    } else {
-        Err(RezCoreError::BuildError(format!(
-            "unsupported binary archive format: {}",
-            artifact.display()
-        )))
+    if name.ends_with(".zip") || header.starts_with(b"PK\x03\x04") {
+        return Ok(ArchiveFormat::Zip);
     }
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") || header.starts_with(&[0x1f, 0x8b]) {
+        return Ok(ArchiveFormat::TarGz);
+    }
+    if name.ends_with(".tar.zst")
+        || name.ends_with(".tzst")
+        || header.starts_with(&[0x28, 0xb5, 0x2f, 0xfd])
+    {
+        return Ok(ArchiveFormat::TarZstd);
+    }
+    if name.ends_with(".7z") || header.starts_with(b"7z\xbc\xaf\x27\x1c") {
+        return Ok(ArchiveFormat::SevenZip);
+    }
+    if name.ends_with(".tar") || header.get(257..262) == Some(b"ustar") {
+        return Ok(ArchiveFormat::Tar);
+    }
+
+    Ok(ArchiveFormat::RawFile)
 }
 
 fn extract_zip(artifact: &Path, destination: &Path) -> Result<(), RezCoreError> {
@@ -319,6 +370,20 @@ fn extract_tar_zstd(artifact: &Path, destination: &Path) -> Result<(), RezCoreEr
     archive
         .unpack(destination)
         .map_err(|err| RezCoreError::BuildError(format!("Failed to unpack tar.zst archive: {err}")))
+}
+
+fn extract_tar(artifact: &Path, destination: &Path) -> Result<(), RezCoreError> {
+    let file = fs::File::open(artifact)
+        .map_err(|err| RezCoreError::BuildError(format!("Failed to open tar archive: {err}")))?;
+    let mut archive = Archive::new(file);
+    archive
+        .unpack(destination)
+        .map_err(|err| RezCoreError::BuildError(format!("Failed to unpack tar archive: {err}")))
+}
+
+fn extract_7z(artifact: &Path, destination: &Path) -> Result<(), RezCoreError> {
+    sevenz_rust2::decompress_file(artifact, destination)
+        .map_err(|err| RezCoreError::BuildError(format!("Failed to unpack 7z archive: {err}")))
 }
 
 fn copy_tree_contents(source: &Path, destination: &Path) -> Result<(), RezCoreError> {
@@ -459,5 +524,54 @@ mod tests {
         let install = temp.path().join("install");
         copy_tree_contents(&destination, &install).unwrap();
         assert_eq!(std::fs::read(install.join("bin/tool")).unwrap(), b"run");
+    }
+
+    #[test]
+    fn extract_tar_supports_plain_tar() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("payload.tar");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut tar = tar::Builder::new(file);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/tool").unwrap();
+        header.set_size(3);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append(&header, &b"run"[..]).unwrap();
+        tar.finish().unwrap();
+
+        let destination = temp.path().join("extract");
+        extract_archive(&archive_path, &destination).unwrap();
+        assert_eq!(std::fs::read(destination.join("bin/tool")).unwrap(), b"run");
+    }
+
+    #[test]
+    fn extract_archive_copies_bare_binary_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifact = temp.path().join("witr");
+        std::fs::write(&artifact, b"binary payload").unwrap();
+
+        let destination = temp.path().join("extract");
+        extract_archive(&artifact, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("witr")).unwrap(),
+            b"binary payload"
+        );
+    }
+
+    #[test]
+    fn extract_7z_supports_seven_zip_archives() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("tool");
+        std::fs::write(&source, b"seven zip payload").unwrap();
+        let archive_path = temp.path().join("payload.7z");
+        sevenz_rust2::compress_to_path(&source, &archive_path).unwrap();
+
+        let destination = temp.path().join("extract");
+        extract_archive(&archive_path, &destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("tool")).unwrap(),
+            b"seven zip payload"
+        );
     }
 }

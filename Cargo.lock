@@ -1955,6 +1955,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzma-rust2"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1d73c59a56771343712b22ea5615092c612c16ba291c0979e3105dfeec4890"
+
+[[package]]
 name = "mac_address"
 version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3012,6 +3018,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "sevenz-rust2",
  "sha2 0.11.0",
  "tar",
  "tempfile",
@@ -3693,6 +3700,18 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sevenz-rust2"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5e465701779cbc6d0d10cf907f175035cfdd50b8d3cb628d7f1f435ef02972f"
+dependencies = [
+ "crc32fast",
+ "js-sys",
+ "lzma-rust2 0.25.0",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -5349,7 +5368,7 @@ dependencies = [
  "getrandom 0.4.2",
  "hmac",
  "indexmap",
- "lzma-rust2",
+ "lzma-rust2 0.21.0",
  "memchr",
  "nix 0.31.3",
  "pbkdf2",
