@@ -88,6 +88,10 @@ pub struct PackageTestRunner {
     pub test_results: Vec<TestResult>,
     /// Loaded test definitions from package.
     test_definitions: HashMap<String, TestDefinition>,
+    /// Resolved environments keyed by test name.
+    test_environments: HashMap<String, HashMap<String, String>>,
+    /// Resolution failures keyed by test name.
+    test_environment_errors: HashMap<String, String>,
 }
 
 impl PackageTestRunner {
@@ -111,12 +115,52 @@ impl PackageTestRunner {
             stop_on_fail: false,
             test_results: Vec::new(),
             test_definitions: HashMap::new(),
+            test_environments: HashMap::new(),
+            test_environment_errors: HashMap::new(),
         };
 
         // Load test definitions from package file in working directory
         runner.load_test_definitions(&working_dir, &package_spec)?;
 
         Ok(runner)
+    }
+
+    /// Replace the package loaded by the constructor with a resolved package.
+    ///
+    /// This is used by bindings that resolve package requests through the
+    /// configured repository manager before creating the runner.
+    #[must_use]
+    pub fn with_package(mut self, package: Package, package_root: PathBuf) -> Self {
+        self.package_name = package.qualified_name();
+        self.working_dir = package_root;
+        self.test_definitions.clear();
+        self.test_environments.clear();
+        self.test_environment_errors.clear();
+        self.extract_tests_from_package(&package);
+        self
+    }
+
+    /// Attach the resolved environment used to execute a test.
+    pub fn set_test_environment(
+        &mut self,
+        test_name: String,
+        environment: HashMap<String, String>,
+    ) {
+        self.test_environment_errors.remove(&test_name);
+        self.test_environments.insert(test_name, environment);
+    }
+
+    /// Record a test environment resolution failure for deferred reporting.
+    pub fn set_test_environment_error(&mut self, test_name: String, error: String) {
+        self.test_environments.remove(&test_name);
+        self.test_environment_errors.insert(test_name, error);
+    }
+
+    /// Return the loaded test definitions for environment resolution.
+    pub fn test_definitions(&self) -> Vec<TestDefinition> {
+        let mut definitions: Vec<_> = self.test_definitions.values().cloned().collect();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        definitions
     }
 
     /// Set the working directory for test execution.
@@ -269,29 +313,37 @@ impl PackageTestRunner {
 
         let start_time = Instant::now();
 
-        let (status, output, error, exit_code) = if self.dry_run {
-            (
-                TestStatus::Skipped,
-                "Dry run - test not executed".to_string(),
-                None,
-                0,
-            )
-        } else {
-            // Look up the test definition
-            if let Some(test_def) = self.test_definitions.get(test_name) {
-                self.execute_test_command(test_def)
-            } else {
+        let (status, output, error, exit_code) =
+            if let Some(error) = self.test_environment_errors.get(test_name) {
                 (
                     TestStatus::Error,
                     String::new(),
-                    Some(format!(
-                        "Test '{}' not found in package definition",
-                        test_name
-                    )),
+                    Some(format!("Failed to resolve test environment: {error}")),
                     -1,
                 )
-            }
-        };
+            } else if self.dry_run {
+                (
+                    TestStatus::Skipped,
+                    "Dry run - test not executed".to_string(),
+                    None,
+                    0,
+                )
+            } else {
+                // Look up the test definition
+                if let Some(test_def) = self.test_definitions.get(test_name) {
+                    self.execute_test_command(test_name, test_def)
+                } else {
+                    (
+                        TestStatus::Error,
+                        String::new(),
+                        Some(format!(
+                            "Test '{}' not found in package definition",
+                            test_name
+                        )),
+                        -1,
+                    )
+                }
+            };
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
@@ -349,6 +401,7 @@ impl PackageTestRunner {
     /// Execute a test command and return (status, stdout, stderr, exit_code).
     fn execute_test_command(
         &self,
+        test_name: &str,
         test_def: &TestDefinition,
     ) -> (TestStatus, String, Option<String>, i32) {
         let (program, args) = match &test_def.command {
@@ -377,12 +430,16 @@ impl PackageTestRunner {
             tracing::debug!("Executing: {} {}", program, args.join(" "));
         }
 
-        let result = Command::new(&program)
+        let mut command = Command::new(&program);
+        command
             .args(&args)
             .current_dir(&self.working_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+            .stderr(Stdio::piped());
+        if let Some(environment) = self.test_environments.get(test_name) {
+            command.env_clear().envs(environment);
+        }
+        let result = command.output();
 
         match result {
             Ok(output) => {
