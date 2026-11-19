@@ -420,14 +420,14 @@ def commands():
         let pkg = make_package("mylib", "2.0.0");
         let tmp = TempDir::new().unwrap();
         let env = BuildEnvironment::new(&pkg, &tmp.path().to_path_buf(), None).unwrap();
-        // REZ_BUILD_PACKAGE_NAME should always be set
+        // Upstream exposes the project vocabulary for package identity.
         let vars = env.get_env_vars();
         assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_NAME"),
+            vars.get("REZ_BUILD_PROJECT_NAME"),
             Some(&"mylib".to_string())
         );
         assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_VERSION"),
+            vars.get("REZ_BUILD_PROJECT_VERSION"),
             Some(&"2.0.0".to_string())
         );
     }
@@ -1293,10 +1293,10 @@ mod build_type_tests {
     }
 
     #[test]
-    fn get_build_process_types_returns_local_and_central() {
+    fn get_build_process_types_returns_registered_processes() {
         let types = get_build_process_types();
         assert!(types.contains(&"local"));
-        assert!(types.contains(&"central"));
+        assert!(types.contains(&"remote"));
         assert_eq!(types.len(), 2);
     }
 

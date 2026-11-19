@@ -9,6 +9,8 @@
 //! - Build artifact management
 //! - Release workflow orchestration
 
+use serde::{Deserialize, Serialize};
+
 mod artifacts;
 mod builder;
 mod environment;
@@ -29,7 +31,7 @@ pub use systems::*; // Re-export system types for backward compat
 pub use vcs::*;
 
 /// Build type enumeration (local or central build)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildType {
     /// Local build (installed to local packages path)
     Local,
@@ -74,6 +76,12 @@ impl BuildType {
     }
 }
 
+impl Default for BuildType {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
 /// Get all available build system types
 pub fn get_buildsys_types() -> Vec<&'static str> {
     systems::get_buildsys_types()
@@ -81,7 +89,7 @@ pub fn get_buildsys_types() -> Vec<&'static str> {
 
 /// Get all available build process types
 pub fn get_build_process_types() -> Vec<&'static str> {
-    vec!["local", "central"]
+    vec!["local", "remote"]
 }
 
 /// Create a build system by type name

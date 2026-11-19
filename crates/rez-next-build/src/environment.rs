@@ -1,7 +1,7 @@
 //! Build environment management
 
-use crate::{BuildEvent, BuildEventKind, BuildStep};
-use rez_next_common::{RezCoreError, SystemInfo, utils::get_thread_count};
+use crate::{BuildEvent, BuildEventKind, BuildStep, BuildType};
+use rez_next_common::{RezCoreConfig, RezCoreError, SystemInfo, utils::get_thread_count};
 use rez_next_context::ResolvedContext;
 use rez_next_package::{Package, PackageInstallLayout, PackageRequirement};
 use std::collections::HashMap;
@@ -48,6 +48,23 @@ impl BuildEnvironment {
         context: Option<&ResolvedContext>,
         install_path: Option<&PathBuf>,
     ) -> Result<Self, RezCoreError> {
+        Self::with_install_path_and_type(
+            package,
+            base_build_dir,
+            context,
+            install_path,
+            BuildType::Local,
+        )
+    }
+
+    /// Create a build environment with an explicit Rez build type.
+    pub fn with_install_path_and_type(
+        package: &Package,
+        base_build_dir: &PathBuf,
+        context: Option<&ResolvedContext>,
+        install_path: Option<&PathBuf>,
+        build_type: BuildType,
+    ) -> Result<Self, RezCoreError> {
         // Normalize the base build directory to handle various path formats
         let normalized_base = Self::normalize_build_path(base_build_dir)?;
         let package_relative_path = PackageInstallLayout::package_base_relative_path(package)?;
@@ -70,8 +87,7 @@ impl BuildEnvironment {
         env_vars.insert("REZ_BUILD_ENV".to_string(), "1".to_string());
 
         // REZ_BUILD_TYPE: build type (local or central)
-        // Default to "local" for now; can be configured via BuildConfig later
-        env_vars.insert("REZ_BUILD_TYPE".to_string(), "local".to_string());
+        env_vars.insert("REZ_BUILD_TYPE".to_string(), build_type.name().to_string());
 
         // REZ_BUILD_INSTALL: whether to install (1 or 0)
         // Default to "0"; set to "1" when install_path is provided
@@ -84,12 +100,7 @@ impl BuildEnvironment {
             .as_ref()
             .map(|version| version.as_str().to_string())
             .unwrap_or_else(|| DEFAULT_BUILD_VERSION.to_string());
-        env_vars.insert("REZ_BUILD_PACKAGE_NAME".to_string(), package.name.clone());
         env_vars.insert("REZ_BUILD_PROJECT_NAME".to_string(), package.name.clone());
-        env_vars.insert(
-            "REZ_BUILD_PACKAGE_VERSION".to_string(),
-            package_version.clone(),
-        );
         env_vars.insert("REZ_BUILD_PROJECT_VERSION".to_string(), package_version);
 
         env_vars.insert(
@@ -111,7 +122,7 @@ impl BuildEnvironment {
         );
         env_vars.insert(
             "REZ_BUILD_THREAD_COUNT".to_string(),
-            get_thread_count(None).to_string(),
+            get_thread_count(RezCoreConfig::load().thread_count).to_string(),
         );
 
         // Add variant-related environment variables (matching original Rez)
@@ -633,14 +644,8 @@ mod tests {
         let env = BuildEnvironment::new(&pkg, &base, None).unwrap();
 
         let vars = env.get_env_vars();
-        assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_NAME"),
-            Some(&"my-package".to_string())
-        );
-        assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_VERSION"),
-            Some(&"2.3.4".to_string())
-        );
+        assert!(!vars.contains_key("REZ_BUILD_PACKAGE_NAME"));
+        assert!(!vars.contains_key("REZ_BUILD_PACKAGE_VERSION"));
         assert_eq!(
             vars.get("REZ_BUILD_PROJECT_NAME"),
             Some(&"my-package".to_string())
@@ -648,6 +653,25 @@ mod tests {
         assert_eq!(
             vars.get("REZ_BUILD_PROJECT_VERSION"),
             Some(&"2.3.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_type_is_exposed_in_environment() {
+        let pkg = make_test_package("my-package", "2.3.4");
+        let base = PathBuf::from("/workspace/build");
+        let env = BuildEnvironment::with_install_path_and_type(
+            &pkg,
+            &base,
+            None,
+            None,
+            BuildType::Central,
+        )
+        .unwrap();
+
+        assert_eq!(
+            env.get_env_vars().get("REZ_BUILD_TYPE"),
+            Some(&"central".to_string())
         );
     }
 

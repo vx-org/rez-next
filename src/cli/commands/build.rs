@@ -18,7 +18,7 @@ use ratatui::{
 };
 use rez_next_build::{
     BuildConfig, BuildEvent, BuildEventKind, BuildManager, BuildOptions, BuildRequest, BuildStatus,
-    BuildStep,
+    BuildStep, BuildType,
 };
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext};
@@ -650,6 +650,11 @@ fn execute_build(
     let build_config = BuildConfig {
         event_sender: Some(event_sender),
         clean_before_build: args.clean,
+        build_type: if args.release {
+            BuildType::Central
+        } else {
+            BuildType::Local
+        },
         ..Default::default()
     };
     let mut build_manager = BuildManager::with_config(build_config);
