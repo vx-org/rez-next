@@ -1,6 +1,7 @@
 //! Package serialization (save) logic.
 
 use crate::Package;
+use crate::package::types::json_value_to_python;
 use chrono::Utc;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -322,6 +323,12 @@ impl PackageSaver {
                 content.push_str(&format!("    \"{}\",\n", tool));
             }
             content.push_str("]\n");
+        }
+
+        for key in package.arbitrary_keys() {
+            if let Some(value) = package.arbitrary_value(&key) {
+                content.push_str(&format!("{} = {}\n", key, json_value_to_python(value)));
+            }
         }
 
         Ok(content)

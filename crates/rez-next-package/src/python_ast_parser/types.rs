@@ -34,6 +34,30 @@ pub(crate) enum PythonValue {
     None,
 }
 
+impl PythonValue {
+    pub(crate) fn into_json_value(self) -> serde_json::Value {
+        match self {
+            Self::String(value) => serde_json::Value::String(value),
+            Self::Integer(value) => serde_json::Value::Number(value.into()),
+            Self::Float(value) => serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Self::Boolean(value) => serde_json::Value::Bool(value),
+            Self::List(values) => {
+                serde_json::Value::Array(values.into_iter().map(Self::into_json_value).collect())
+            }
+            Self::Dict(values) => serde_json::Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into_json_value()))
+                    .collect(),
+            ),
+            Self::None => serde_json::Value::Null,
+            value => serde_json::Value::String(format!("{value:?}")),
+        }
+    }
+}
+
 /// Intermediate data structure for collecting package information during parsing
 #[derive(Debug, Default)]
 pub(crate) struct PackageData {
@@ -59,7 +83,7 @@ pub(crate) struct PackageData {
     pub relocatable: Option<bool>,
     pub cachable: Option<bool>,
     pub commands_function: Option<String>,
-    pub extra_fields: HashMap<String, String>,
+    pub extra_fields: HashMap<String, serde_json::Value>,
     // New fields for complete rez compatibility
     pub base: Option<String>,
     pub hashed_variants: Option<bool>,

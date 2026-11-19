@@ -63,6 +63,23 @@ mod serialization_tests {
     }
 
     #[test]
+    fn test_arbitrary_fields_survive_json_roundtrip() {
+        let mut package = make_test_package();
+        package.set_arbitrary_value(
+            "vx_upstream_sha256".to_string(),
+            serde_json::json!("abc123"),
+        );
+        package.set_arbitrary_value(
+            "vx_metadata".to_string(),
+            serde_json::json!({"channel": "stable", "priority": 2}),
+        );
+
+        let json = PackageSerializer::save_to_json(&package).unwrap();
+        let restored = PackageSerializer::load_from_json(&json).unwrap();
+        assert_eq!(restored.extra_fields, package.extra_fields);
+    }
+
+    #[test]
     fn test_write_yaml_and_read_back() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();

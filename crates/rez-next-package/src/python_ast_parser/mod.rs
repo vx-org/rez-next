@@ -340,7 +340,7 @@ impl PythonAstParser {
             _ => {
                 package_data
                     .extra_fields
-                    .insert(var_name.to_string(), format!("{:?}", value));
+                    .insert(var_name.to_string(), python_value.into_json_value());
             }
         }
         Ok(())
@@ -440,6 +440,7 @@ impl PythonAstParser {
         package.cachable = data.cachable;
         package.commands = data.commands_function.clone();
         package.commands_function = data.commands_function;
+        package.extra_fields = data.extra_fields;
         package.base = data.base;
         package.hashed_variants = data.hashed_variants;
         package.has_plugins = data.has_plugins;
@@ -503,6 +504,37 @@ preprocess = "some_preprocess_function"
         assert_eq!(
             package.preprocess,
             Some("some_preprocess_function".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_package_preserves_arbitrary_fields() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "metadata_package"
+version = "1.0.0"
+vx_upstream_sha256 = "abc123"
+vx_build_options = {"lto": True, "jobs": 8}
+vx_targets = ["linux", "windows"]
+"#,
+        )
+        .expect("arbitrary package attributes should parse");
+
+        assert_eq!(
+            package.arbitrary_value("vx_upstream_sha256"),
+            Some(&serde_json::json!("abc123"))
+        );
+        assert_eq!(
+            package.arbitrary_value("vx_build_options"),
+            Some(&serde_json::json!({"lto": true, "jobs": 8}))
+        );
+        assert_eq!(
+            package.arbitrary_keys(),
+            vec![
+                "vx_build_options".to_string(),
+                "vx_targets".to_string(),
+                "vx_upstream_sha256".to_string()
+            ]
         );
     }
 

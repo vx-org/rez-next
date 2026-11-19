@@ -30,6 +30,7 @@ impl Package {
             requires_rez_version: None,
             uuid: None,
             config: HashMap::new(),
+            extra_fields: HashMap::new(),
             help: None,
             relocatable: None,
             cachable: None,
@@ -81,6 +82,25 @@ impl Package {
     /// Get the number of variants
     pub fn num_variants(&self) -> usize {
         self.variants.len()
+    }
+
+    /// Return arbitrary package attribute names in stable order.
+    #[must_use]
+    pub fn arbitrary_keys(&self) -> Vec<String> {
+        let mut keys = self.extra_fields.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    /// Return one arbitrary package attribute, if present.
+    #[must_use]
+    pub fn arbitrary_value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.extra_fields.get(key)
+    }
+
+    /// Store an arbitrary package attribute.
+    pub fn set_arbitrary_value(&mut self, key: String, value: serde_json::Value) {
+        self.extra_fields.insert(key, value);
     }
 
     /// Set the package version
@@ -377,6 +397,16 @@ impl Package {
             lines.push(format!("cachable = {}", cachable));
         }
 
+        for key in self.arbitrary_keys() {
+            if let Some(value) = self.extra_fields.get(&key) {
+                lines.push(format!(
+                    "{} = {}",
+                    key,
+                    super::types::json_value_to_python(value)
+                ));
+            }
+        }
+
         // commands function (optional)
         if let Some(ref commands) = self.commands {
             lines.push("\ndef commands():".to_string());
@@ -534,6 +564,20 @@ mod tests {
         pkg.cachable = Some(false);
         let result = pkg.to_package_py();
         assert!(result.contains("cachable = false"));
+    }
+
+    #[test]
+    fn test_to_package_py_preserves_arbitrary_fields() {
+        let mut pkg = Package::new("metadata_pkg".to_string());
+        pkg.set_arbitrary_value(
+            "vx_metadata".to_string(),
+            serde_json::json!({"channel": "stable", "enabled": true, "priority": 2}),
+        );
+
+        let result = pkg.to_package_py();
+        assert!(result.contains(
+            "vx_metadata = {\"channel\": \"stable\", \"enabled\": True, \"priority\": 2}"
+        ));
     }
 
     #[test]

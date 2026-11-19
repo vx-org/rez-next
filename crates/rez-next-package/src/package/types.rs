@@ -8,6 +8,46 @@ use std::process::Command;
 
 use super::requirement::PackageRequirement;
 
+/// Render a JSON value as a Python literal for package.py output.
+pub fn json_value_to_python(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_string(),
+        serde_json::Value::Bool(value) => {
+            if *value {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(json_value_to_python)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        serde_json::Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}: {}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()),
+                        json_value_to_python(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 fn default_test_run_on() -> Vec<String> {
     vec!["default".to_string()]
 }
@@ -423,6 +463,12 @@ pub struct Package {
     pub uuid: Option<String>,
     /// Package config
     pub config: HashMap<String, String>,
+    /// Arbitrary package attributes from package.py.
+    ///
+    /// Rez permits package definitions to carry metadata outside the standard
+    /// schema. JSON values preserve scalar, list, and mapping shapes across
+    /// Rust and Python APIs.
+    pub extra_fields: HashMap<String, serde_json::Value>,
     /// Package help
     pub help: Option<String>,
     /// Package relocatable flag

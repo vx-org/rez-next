@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use super::types::Package;
 
 /// Number of fields serialized in the Package struct (excludes `config` and `commands_function`).
-const PACKAGE_SERIALIZED_FIELD_COUNT: usize = 35;
+const PACKAGE_SERIALIZED_FIELD_COUNT: usize = 37;
 
 impl Serialize for Package {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -51,6 +51,8 @@ impl Serialize for Package {
         state.serialize_field("plugin_for", &self.plugin_for)?;
         state.serialize_field("hashed_variants", &self.hashed_variants)?;
         state.serialize_field("preprocess", &self.preprocess)?;
+        state.serialize_field("is_dev_package", &self.is_dev_package)?;
+        state.serialize_field("extra_fields", &self.extra_fields)?;
         state.end()
     }
 }
@@ -102,6 +104,7 @@ impl<'de> Deserialize<'de> for Package {
             HashedVariants,
             Preprocess,
             IsDevPackage,
+            ExtraFields,
         }
 
         struct PackageVisitor;
@@ -222,9 +225,8 @@ impl<'de> Deserialize<'de> for Package {
                 let preprocess = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(34, &self))?;
-                let is_dev_package = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::invalid_length(35, &self))?;
+                let is_dev_package = seq.next_element()?.unwrap_or(None);
+                let extra_fields = seq.next_element()?.unwrap_or_default();
 
                 Ok(Package {
                     name,
@@ -265,6 +267,7 @@ impl<'de> Deserialize<'de> for Package {
                     hashed_variants,
                     preprocess,
                     is_dev_package,
+                    extra_fields,
                     filepath: None,
                     includes: None,
                 })
@@ -310,6 +313,7 @@ impl<'de> Deserialize<'de> for Package {
                 let mut hashed_variants = None;
                 let mut preprocess = None;
                 let mut is_dev_package = None;
+                let mut extra_fields = None;
 
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -529,6 +533,12 @@ impl<'de> Deserialize<'de> for Package {
                             }
                             is_dev_package = Some(map.next_value()?);
                         }
+                        Field::ExtraFields => {
+                            if extra_fields.is_some() {
+                                return Err(de::Error::duplicate_field("extra_fields"));
+                            }
+                            extra_fields = Some(map.next_value()?);
+                        }
                     }
                 }
 
@@ -572,6 +582,7 @@ impl<'de> Deserialize<'de> for Package {
                     hashed_variants: hashed_variants.unwrap_or(None),
                     preprocess: preprocess.unwrap_or(None),
                     is_dev_package: is_dev_package.unwrap_or(None),
+                    extra_fields: extra_fields.unwrap_or_default(),
                     filepath: None,
                     includes: None,
                 })
@@ -615,6 +626,7 @@ impl<'de> Deserialize<'de> for Package {
             "hashed_variants",
             "preprocess",
             "is_dev_package",
+            "extra_fields",
         ];
         deserializer.deserialize_struct("Package", FIELDS, PackageVisitor)
     }

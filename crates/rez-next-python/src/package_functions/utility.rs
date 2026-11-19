@@ -5,7 +5,7 @@
 //! package_release_keys, get_last_release_time, test_function.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PySet};
+use pyo3::types::{PyAny, PyDict, PyList, PyModule, PySet};
 use rez_next_package::{PackageTestDefinition, TestCommand, TestVariantFilter};
 
 fn package_test_to_python<'py>(
@@ -159,6 +159,15 @@ pub fn dump_package_data<'py>(
 
     if let Some(fv) = pkg.format_version {
         dict.set_item("format_version", fv)?;
+    }
+
+    let json_module = PyModule::import(py, "json")?;
+    for key in pkg.arbitrary_keys() {
+        if let Some(value) = pkg.arbitrary_value(&key) {
+            let json = serde_json::to_string(value)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+            dict.set_item(&key, json_module.getattr("loads")?.call1((json,))?)?;
+        }
     }
 
     // Add tests dict

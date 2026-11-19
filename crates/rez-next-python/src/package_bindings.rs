@@ -2,11 +2,22 @@
 
 use crate::version_bindings::PyVersion;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyDict, PyModule};
 use rez_next_package::serialization::PackageFormat;
 use rez_next_package::{
     Package, PackageRequirement, PackageTestDefinition, TestCommand, TestVariantFilter,
 };
+
+fn json_value_to_python<'py>(
+    py: Python<'py>,
+    value: &serde_json::Value,
+) -> PyResult<Bound<'py, PyAny>> {
+    let json = serde_json::to_string(value)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    PyModule::import(py, "json")?
+        .getattr("loads")?
+        .call1((json,))
+}
 
 fn extract_package_test_definition(value: &Bound<'_, PyAny>) -> PyResult<PackageTestDefinition> {
     if let Ok(command) = value.extract::<String>() {
@@ -123,6 +134,18 @@ impl PyPackage {
         h.finish()
     }
 
+    fn __getattr__<'py>(&self, name: &str, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.0
+            .arbitrary_value(name)
+            .map(|value| json_value_to_python(py, value))
+            .transpose()?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyAttributeError::new_err(format!(
+                    "Package instance has no attribute '{name}'"
+                ))
+            })
+    }
+
     /// Package name
     #[getter]
     fn name(&self) -> String {
@@ -222,6 +245,23 @@ impl PyPackage {
     #[setter]
     fn set_tools(&mut self, tools: Vec<String>) {
         self.0.tools = tools;
+    }
+
+    /// Return arbitrary package attribute names in stable order.
+    fn arbitrary_keys(&self) -> Vec<String> {
+        self.0.arbitrary_keys()
+    }
+
+    /// Return an arbitrary package attribute as its native Python value.
+    fn get_arbitrary<'py>(
+        &self,
+        py: Python<'py>,
+        key: &str,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.0
+            .arbitrary_value(key)
+            .map(|value| json_value_to_python(py, value))
+            .transpose()
     }
 
     /// Commands string
@@ -514,6 +554,61 @@ impl PyPackage {
             pkg.config = val.extract()?;
         }
 
+        const STANDARD_FIELDS: &[&str] = &[
+            "name",
+            "version",
+            "description",
+            "authors",
+            "requires",
+            "build_requires",
+            "private_build_requires",
+            "variants",
+            "tools",
+            "commands",
+            "build_command",
+            "build_system",
+            "pre_commands",
+            "post_commands",
+            "pre_test_commands",
+            "pre_build_commands",
+            "tests",
+            "requires_rez_version",
+            "uuid",
+            "config",
+            "help",
+            "relocatable",
+            "cachable",
+            "timestamp",
+            "revision",
+            "changelog",
+            "release_message",
+            "previous_version",
+            "previous_revision",
+            "vcs",
+            "format_version",
+            "base",
+            "has_plugins",
+            "plugin_for",
+            "hashed_variants",
+            "preprocess",
+            "is_dev_package",
+        ];
+        for (key, value) in data.iter() {
+            let key: String = key.extract()?;
+            if !STANDARD_FIELDS.contains(&key.as_str()) {
+                let json = PyModule::import(_py, "json")?
+                    .getattr("dumps")?
+                    .call1((&value,))?;
+                let json: String = json.extract()?;
+                let value = serde_json::from_str(&json).map_err(|error| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid arbitrary package attribute '{key}': {error}"
+                    ))
+                })?;
+                pkg.set_arbitrary_value(key, value);
+            }
+        }
+
         Ok(PyPackage(pkg))
     }
 
@@ -616,6 +711,12 @@ impl PyPackage {
         }
         if let Some(ref v) = self.0.format_version {
             dict.set_item("format_version", *v)?;
+        }
+
+        for key in self.0.arbitrary_keys() {
+            if let Some(value) = self.0.arbitrary_value(&key) {
+                dict.set_item(&key, json_value_to_python(py, value)?)?;
+            }
         }
 
         Ok(dict)
@@ -757,6 +858,13 @@ impl PyPackage {
         if let Some(ref u) = self.0.uuid {
             lines.push("".to_string());
             lines.push(format!("uuid = \"{}\"", u));
+        }
+
+        for key in self.0.arbitrary_keys() {
+            if let Some(value) = self.0.arbitrary_value(&key) {
+                let value = rez_next_package::package::types::json_value_to_python(value);
+                lines.push(format!("{} = {}", key, value));
+            }
         }
 
         Ok(lines.join("\n"))
