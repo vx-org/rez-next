@@ -3006,6 +3006,8 @@ dependencies = [
  "rez-next-context",
  "rez-next-package",
  "rez-next-release-hook",
+ "rez-next-repository",
+ "rez-next-solver",
  "rez-next-version",
  "rstest",
  "serde",

@@ -4,13 +4,21 @@
 //! VCS validation, package building, tag creation, and metadata generation.
 
 use crate::vcs::{ReleaseVCS, VCSMetadata, detect_vcs};
+use crate::{BuildManager, BuildOptions, BuildRequest};
 use rez_next_common::{RezCoreConfig, RezCoreError};
 use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
 use rez_next_package::serialization::PackageSerializer;
-use rez_next_package::{Package, PackageInstallLayout, TestCommand};
+use rez_next_package::{
+    Package, PackageInstallLayout, PackageRequirement, Requirement, TestCommand,
+};
 use rez_next_release_hook::{ReleaseHookError, ReleaseHookEvent};
+use rez_next_repository::package_repository::FilesystemPackageRepository;
+use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::simple_repository::RepositoryManager;
+use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Release mode for the package release process
 ///
@@ -139,6 +147,8 @@ pub struct ReleaseManager {
     ignore_existing_tag: Option<bool>,
     /// Explicit release hooks. `None` uses the configured global hook list.
     release_hooks: Option<Vec<String>>,
+    /// Optional zero-based variant selection. `None` releases every variant.
+    variants: Option<Vec<usize>>,
 }
 
 impl ReleaseManager {
@@ -151,6 +161,7 @@ impl ReleaseManager {
             skip_vcs_validation: false,
             ignore_existing_tag: None,
             release_hooks: None,
+            variants: None,
         }
     }
 
@@ -181,6 +192,14 @@ impl ReleaseManager {
     /// restores the global `release_hooks` configuration.
     pub fn set_release_hooks(&mut self, release_hooks: Option<Vec<String>>) {
         self.release_hooks = release_hooks;
+    }
+
+    /// Set the zero-based variants to release.
+    ///
+    /// `None` releases every variant. The indices are validated against the
+    /// loaded package before any build work starts.
+    pub fn set_variants(&mut self, variants: Option<Vec<usize>>) {
+        self.variants = variants;
     }
 
     /// Execute the complete release workflow, detecting the VCS from
@@ -240,8 +259,10 @@ impl ReleaseManager {
     ///
     /// # Tag policy
     ///
-    /// The tag name is `{name}-{version}`. Step 3 only *inspects* it; step 9 is
-    /// what creates it, and only after every mutating step has succeeded. Where
+    /// The default tag name is `{qualified_name}` (`{name}-{version}`). A
+    /// configured `plugins.release_vcs.tag_name` may use `{name}`, `{version}`,
+    /// and `{qualified_name}` placeholders. Step 3 only *inspects* it; step 9
+    /// is what creates it, and only after every mutating step has succeeded. Where
     /// a VCS is in play, that ordering keeps the invariant **tag exists ⟺
     /// release succeeded**: a build or test failure leaves no tag behind, so the
     /// same version can be retried without an override. With no VCS there is no
@@ -388,7 +409,7 @@ impl ReleaseManager {
 
         // Step 4: Build the package (if not skipped)
         if !self.skip_build {
-            self.build_package(&package, &install_path, &mut result)?;
+            self.build_package(source_dir, &package, &mut result)?;
         }
 
         // Step 5: Run tests (if not skipped)
@@ -505,9 +526,13 @@ impl ReleaseManager {
 
     /// Get the install path for the package
     fn get_install_path(&self, package: &Package) -> Result<PathBuf, RezCoreError> {
-        let config = RezCoreConfig::load();
         let package_relative_path = PackageInstallLayout::package_base_relative_path(package)?;
+        Ok(self.get_install_base().join(package_relative_path))
+    }
 
+    /// Get the repository root used for the selected release mode.
+    fn get_install_base(&self) -> PathBuf {
+        let config = RezCoreConfig::load();
         let install_base = match self.mode {
             ReleaseMode::Local | ReleaseMode::DryRun => {
                 PathBuf::from(expand_home(&config.local_packages_path))
@@ -521,8 +546,7 @@ impl ReleaseManager {
                 }
             }
         };
-
-        Ok(install_base.join(package_relative_path))
+        install_base
     }
 
     /// Validate VCS repository state
@@ -565,77 +589,130 @@ impl ReleaseManager {
     /// Build the package (including variants)
     fn build_package(
         &self,
+        source_dir: &Path,
         package: &Package,
-        install_path: &Path,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        // Validate all destination paths before mutating the repository.
-        let layouts = if package.variants.is_empty() {
-            vec![PackageInstallLayout::for_variant(package, None)?]
-        } else {
-            (0..package.variants.len())
-                .map(|index| PackageInstallLayout::for_variant(package, Some(index)))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        // Create base install directory
-        if let Err(e) = fs::create_dir_all(install_path) {
-            result
-                .errors
-                .push(format!("Failed to create install directory: {}", e));
-            return Err(RezCoreError::BuildError(e.to_string()));
-        }
+        let variant_indices = self.release_variant_indices(package)?;
+        let install_base = self.get_install_base();
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!("Failed to create release build runtime: {error}"))
+        })?;
+        let mut build_manager = BuildManager::new();
 
-        // Check if package has variants
-        if !package.variants.is_empty() {
-            result.warnings.push(format!(
-                "Package has {} variant(s), creating variant directories",
-                package.variants.len()
-            ));
-
-            for (index, (variant, layout)) in package.variants.iter().zip(&layouts).enumerate() {
-                let variant_path = install_path.join(layout.variant_subpath());
-
-                if let Err(e) = fs::create_dir_all(&variant_path) {
-                    result.errors.push(format!(
-                        "Failed to create variant directory '{}': {}",
-                        layout.variant_subpath().display(),
-                        e
-                    ));
-                    continue;
-                }
-
-                // Write variant metadata file
-                let metadata = serde_json::json!({
-                    "variant": variant,
-                    "index": index,
-                    "subpath": layout.variant_subpath(),
-                });
-                let metadata_path = variant_path.join("variant.json");
-                if let Err(e) = fs::write(
-                    &metadata_path,
-                    serde_json::to_string_pretty(&metadata).unwrap_or_default(),
-                ) {
-                    result.warnings.push(format!(
-                        "Failed to write variant metadata for '{}': {}",
-                        layout.variant_subpath().display(),
-                        e
-                    ));
-                }
-
-                result.warnings.push(format!(
-                    "Created variant directory: {} for variant {:?}",
-                    layout.variant_subpath().display(),
-                    variant
-                ));
-            }
-        } else {
-            // No variants, just create the base install directory
+        if package.variants.is_empty() {
             result
                 .warnings
-                .push("No variants defined, using base install path".to_string());
+                .push("Package has no variants, building the base package".to_string());
+        } else {
+            result.warnings.push(format!(
+                "Building {} selected variant(s)",
+                variant_indices.len()
+            ));
+        }
+
+        for variant_index in variant_indices {
+            let variant_requires = variant_index.map(|index| package.variants[index].clone());
+            let context = match resolve_build_context(package, variant_requires.as_deref()) {
+                Ok(context) => context,
+                Err(error) => {
+                    result.errors.push(format!(
+                        "Failed to resolve build context for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        error
+                    ));
+                    return Ok(());
+                }
+            };
+            let request = BuildRequest {
+                package: package.clone(),
+                context,
+                source_dir: source_dir.to_path_buf(),
+                variant_index,
+                variant_requires,
+                options: BuildOptions {
+                    force_rebuild: false,
+                    skip_tests: self.skip_tests,
+                    release_mode: true,
+                    build_args: Vec::new(),
+                    env_vars: std::collections::HashMap::new(),
+                },
+                install_path: Some(install_base.clone()),
+            };
+
+            let build_ids = match runtime.block_on(build_manager.start_build(request)) {
+                Ok(build_ids) => build_ids,
+                Err(error) => {
+                    result.errors.push(format!(
+                        "Failed to start build for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        error
+                    ));
+                    return Ok(());
+                }
+            };
+            for build_id in build_ids {
+                let build_result = match runtime.block_on(build_manager.wait_for_build(&build_id)) {
+                    Ok(build_result) => build_result,
+                    Err(error) => {
+                        result.errors.push(format!(
+                            "Failed to collect build result for variant {}: {}",
+                            variant_index
+                                .map_or_else(|| "none".to_string(), |index| index.to_string()),
+                            error
+                        ));
+                        return Ok(());
+                    }
+                };
+                if !build_result.success {
+                    result.errors.push(format!(
+                        "Build failed for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        build_result.errors
+                    ));
+                    return Ok(());
+                }
+            }
         }
 
         Ok(())
+    }
+
+    fn release_variant_indices(
+        &self,
+        package: &Package,
+    ) -> Result<Vec<Option<usize>>, RezCoreError> {
+        if package.variants.is_empty() {
+            if self
+                .variants
+                .as_ref()
+                .is_some_and(|indices| !indices.is_empty())
+            {
+                return Err(RezCoreError::BuildError(format!(
+                    "Package '{}' has no variants",
+                    package.name
+                )));
+            }
+            return Ok(vec![None]);
+        }
+
+        let indices = self
+            .variants
+            .clone()
+            .unwrap_or_else(|| (0..package.variants.len()).collect());
+        indices
+            .into_iter()
+            .map(|index| {
+                if index >= package.variants.len() {
+                    Err(RezCoreError::BuildError(format!(
+                        "Variant index {index} is out of range for package '{}'",
+                        package.name
+                    )))
+                } else {
+                    Ok(Some(index))
+                }
+            })
+            .collect()
     }
 
     /// Check whether an already-released version is being released again.
@@ -705,15 +782,12 @@ impl ReleaseManager {
 
     /// Build the VCS tag name for a package version.
     fn release_tag_name(package: &Package) -> String {
-        format!(
-            "{}-{}",
-            package.name,
-            package
-                .version
-                .as_ref()
-                .map(|v| v.as_str())
-                .unwrap_or("unknown")
-        )
+        let tag_format = RezCoreConfig::load()
+            .get_field("plugins.release_vcs.tag_name")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "{qualified_name}".to_string());
+
+        format_release_tag(package, &tag_format)
     }
 
     /// Create the VCS tag for a successfully released version.
@@ -1089,6 +1163,112 @@ impl ReleaseManager {
     }
 }
 
+/// Expand the supported release VCS tag placeholders for a package.
+fn format_release_tag(package: &Package, tag_format: &str) -> String {
+    let version = package
+        .version
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("unknown");
+    let qualified_name = package.qualified_name();
+
+    tag_format
+        .replace("{name}", &package.name)
+        .replace("{version}", version)
+        .replace("{qualified_name}", &qualified_name)
+}
+
+/// Resolve the environment required to build one package variant.
+///
+/// Release, CLI build, and Python bindings all use the same repository and
+/// solver path through this function. An empty requirement set intentionally
+/// returns `None`, allowing build systems that do not need a Rez context to
+/// start without touching package repositories.
+pub fn resolve_build_context(
+    package: &Package,
+    variant_requires: Option<&[String]>,
+) -> Result<Option<rez_next_context::ResolvedContext>, RezCoreError> {
+    let mut requirement_strings = Vec::new();
+    for requirement in package
+        .requires
+        .iter()
+        .chain(package.build_requires.iter())
+        .chain(package.private_build_requires.iter())
+        .chain(variant_requires.unwrap_or(&[]).iter())
+    {
+        if !requirement_strings.contains(requirement) {
+            requirement_strings.push(requirement.clone());
+        }
+    }
+
+    if requirement_strings.is_empty() {
+        return Ok(None);
+    }
+
+    let mut repository_manager = RepositoryManager::new();
+    let config = RezCoreConfig::load();
+    for (index, search_path) in config.packages_path.iter().enumerate() {
+        let path = PathBuf::from(expand_home(search_path));
+        if path.exists() {
+            let repository =
+                FilesystemPackageRepository::with_name(path, format!("release_repo_{index}"));
+            repository_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
+        }
+    }
+
+    let requirements = requirement_strings
+        .iter()
+        .map(|requirement| {
+            requirement.parse::<Requirement>().map_err(|error| {
+                RezCoreError::RequirementParse(format!(
+                    "Failed to parse build requirement '{}': {}",
+                    requirement, error
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let context_requirements = requirement_strings
+        .iter()
+        .map(|requirement| {
+            PackageRequirement::parse(requirement).map_err(|error| {
+                RezCoreError::RequirementParse(format!(
+                    "Failed to parse build context requirement '{}': {}",
+                    requirement, error
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+        RezCoreError::BuildError(format!("Failed to create build context runtime: {error}"))
+    })?;
+    let mut resolver = DependencyResolver::new(
+        Arc::new(repository_manager),
+        SolverConfig {
+            strict_mode: true,
+            ..SolverConfig::default()
+        },
+    );
+    let resolution = runtime.block_on(resolver.resolve(requirements))?;
+
+    let mut context = rez_next_context::ResolvedContext::from_requirements(context_requirements);
+    context.resolved_packages = resolution
+        .resolved_packages
+        .into_iter()
+        .map(|info| info.try_materialized_package())
+        .collect::<Result<Vec<_>, _>>()?;
+    context.status = rez_next_context::ContextStatus::Resolved;
+
+    let environment_manager = EnvironmentManager::new(ContextConfig {
+        inherit_parent_env: false,
+        ..Default::default()
+    });
+    context.environment_vars =
+        runtime.block_on(environment_manager.generate_environment(&context.resolved_packages))?;
+
+    Ok(Some(context))
+}
+
 /// Expand `~` in path to the user's home directory
 fn expand_home(path: &str) -> String {
     if path.starts_with("~") {
@@ -1147,6 +1327,26 @@ version = "{}"
     fn test_release_manager_new() {
         let _manager = ReleaseManager::new(ReleaseMode::Release, false, false);
         // Just verify it creates without error
+    }
+
+    #[test]
+    fn test_release_tag_format_expands_supported_placeholders() {
+        let mut package = Package::new("test_pkg".to_string());
+        package.version = Some(rez_next_version::Version::parse("1.0.0").unwrap());
+
+        assert_eq!(
+            format_release_tag(&package, "{qualified_name}"),
+            "test_pkg-1.0.0"
+        );
+        assert_eq!(
+            format_release_tag(&package, "release-{name}"),
+            "release-test_pkg"
+        );
+        assert_eq!(format_release_tag(&package, "v{version}"), "v1.0.0");
+        assert_eq!(
+            format_release_tag(&package, "{name}/{version}/{qualified_name}"),
+            "test_pkg/1.0.0/test_pkg-1.0.0"
+        );
     }
 
     #[test]
@@ -1734,11 +1934,11 @@ version = "1.0.0"
             .expect("release() must not propagate an error");
 
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("Failed to create variant directory")),
-            "an uncreatable variant directory must fail the release, got {:?}",
+            result.errors.iter().any(|e| {
+                e.contains("Failed to create variant directory")
+                    || e.contains("Failed to resolve build context")
+            }),
+            "a failed build or build-context resolution must fail the release, got {:?}",
             result.errors
         );
         assert!(

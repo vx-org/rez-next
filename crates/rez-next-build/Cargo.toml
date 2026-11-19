@@ -16,6 +16,8 @@ rez-next-version = { version = "0.3.12", path = "../rez-next-version" } # x-rele
 rez-next-package = { version = "0.3.12", path = "../rez-next-package" } # x-release-please-version
 rez-next-context = { version = "0.3.12", path = "../rez-next-context" } # x-release-please-version
 rez-next-release-hook = { version = "0.3.12", path = "../rez-next-release-hook" } # x-release-please-version
+rez-next-repository = { version = "0.3.12", path = "../rez-next-repository" } # x-release-please-version
+rez-next-solver = { version = "0.3.12", path = "../rez-next-solver" } # x-release-please-version
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
