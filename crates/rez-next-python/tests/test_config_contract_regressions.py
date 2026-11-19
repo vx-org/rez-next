@@ -23,6 +23,25 @@ def test_overrides_are_applied_and_can_be_changed():
     assert config.sourced_filepaths == []
 
 
+def test_override_is_a_scoped_context_manager():
+    config = Config([], overrides={"build_directory": "original"})
+
+    with config.override("build_directory", "scoped") as active:
+        assert active is config
+        assert config.build_directory == "scoped"
+
+    assert config.build_directory == "original"
+
+
+def test_plugin_override_is_restored_after_context():
+    config = Config([], overrides={"plugins": {"release_vcs": {"tag_name": "old"}}})
+
+    with config.override("plugins.release_vcs.tag_name", "new"):
+        assert config.plugins.data()["release_vcs"]["tag_name"] == "new"
+
+    assert config.plugins.data()["release_vcs"]["tag_name"] == "old"
+
+
 def test_copied_overrides_do_not_change_original():
     original = Config([], overrides={"build_directory": "original"})
     assert original.build_directory == "original"

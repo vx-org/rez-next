@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// The file names probed for a project config, in priority order.
 pub const PROJECT_CONFIG_NAMES: &[&str] = &[
+    "rezconfig.py",
     "rezconfig.toml",
     "rezconfig.yaml",
     "rezconfig.yml",
@@ -100,29 +101,36 @@ pub fn find_project_config_file(from: &Path) -> Option<PathBuf> {
 /// depends on this crate, not the other way round.
 #[must_use]
 pub fn sourced_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    let mut groups = Vec::new();
 
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(exe_dir) = exe_path.parent()
     {
-        paths.push(exe_dir.join("rezconfig.yaml"));
-        paths.push(exe_dir.join("rezconfig.json"));
+        groups.push(vec![
+            exe_dir.join("rezconfig.py"),
+            exe_dir.join("rezconfig.yaml"),
+            exe_dir.join("rezconfig.json"),
+        ]);
     }
 
     if let Ok(config_file) = std::env::var("REZ_CONFIG_FILE") {
         let separator = if cfg!(windows) { ';' } else { ':' };
         for path in config_file.split(separator) {
-            paths.push(PathBuf::from(path));
+            groups.push(config_path_variants(PathBuf::from(path)));
         }
     }
 
     if cfg!(unix) {
-        paths.push(PathBuf::from("/etc/rez/config.yaml"));
-        paths.push(PathBuf::from("/usr/local/etc/rez/config.yaml"));
+        groups.push(config_path_variants(PathBuf::from("/etc/rez/config.yaml")));
+        groups.push(config_path_variants(PathBuf::from(
+            "/usr/local/etc/rez/config.yaml",
+        )));
     } else if cfg!(windows)
         && let Ok(program_data) = std::env::var("PROGRAMDATA")
     {
-        paths.push(PathBuf::from(program_data).join("rez").join("config.yaml"));
+        groups.push(config_path_variants(
+            PathBuf::from(program_data).join("rez").join("config.yaml"),
+        ));
     }
 
     if std::env::var("REZ_DISABLE_HOME_CONFIG")
@@ -137,19 +145,40 @@ pub fn sourced_paths() -> Vec<PathBuf> {
             .map(PathBuf::from);
 
         if let Some(home) = home {
-            paths.push(home.join(".rezconfig"));
-            paths.push(home.join(".rezconfig.yaml"));
-            paths.push(home.join(".rez").join("config.yaml"));
+            groups.push(config_path_variants(home.join(".rezconfig")));
+            groups.push(config_path_variants(home.join(".rezconfig.yaml")));
+            groups.push(config_path_variants(home.join(".rez").join("config.yaml")));
         }
     }
 
     if let Ok(cwd) = std::env::current_dir()
         && let Some(project) = find_project_config_file(&cwd)
     {
-        paths.push(project);
+        groups.push(config_path_variants(project));
     }
 
-    paths.into_iter().filter(|path| path.exists()).collect()
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for group in groups {
+        if let Some(path) = group.into_iter().find(|path| path.is_file())
+            && !paths.iter().any(|current| paths_equal(current, &path))
+        {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn config_path_variants(path: PathBuf) -> Vec<PathBuf> {
+    if path.extension().is_some_and(|extension| extension == "py") {
+        return vec![path];
+    }
+
+    let python_path = path.with_extension("py");
+    if paths_equal(&python_path, &path) {
+        vec![path]
+    } else {
+        vec![python_path, path]
+    }
 }
 
 #[cfg(test)]

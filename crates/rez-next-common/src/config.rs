@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::SystemInfo;
 
@@ -127,6 +128,14 @@ pub struct RezCoreConfig {
 
     /// Maximum number of changelog characters stored on a released package.
     pub max_package_changelog_chars: usize,
+
+    /// Registry-backed settings that do not yet have a dedicated Rust field.
+    ///
+    /// Keeping these values makes the shared configuration contract lossless.
+    /// Consumers can read them through [`RezCoreConfig::get_field`] while a
+    /// subsystem is being migrated to a typed field.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Nested keys accepted by [`CacheConfig`], used to reject unknown overrides
@@ -212,6 +221,7 @@ impl Default for RezCoreConfig {
             ],
             context_tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
             max_package_changelog_chars: 65536,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -297,62 +307,76 @@ impl RezCoreConfig {
     /// Get the list of configuration file paths that are searched
     #[must_use]
     pub fn get_search_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
+        Self::search_path_groups().into_iter().flatten().collect()
+    }
 
-        // 1. Built-in config (if exists)
+    /// Return logical configuration locations and their format preference.
+    ///
+    /// Rez treats a Python file as the preferred representation for each
+    /// logical location. The fallback file is then parsed as YAML/JSON. A
+    /// group is selected at most once, so a stale `.rezconfig` cannot override
+    /// the adjacent `.rezconfig.py` file.
+    fn search_path_groups() -> Vec<Vec<PathBuf>> {
+        let mut groups = Vec::new();
+
         if let Ok(exe_path) = env::current_exe()
             && let Some(exe_dir) = exe_path.parent()
         {
-            paths.push(exe_dir.join("rezconfig.yaml"));
-            paths.push(exe_dir.join("rezconfig.json"));
+            groups.push(vec![
+                exe_dir.join("rezconfig.py"),
+                exe_dir.join("rezconfig.yaml"),
+                exe_dir.join("rezconfig.json"),
+            ]);
         }
 
-        // 2. Environment variable REZ_CONFIG_FILE
         if let Ok(config_file) = env::var("REZ_CONFIG_FILE") {
-            for path in config_file.split(path_list_separator()) {
-                paths.push(PathBuf::from(path));
+            for path in config_file
+                .split(path_list_separator())
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                groups.push(config_path_variants(PathBuf::from(path)));
             }
         }
 
-        // 3. System-wide config
         if cfg!(unix) {
-            paths.push(PathBuf::from("/etc/rez/config.yaml"));
-            paths.push(PathBuf::from("/usr/local/etc/rez/config.yaml"));
+            groups.push(config_path_variants(PathBuf::from("/etc/rez/config.yaml")));
+            groups.push(config_path_variants(PathBuf::from(
+                "/usr/local/etc/rez/config.yaml",
+            )));
         } else if cfg!(windows)
             && let Ok(program_data) = env::var("PROGRAMDATA")
         {
-            paths.push(PathBuf::from(program_data).join("rez").join("config.yaml"));
+            groups.push(config_path_variants(
+                PathBuf::from(program_data).join("rez").join("config.yaml"),
+            ));
         }
 
-        // 4. User home config (unless disabled)
         if env::var("REZ_DISABLE_HOME_CONFIG")
             .unwrap_or_default()
             .to_lowercase()
             != "1"
         {
-            if let Ok(home) = env::var("HOME") {
-                let home_path = PathBuf::from(&home);
-                paths.push(home_path.join(".rezconfig"));
-                paths.push(home_path.join(".rezconfig.yaml"));
-                paths.push(home_path.join(".rez").join("config.yaml"));
-            } else if cfg!(windows)
-                && let Ok(userprofile) = env::var("USERPROFILE")
-            {
-                let user_path = PathBuf::from(&userprofile);
-                paths.push(user_path.join(".rezconfig"));
-                paths.push(user_path.join(".rezconfig.yaml"));
-                paths.push(user_path.join(".rez").join("config.yaml"));
+            let home = env::var("HOME")
+                .or_else(|_| env::var("USERPROFILE"))
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+
+            if let Some(home_path) = home {
+                groups.push(config_path_variants(home_path.join(".rezconfig")));
+                groups.push(config_path_variants(home_path.join(".rezconfig.yaml")));
+                groups.push(config_path_variants(
+                    home_path.join(".rez").join("config.yaml"),
+                ));
             }
         }
 
-        // 5. Project config (rez-next extension, see `find_project_config_file`).
-        // Ordered after the user layer so a project overrides a user setting,
-        // and before `REZ_*` overrides so the environment still wins.
         if let Some(project) = Self::find_project_config_file(&cwd()) {
-            paths.push(project);
+            groups.push(config_path_variants(project));
         }
 
-        paths
+        groups
     }
 
     /// Find the project configuration file by walking up from `from`.
@@ -381,7 +405,7 @@ impl RezCoreConfig {
     pub fn load_layers() -> Result<Vec<ConfigLayer>, RezCoreError> {
         let mut layers = Vec::new();
 
-        for path in Self::get_search_paths() {
+        for path in existing_config_paths() {
             if !path.exists() {
                 continue;
             }
@@ -472,10 +496,7 @@ impl RezCoreConfig {
     /// Get the list of configuration files that actually exist and are sourced
     #[must_use]
     pub fn get_sourced_paths() -> Vec<PathBuf> {
-        Self::get_search_paths()
-            .into_iter()
-            .filter(|path| path.exists())
-            .collect()
+        existing_config_paths()
     }
 
     /// Report configuration keys that rez-next does not know about.
@@ -513,17 +534,14 @@ impl RezCoreConfig {
     pub fn try_load() -> Result<Self, RezCoreError> {
         let mut merged = serde_json::Map::new();
 
-        for path in Self::get_search_paths() {
-            if !path.exists() {
-                continue;
-            }
+        for path in existing_config_paths() {
             let content = std::fs::read_to_string(&path).map_err(RezCoreError::Io)?;
             let layer = parse_config_layer(&path, &content)?;
             deep_merge_json_object(&mut merged, layer);
         }
 
         for key in Self::unknown_keys(&merged) {
-            eprintln!("rez-next: ignoring unknown config key {key:?} (not in the key registry)");
+            eprintln!("rez-next: preserving unknown config key {key:?} for generic consumers");
         }
 
         let mut config: Self = serde_json::from_value(serde_json::Value::Object(merged))?;
@@ -665,16 +683,16 @@ impl RezCoreConfig {
             // Nested cache.* keys: merge into the existing cache so sibling
             // keys set by a config file survive a partial env object.
             "cache" => assign_cache(&mut self.cache, &value),
+            "plugins" => assign(&mut self.plugins, &value),
+            other if rez_next_config::keys::find(other).is_some() => {
+                self.extra.insert(other.to_string(), value);
+                Ok(())
+            }
             other => {
-                // An override for a key rez-next does not model is as invisible
-                // as one in a config file, so report it the same way rather
-                // than letting REZ_<KEY> fail silently.
-                if rez_next_config::keys::find(other).is_none() {
-                    eprintln!(
-                        "rez-next: ignoring unknown config key {other:?} \
-                         (not in the key registry)"
-                    );
-                }
+                eprintln!(
+                    "rez-next: ignoring unknown config key {other:?} \
+                     (not in the key registry)"
+                );
                 Ok(())
             }
         }
@@ -733,7 +751,10 @@ fn lookup_dotted<'v>(
 fn classify_layer_path(path: &Path) -> LayerSource {
     if let Ok(config_file) = env::var("REZ_CONFIG_FILE") {
         for entry in config_file.split(path_list_separator()) {
-            if paths_equal(path, Path::new(entry)) {
+            let configured = Path::new(entry);
+            if paths_equal(path, configured)
+                || paths_equal(&path.with_extension(""), &configured.with_extension(""))
+            {
                 return LayerSource::ConfigFileEnv;
             }
         }
@@ -764,6 +785,35 @@ fn classify_layer_path(path: &Path) -> LayerSource {
 /// The current working directory, falling back to an empty path.
 fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_default()
+}
+
+/// Build the candidates for one logical Rez configuration location.
+fn config_path_variants(path: PathBuf) -> Vec<PathBuf> {
+    if path.extension().is_some_and(|extension| extension == "py") {
+        return vec![path];
+    }
+
+    let python_path = path.with_extension("py");
+    if paths_equal(&python_path, &path) {
+        vec![path]
+    } else {
+        vec![python_path, path]
+    }
+}
+
+/// Resolve each logical location to its highest-priority existing file.
+fn existing_config_paths() -> Vec<PathBuf> {
+    let mut selected: Vec<PathBuf> = Vec::new();
+
+    for group in RezCoreConfig::search_path_groups() {
+        if let Some(path) = group.into_iter().find(|path| path.is_file())
+            && !selected.iter().any(|current| paths_equal(current, &path))
+        {
+            selected.push(path);
+        }
+    }
+
+    selected
 }
 
 /// The user's home directory, honouring both `HOME` and `USERPROFILE`.
@@ -813,12 +863,19 @@ pub const fn path_list_separator() -> char {
     if cfg!(windows) { ';' } else { ':' }
 }
 
-/// Parse a single config file body (YAML or JSON) into a JSON object.
+/// Parse a single config file body into a JSON object.
 fn parse_config_layer(
     path: &std::path::Path,
     content: &str,
 ) -> Result<serde_json::Value, RezCoreError> {
     let display = path.display().to_string();
+
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+    {
+        return load_python_config(path);
+    }
 
     // YAML is a superset of JSON, so one parse handles both formats.
     let value = serde_yaml::from_str::<serde_json::Value>(content)
@@ -837,6 +894,110 @@ fn parse_config_layer(
     }
 
     Ok(value)
+}
+
+/// Execute a Rez-style Python config file and convert JSON-compatible globals.
+///
+/// A subprocess keeps the Rust binary independent from a particular Python ABI
+/// while preserving the upstream contract that config files are executable
+/// Python. Values such as functions and imported modules cannot cross the JSON
+/// boundary and are omitted because native consumers cannot call them.
+fn load_python_config(path: &Path) -> Result<serde_json::Value, RezCoreError> {
+    const LOADER: &str = r#"
+import json
+import os
+import sys
+import types
+
+path = os.path.abspath(sys.argv[1])
+sys.path.insert(0, os.path.dirname(path))
+namespace = {
+    "__file__": path,
+    "__name__": "__rezconfig__",
+}
+if os.path.basename(os.path.dirname(path)) == "rez_next":
+    namespace["__package__"] = "rez_next"
+
+with open(path, encoding="utf-8") as stream:
+    code = compile(stream.read(), path, "exec")
+    exec(code, namespace)
+
+def json_value(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_value(item) for item in value]
+    raise TypeError(type(value).__name__)
+
+result = {}
+for key, value in namespace.items():
+    if key.startswith("_") or isinstance(value, types.ModuleType):
+        continue
+    try:
+        result[key] = json_value(value)
+    except TypeError:
+        pass
+
+print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+"#;
+
+    let mut candidates = Vec::new();
+    if let Ok(python) = env::var("REZ_PYTHON")
+        && !python.trim().is_empty()
+    {
+        candidates.push(python);
+    }
+    if cfg!(windows) {
+        candidates.extend(["python".to_string(), "py".to_string()]);
+    } else {
+        candidates.extend(["python3".to_string(), "python".to_string()]);
+    }
+
+    let mut not_found = Vec::new();
+    for executable in candidates {
+        let output = match Command::new(&executable)
+            .arg("-c")
+            .arg(LOADER)
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                not_found.push(executable);
+                continue;
+            }
+            Err(error) => {
+                return Err(RezCoreError::ConfigError(format!(
+                    "{}: failed to start Python ({error})",
+                    path.display()
+                )));
+            }
+        };
+
+        if !output.status.success() {
+            let details = String::from_utf8_lossy(&output.stderr);
+            return Err(RezCoreError::ConfigError(format!(
+                "{}: Python execution failed: {}",
+                path.display(),
+                details.trim()
+            )));
+        }
+
+        return serde_json::from_slice(&output.stdout).map_err(|error| {
+            RezCoreError::ConfigError(format!(
+                "{}: Python config did not produce a JSON object: {error}",
+                path.display()
+            ))
+        });
+    }
+
+    Err(RezCoreError::ConfigError(format!(
+        "{}: no Python interpreter found (tried {})",
+        path.display(),
+        not_found.join(", ")
+    )))
 }
 
 /// Deep-merge `patch` into `base`: objects merge recursively, everything else
@@ -1201,6 +1362,47 @@ mod tests {
             let cfg = RezCoreConfig::try_load().expect("multi-file config must load");
             assert_eq!(cfg.editor, "/bin/first");
             assert_eq!(cfg.browser, "/bin/second");
+        });
+    }
+
+    #[test]
+    fn test_python_config_file_is_executed_and_merged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "rezconfig.py",
+            "build_directory = '_python_build'\npackage_filter = {'name': 'maya'}\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("Python config must load");
+            assert_eq!(cfg.build_directory, "_python_build");
+            assert_eq!(
+                cfg.get_field("package_filter"),
+                Some(serde_json::json!({"name": "maya"}))
+            );
+        });
+    }
+
+    #[test]
+    fn test_registry_settings_are_retained_in_extra_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "registry.yaml",
+            "package_filter:\n  - name: maya\npackage_orderers:\n  - name: version\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("registry settings must load");
+            assert_eq!(
+                cfg.get_field("package_filter"),
+                Some(serde_json::json!([{"name": "maya"}]))
+            );
+            assert_eq!(
+                cfg.get_field("package_orderers"),
+                Some(serde_json::json!([{"name": "version"}]))
+            );
         });
     }
 

@@ -7,7 +7,8 @@
 use serde_json::Value as JsonValue;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Command;
 use thiserror::Error;
 
 pub mod keys;
@@ -68,8 +69,10 @@ pub enum ConfigSource {
     Project = 1,
     /// User-level configuration.
     User = 2,
+    /// Files named by `REZ_CONFIG_FILE`.
+    ConfigFileEnv = 3,
     /// System-level configuration (lowest priority).
-    System = 3,
+    System = 4,
 }
 
 // -----------------------------------------------------------------------------
@@ -107,19 +110,11 @@ impl Config {
     pub fn load() -> Result<Self, ConfigError> {
         let mut config = Self::new();
 
-        // Load system config
-        if let Some(system_config) = Self::find_system_config() {
-            config.merge_file(&system_config, ConfigSource::System)?;
-        }
-
-        // Load user config
-        if let Some(user_config) = Self::find_user_config() {
-            config.merge_file(&user_config, ConfigSource::User)?;
-        }
-
-        // Load project config
-        if let Some(project_config) = Self::find_project_config() {
-            config.merge_file(&project_config, ConfigSource::Project)?;
+        // `sourced_paths` is shared with validation and follows the same
+        // logical-file preference as the Rust binary. Loading the complete
+        // list in order makes every config layer visible to this registry.
+        for path in sourced_paths() {
+            config.merge_file(&path, source_for_path(&path))?;
         }
 
         // Apply environment variable overrides (unless locked)
@@ -196,16 +191,17 @@ impl Config {
         let content =
             fs::read_to_string(path).map_err(|_| ConfigError::FileNotFound(path_str.clone()))?;
 
-        let value: JsonValue = if path.extension().map(|e| e == "json").unwrap_or(false) {
+        let extension = path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+        let value: JsonValue = if extension.as_deref() == Some("py") {
+            load_python_config(path)?
+        } else if extension.as_deref() == Some("json") {
             serde_json::from_str(&content).map_err(|e| ConfigError::ParseError {
                 file: path_str.clone(),
                 error: e.to_string(),
             })?
-        } else if path
-            .extension()
-            .map(|e| e == "yaml" || e == "yml")
-            .unwrap_or(false)
-        {
+        } else if matches!(extension.as_deref(), Some("yaml") | Some("yml") | None) {
             serde_yaml::from_str(&content).map_err(|e| ConfigError::ParseError {
                 file: path_str.clone(),
                 error: e.to_string(),
@@ -338,51 +334,6 @@ impl Config {
         Ok(())
     }
 
-    /// Find system-level configuration file.
-    fn find_system_config() -> Option<PathBuf> {
-        // Check common system config locations
-        let locations = vec![
-            PathBuf::from("/etc/rez/rezconfig.toml"),
-            PathBuf::from("/etc/rezconfig.toml"),
-            PathBuf::from("C:\\ProgramData\\rez\\rezconfig.toml"),
-        ];
-
-        locations.into_iter().find(|loc| loc.exists())
-    }
-
-    /// Find user-level configuration file.
-    fn find_user_config() -> Option<PathBuf> {
-        if let Some(config_dir) = dirs::config_dir() {
-            let rez_config = config_dir.join("rez").join("rezconfig.toml");
-            if rez_config.exists() {
-                return Some(rez_config);
-            }
-        }
-
-        // Fallback to home directory
-        if let Some(home) = dirs::home_dir() {
-            let rez_config = home.join(".rez").join("rezconfig.toml");
-            if rez_config.exists() {
-                return Some(rez_config);
-            }
-        }
-
-        None
-    }
-
-    /// Find project-level configuration file.
-    ///
-    /// **rez-next extension**: upstream rez has no project-level config file —
-    /// it reads `REZ_CONFIG_FILE` and `~/.rezconfig` only. The upward walk is a
-    /// rez-next addition.
-    ///
-    /// The lookup is shared with the CLI so both entry points agree on which
-    /// file is the project config; two copies of the walk would drift apart.
-    fn find_project_config() -> Option<PathBuf> {
-        let current = env::current_dir().ok()?;
-        crate::project::find_project_config_file(&current)
-    }
-
     /// Get all loaded configuration sources.
     pub fn sources(&self) -> &[ConfigSource] {
         &self.sources
@@ -402,6 +353,119 @@ impl Config {
     pub fn data(&self) -> &JsonValue {
         &self.data
     }
+}
+
+fn source_for_path(path: &Path) -> ConfigSource {
+    if let Ok(config_file) = env::var("REZ_CONFIG_FILE") {
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        if config_file.split(separator).any(|entry| {
+            paths_equal(path, Path::new(entry))
+                || paths_equal(
+                    &path.with_extension(""),
+                    &Path::new(entry).with_extension(""),
+                )
+        }) {
+            return ConfigSource::ConfigFileEnv;
+        }
+    }
+
+    if let Some(project) = find_project_config_file(&env::current_dir().unwrap_or_default())
+        && paths_equal(path, &project)
+    {
+        return ConfigSource::Project;
+    }
+
+    if let Some(home) = dirs::home_dir()
+        && path.starts_with(home)
+    {
+        return ConfigSource::User;
+    }
+
+    ConfigSource::System
+}
+
+fn load_python_config(path: &Path) -> Result<JsonValue, ConfigError> {
+    const LOADER: &str = r#"
+import json
+import os
+import sys
+import types
+
+path = os.path.abspath(sys.argv[1])
+sys.path.insert(0, os.path.dirname(path))
+namespace = {"__file__": path, "__name__": "__rezconfig__"}
+with open(path, encoding="utf-8") as stream:
+    exec(compile(stream.read(), path, "exec"), namespace)
+
+def json_value(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_value(item) for item in value]
+    raise TypeError(type(value).__name__)
+
+result = {}
+for key, value in namespace.items():
+    if key.startswith("_") or isinstance(value, types.ModuleType):
+        continue
+    try:
+        result[key] = json_value(value)
+    except TypeError:
+        pass
+print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+"#;
+
+    let mut candidates = Vec::new();
+    if let Ok(python) = env::var("REZ_PYTHON")
+        && !python.trim().is_empty()
+    {
+        candidates.push(python);
+    }
+    if cfg!(windows) {
+        candidates.extend(["python".to_string(), "py".to_string()]);
+    } else {
+        candidates.extend(["python3".to_string(), "python".to_string()]);
+    }
+
+    for executable in candidates {
+        let output = match Command::new(&executable)
+            .arg("-c")
+            .arg(LOADER)
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    file: path.display().to_string(),
+                    error: format!("failed to start Python: {error}"),
+                });
+            }
+        };
+
+        if !output.status.success() {
+            return Err(ConfigError::ParseError {
+                file: path.display().to_string(),
+                error: format!(
+                    "Python execution failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+
+        return serde_json::from_slice(&output.stdout).map_err(|error| ConfigError::ParseError {
+            file: path.display().to_string(),
+            error: format!("Python config did not produce JSON: {error}"),
+        });
+    }
+
+    Err(ConfigError::ParseError {
+        file: path.display().to_string(),
+        error: "no Python interpreter found".to_string(),
+    })
 }
 
 /// Set a flat, `snake_case` key on a JSON object (e.g. `packages_path`).
@@ -559,6 +623,31 @@ mod tests {
         assert_eq!(config.get("b.d"), Some(&json!(3)));
         assert_eq!(config.get("b.e"), Some(&json!(5)));
         assert_eq!(config.get("f"), Some(&json!(6)));
+    }
+
+    #[test]
+    fn test_python_config_file_is_loaded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rezconfig.py");
+        std::fs::write(
+            &path,
+            "build_directory = '_build'\nplugins = {'release_vcs': {'tag_name': 'v'}}\n",
+        )
+        .expect("write config");
+
+        let mut config = Config::new();
+        config
+            .merge_file(&path, ConfigSource::Project)
+            .expect("Python config must load");
+
+        assert_eq!(
+            config.get_string("build_directory"),
+            Some("_build".to_string())
+        );
+        assert_eq!(
+            config.get_string("plugins.release_vcs.tag_name"),
+            Some("v".to_string())
+        );
     }
 
     #[test]

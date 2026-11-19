@@ -1272,14 +1272,20 @@ class Config:
         return other
 
     def override(self, key, value):
+        previous_overrides = copy.deepcopy(self.overrides)
         keys = key.split(".")
         if len(keys) > 1:
             if keys[0] != "plugins":
                 raise AttributeError(f"no such setting: {key!r}")
-            self.plugins.override(keys[1:], value)
+            target = self.overrides.setdefault("plugins", {})
+            for part in keys[1:-1]:
+                target = target.setdefault(part, {})
+            target[keys[-1]] = value
+            self._uncache()
         else:
             self.overrides[key] = value
             self._uncache(key)
+        return _OverrideContext(self, previous_overrides)
 
     def is_overridden(self, key):
         return key in self.overrides
@@ -1314,6 +1320,7 @@ class Config:
         for setting in keys:
             self.__dict__.pop(setting, None)
         self.__dict__.pop("_data", None)
+        self.__dict__.pop("_data_without_overrides", None)
         self.__dict__.pop("plugins", None)
 
     def _swap(self, other):
@@ -1423,6 +1430,27 @@ class _PluginConfigs:
 
     def __repr__(self):
         return f"{self.__class__.__name__}({str(self)})"
+
+
+class _OverrideContext:
+    """Restore a config override when a ``with`` block exits.
+
+    ``Config.override`` has historically applied changes immediately. Returning
+    a context manager keeps that behavior for callers that ignore the return
+    value while also supporting the scoped form used by Rez integrations.
+    """
+
+    def __init__(self, config, previous_overrides):
+        self._config = config
+        self._previous_overrides = previous_overrides
+
+    def __enter__(self):
+        return self._config
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._config.overrides = self._previous_overrides
+        self._config._uncache()
+        return False
 
 
 class _DebugPrinter:
