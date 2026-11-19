@@ -33,6 +33,18 @@ impl PythonAstParser {
         }
     }
 
+    /// Extract an optional string value from an expression.
+    pub(super) fn extract_optional_string(
+        &self,
+        expr: &Expr,
+    ) -> Result<Option<String>, RezCoreError> {
+        if matches!(self.evaluate_expression(expr)?, PythonValue::None) {
+            Ok(None)
+        } else {
+            self.extract_string_value(expr).map(Some)
+        }
+    }
+
     /// Extract an optional boolean value from an expression
     pub(super) fn extract_bool_value(&self, expr: &Expr) -> Result<Option<bool>, RezCoreError> {
         match self.evaluate_expression(expr) {
@@ -63,6 +75,28 @@ impl PythonAstParser {
                 Expr::Constant(constant) => match &constant.value {
                     Constant::Int(i) => i.to_string().parse::<i32>().map_err(|e| {
                         RezCoreError::PackageParse(format!("Integer too large for i32: {}", e))
+                    }),
+                    _ => Err(RezCoreError::PackageParse(format!(
+                        "Expected integer value, got: {:?}",
+                        constant.value
+                    ))),
+                },
+                _ => Err(RezCoreError::PackageParse(format!(
+                    "Expected constant value, got: {:?}",
+                    expr
+                ))),
+            },
+        }
+    }
+
+    /// Extract a 64-bit integer value from an expression.
+    pub(super) fn extract_i64_value(&self, expr: &Expr) -> Result<i64, RezCoreError> {
+        match self.evaluate_expression(expr) {
+            Ok(PythonValue::Integer(value)) => Ok(value),
+            _ => match expr {
+                Expr::Constant(constant) => match &constant.value {
+                    Constant::Int(value) => value.to_string().parse::<i64>().map_err(|error| {
+                        RezCoreError::PackageParse(format!("Integer too large for i64: {error}"))
                     }),
                     _ => Err(RezCoreError::PackageParse(format!(
                         "Expected integer value, got: {:?}",

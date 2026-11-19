@@ -223,7 +223,7 @@ impl PythonAstParser {
         let python_value = self.evaluate_expression(value)?;
         self.context
             .variables
-            .insert(var_name.to_string(), python_value);
+            .insert(var_name.to_string(), python_value.clone());
 
         match var_name {
             "name" => {
@@ -311,6 +311,31 @@ impl PythonAstParser {
             }
             "preprocess" => {
                 package_data.preprocess = Some(self.extract_string_value(value)?);
+            }
+            "timestamp" => {
+                package_data.timestamp = if matches!(python_value, types::PythonValue::None) {
+                    None
+                } else {
+                    Some(self.extract_i64_value(value)?)
+                };
+            }
+            "revision" => {
+                package_data.revision = self.extract_optional_string(value)?;
+            }
+            "changelog" => {
+                package_data.changelog = self.extract_optional_string(value)?;
+            }
+            "release_message" => {
+                package_data.release_message = self.extract_optional_string(value)?;
+            }
+            "previous_version" => {
+                package_data.previous_version = self.extract_optional_string(value)?;
+            }
+            "previous_revision" => {
+                package_data.previous_revision = self.extract_optional_string(value)?;
+            }
+            "vcs" => {
+                package_data.vcs = self.extract_optional_string(value)?;
             }
             _ => {
                 package_data
@@ -421,6 +446,20 @@ impl PythonAstParser {
         package.plugin_for = data.plugin_for;
         package.format_version = data.format_version;
         package.preprocess = data.preprocess;
+        package.timestamp = data.timestamp;
+        package.revision = data.revision;
+        package.changelog = data.changelog;
+        package.release_message = data.release_message;
+        package.previous_version = data
+            .previous_version
+            .map(|version| {
+                Version::parse(&version).map_err(|error| {
+                    RezCoreError::PackageParse(format!("Invalid previous version: {error}"))
+                })
+            })
+            .transpose()?;
+        package.previous_revision = data.previous_revision;
+        package.vcs = data.vcs;
 
         package.validate()?;
 
@@ -465,6 +504,35 @@ preprocess = "some_preprocess_function"
             package.preprocess,
             Some("some_preprocess_function".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_package_release_metadata() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "released_package"
+version = "2.0.0"
+timestamp = 1700000000
+revision = "abc123"
+changelog = "Changes"
+release_message = "Release 2.0.0"
+previous_version = "1.9.0"
+previous_revision = "def456"
+vcs = "git"
+"#,
+        )
+        .expect("release metadata should parse");
+
+        assert_eq!(package.timestamp, Some(1_700_000_000));
+        assert_eq!(package.revision.as_deref(), Some("abc123"));
+        assert_eq!(package.changelog.as_deref(), Some("Changes"));
+        assert_eq!(package.release_message.as_deref(), Some("Release 2.0.0"));
+        assert_eq!(
+            package.previous_version.as_ref().map(ToString::to_string),
+            Some("1.9.0".to_string())
+        );
+        assert_eq!(package.previous_revision.as_deref(), Some("def456"));
+        assert_eq!(package.vcs.as_deref(), Some("git"));
     }
 
     #[test]

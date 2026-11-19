@@ -67,6 +67,13 @@ pub(crate) struct PackageData {
     pub plugin_for: Vec<String>,
     pub format_version: Option<i32>,
     pub preprocess: Option<String>,
+    pub timestamp: Option<i64>,
+    pub revision: Option<String>,
+    pub changelog: Option<String>,
+    pub release_message: Option<String>,
+    pub previous_version: Option<String>,
+    pub previous_revision: Option<String>,
+    pub vcs: Option<String>,
 }
 
 impl PackageData {

@@ -124,6 +124,9 @@ pub struct RezCoreConfig {
 
     /// Directory contexts are written to (`context_tmpdir`)
     pub context_tmpdir: String,
+
+    /// Maximum number of changelog characters stored on a released package.
+    pub max_package_changelog_chars: usize,
 }
 
 /// Nested keys accepted by [`CacheConfig`], used to reject unknown overrides
@@ -208,6 +211,7 @@ impl Default for RezCoreConfig {
                 "build".to_string(),
             ],
             context_tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
+            max_package_changelog_chars: 65536,
         }
     }
 }
@@ -657,6 +661,7 @@ impl RezCoreConfig {
             "build_directory" => assign(&mut self.build_directory, &value),
             "build_script_names" => assign_str_list(&mut self.build_script_names, &value),
             "context_tmpdir" => assign(&mut self.context_tmpdir, &value),
+            "max_package_changelog_chars" => assign(&mut self.max_package_changelog_chars, &value),
             // Nested cache.* keys: merge into the existing cache so sibling
             // keys set by a config file survive a partial env object.
             "cache" => assign_cache(&mut self.cache, &value),

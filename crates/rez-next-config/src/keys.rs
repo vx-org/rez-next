@@ -610,7 +610,7 @@ static REGISTRY: Lazy<Vec<KeyDef>> = Lazy::new(|| {
         KeyDef {
             name: "max_package_changelog_chars",
             ty: KeyType::Int,
-            default: Some(JsonValue::from(5000)),
+            default: Some(JsonValue::from(65536)),
             origin: Origin::Rez,
             deprecated: false,
             doc: "Maximum characters of changelog kept per package.",
@@ -955,6 +955,7 @@ mod tests {
         "default_relocatable",
         "build_directory",
         "context_tmpdir",
+        "max_package_changelog_chars",
         "use_rust_version",
         "use_rust_solver",
         "use_rust_repository",
@@ -993,6 +994,7 @@ mod tests {
             "default_relocatable",
             "build_directory",
             "context_tmpdir",
+            "max_package_changelog_chars",
         ] {
             assert_eq!(
                 find(name).unwrap().origin,

@@ -7,7 +7,7 @@ use crate::vcs::{ReleaseVCS, VCSMetadata, detect_vcs};
 use crate::{BuildManager, BuildOptions, BuildRequest};
 use rez_next_common::{RezCoreConfig, RezCoreError};
 use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
-use rez_next_package::serialization::PackageSerializer;
+use rez_next_package::serialization::{PackageFormat, PackageSerializer};
 use rez_next_package::{
     Package, PackageInstallLayout, PackageRequirement, Requirement, TestCommand,
 };
@@ -19,6 +19,7 @@ use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Release mode for the package release process
 ///
@@ -328,7 +329,7 @@ impl ReleaseManager {
         let mut result = ReleaseResult::default();
 
         // Step 1: Load package definition
-        let package = self.load_package(source_dir, &mut result)?;
+        let mut package = self.load_package(source_dir, &mut result)?;
         if !result.errors.is_empty() {
             return Ok(result);
         }
@@ -373,6 +374,8 @@ impl ReleaseManager {
             }
             return Ok(result);
         }
+
+        self.populate_previous_release(&mut package, &mut result);
 
         // Step 3: Reject an already-released version before anything is built
         // or installed. The tag check must run first: the build step copies
@@ -431,8 +434,10 @@ impl ReleaseManager {
             self.generate_changelog(vcs_impl.as_ref(), &package, &mut result)?;
         }
 
+        self.populate_release_metadata(&mut package, &vcs, message, &mut result);
+
         // Step 7: Write release metadata
-        self.write_release_metadata(&package, &install_path, &vcs, &mut result)?;
+        self.write_vcs_metadata(&install_path, &vcs, &mut result)?;
 
         // Step 8: Install package definition
         self.install_package_definition(source_dir, &install_path, &package, &mut result)?;
@@ -926,10 +931,10 @@ impl ReleaseManager {
     fn generate_changelog(
         &self,
         vcs: &dyn ReleaseVCS,
-        _package: &Package,
+        package: &Package,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        match vcs.get_changelog(None, None) {
+        match vcs.get_changelog(package.previous_revision.as_deref(), None) {
             Ok(changelog) => {
                 result.changelog = Some(changelog);
             }
@@ -942,10 +947,105 @@ impl ReleaseManager {
         Ok(())
     }
 
-    /// Write release metadata to the package definition
-    fn write_release_metadata(
+    /// Populate the previous release fields before pre-release hooks run.
+    fn populate_previous_release(&self, package: &mut Package, result: &mut ReleaseResult) {
+        if package.previous_version.is_some() || package.version.is_none() {
+            return;
+        }
+
+        match self.find_previous_release(package) {
+            Ok(Some(previous)) => {
+                package.previous_version = previous.version.clone();
+                package.previous_revision = previous.revision.clone();
+            }
+            Ok(None) => {}
+            Err(error) => result
+                .warnings
+                .push(format!("Failed to find previous release: {error}")),
+        }
+    }
+
+    /// Populate release provenance on the package definition that is installed.
+    fn populate_release_metadata(
         &self,
-        _package: &Package,
+        package: &mut Package,
+        vcs: &Option<Arc<dyn ReleaseVCS + Send + Sync>>,
+        release_message: Option<&str>,
+        result: &mut ReleaseResult,
+    ) {
+        package.timestamp = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        );
+        package.release_message = release_message.map(str::to_owned);
+        package.changelog = result.changelog.as_deref().map(|changelog| {
+            truncate_changelog(changelog, RezCoreConfig::load().max_package_changelog_chars)
+        });
+
+        if let Some(vcs_impl) = vcs {
+            package.vcs = Some(vcs_impl.get_type_name().to_string());
+            match vcs_impl.get_current_revision() {
+                Ok(revision) => package.revision = Some(revision.revision_id),
+                Err(error) => result
+                    .warnings
+                    .push(format!("Failed to get VCS revision: {error}")),
+            }
+        } else {
+            package.vcs = None;
+            package.revision = None;
+        }
+    }
+
+    /// Find the newest released package version older than the package being built.
+    fn find_previous_release(
+        &self,
+        package: &Package,
+    ) -> Result<Option<Arc<Package>>, RezCoreError> {
+        let Some(current_version) = package.version.as_ref() else {
+            return Ok(None);
+        };
+
+        let mut repository_manager = RepositoryManager::new();
+        let config = RezCoreConfig::load();
+        let mut search_paths = vec![self.get_install_base()];
+        search_paths.extend(
+            config
+                .packages_path
+                .iter()
+                .map(|search_path| PathBuf::from(expand_home(search_path))),
+        );
+        search_paths.dedup();
+        for (index, path) in search_paths.into_iter().enumerate() {
+            if path.exists() {
+                let repository =
+                    FilesystemPackageRepository::with_name(path, format!("release_repo_{index}"));
+                repository_manager
+                    .add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
+            }
+        }
+
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!(
+                "Failed to create release metadata runtime: {error}"
+            ))
+        })?;
+        let packages = runtime.block_on(repository_manager.find_packages(&package.name))?;
+        Ok(packages
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version < current_version)
+            })
+            .max_by(|left, right| left.version.cmp(&right.version)))
+    }
+
+    /// Write the VCS metadata sidecar for an installed package.
+    fn write_vcs_metadata(
+        &self,
         install_path: &Path,
         vcs: &Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>>,
         result: &mut ReleaseResult,
@@ -994,7 +1094,7 @@ impl ReleaseManager {
         &self,
         source_dir: &Path,
         install_path: &Path,
-        _package: &Package,
+        package: &Package,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
         let pkg_file = source_dir.join("package.py");
@@ -1009,14 +1109,31 @@ impl ReleaseManager {
         };
 
         let dest = install_path.join(dest_name);
-        match fs::copy(src, &dest) {
-            Ok(_) => {}
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Failed to copy package definition: {}", e));
-                return Err(RezCoreError::BuildError(e.to_string()));
-            }
+        if dest_name == "package.py" {
+            let content = fs::read_to_string(src).map_err(|error| {
+                RezCoreError::BuildError(format!(
+                    "Failed to read package definition {}: {error}",
+                    src.display()
+                ))
+            })?;
+            let content = append_python_release_metadata(&content, package)?;
+            fs::write(&dest, content).map_err(|error| {
+                result.errors.push(format!(
+                    "Failed to install package definition {}: {error}",
+                    dest.display()
+                ));
+                RezCoreError::BuildError(error.to_string())
+            })?;
+        } else {
+            PackageSerializer::save_to_file(package, &dest, PackageFormat::Yaml).map_err(
+                |error| {
+                    result.errors.push(format!(
+                        "Failed to install package definition {}: {error}",
+                        dest.display()
+                    ));
+                    error
+                },
+            )?;
         }
 
         Ok(())
@@ -1176,6 +1293,51 @@ fn format_release_tag(package: &Package, tag_format: &str) -> String {
         .replace("{name}", &package.name)
         .replace("{version}", version)
         .replace("{qualified_name}", &qualified_name)
+}
+
+fn truncate_changelog(changelog: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return changelog.to_string();
+    }
+    changelog.chars().take(max_chars).collect()
+}
+
+fn append_python_release_metadata(
+    content: &str,
+    package: &Package,
+) -> Result<String, RezCoreError> {
+    let string_literal = |value: Option<&str>| {
+        value
+            .map(serde_json::to_string)
+            .transpose()
+            .map(|value| value.unwrap_or_else(|| "None".to_string()))
+            .map_err(|error| {
+                RezCoreError::PackageParse(format!("Failed to serialize release metadata: {error}"))
+            })
+    };
+    let release_message = string_literal(package.release_message.as_deref())?;
+    let changelog = string_literal(package.changelog.as_deref())?;
+    let revision = string_literal(package.revision.as_deref())?;
+    let previous_version = string_literal(
+        package
+            .previous_version
+            .as_ref()
+            .map(|version| version.as_str()),
+    )?;
+    let previous_revision = string_literal(package.previous_revision.as_deref())?;
+    let vcs = string_literal(package.vcs.as_deref())?;
+
+    Ok(format!(
+        "{content}\n\n# Release metadata written by rez-next\n\
+timestamp = {}\n\
+revision = {revision}\n\
+changelog = {changelog}\n\
+release_message = {release_message}\n\
+previous_version = {previous_version}\n\
+previous_revision = {previous_revision}\n\
+vcs = {vcs}\n",
+        package.timestamp.unwrap_or_default()
+    ))
 }
 
 /// Resolve the environment required to build one package variant.
@@ -1592,7 +1754,7 @@ version = "{}"
     }
 
     #[test]
-    fn test_write_release_metadata_creates_file() {
+    fn test_write_vcs_metadata_creates_file() {
         // Create temp dirs
         let source_dir = TempDir::new().unwrap();
         let install_dir = TempDir::new().unwrap();
@@ -1617,16 +1779,11 @@ version = "1.0.0"
         // Create ReleaseManager (dry-run mode)
         let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
 
-        // Create a Package for the test
-        let pkg = rez_next_package::Package::new("test_pkg".to_string());
-        let mut pkg = pkg;
-        pkg.version = Some(rez_next_version::Version::new(Some("1.0.0")).unwrap());
-
-        // Manually call write_release_metadata
+        // Manually call write_vcs_metadata
         let mut result = ReleaseResult::default();
         let vcs: std::sync::Arc<dyn ReleaseVCS + Send + Sync> = std::sync::Arc::new(vcs);
         manager
-            .write_release_metadata(&pkg, install_dir.path(), &Some(vcs), &mut result)
+            .write_vcs_metadata(install_dir.path(), &Some(vcs), &mut result)
             .unwrap();
 
         // Verify vcs_metadata.json was created
@@ -1653,16 +1810,8 @@ version = "1.0.0"
     }
 
     #[test]
-    fn test_write_release_metadata_no_vcs() {
-        let source_dir = TempDir::new().unwrap();
+    fn test_write_vcs_metadata_no_vcs() {
         let install_dir = TempDir::new().unwrap();
-
-        // Create package.py
-        let pkg_file = source_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
 
         // No VCS
         let vcs: Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>> = None;
@@ -1670,13 +1819,10 @@ version = "1.0.0"
         // Create ReleaseManager
         let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
 
-        // Create a Package for the test
-        let pkg = rez_next_package::Package::new("test_pkg".to_string());
-
-        // Call write_release_metadata with no VCS
+        // Call write_vcs_metadata with no VCS
         let mut result = ReleaseResult::default();
         manager
-            .write_release_metadata(&pkg, install_dir.path(), &vcs, &mut result)
+            .write_vcs_metadata(install_dir.path(), &vcs, &mut result)
             .unwrap();
 
         // Verify vcs_metadata.json was NOT created
@@ -1977,6 +2123,50 @@ version = "1.0.0"
             vec!["fresh_pkg-2.0.0".to_string()],
             "a successful release must create its tag exactly once"
         );
+    }
+
+    #[test]
+    fn test_release_installs_release_provenance() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src");
+        fs::create_dir_all(&source).unwrap();
+        init_git_repo(&source);
+        create_test_package(&source, "provenance_pkg", "3.0.0");
+        fs::create_dir_all(install_dir_for("provenance_pkg", "3.0.0")).unwrap();
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_skip_vcs_validation(true);
+        manager.set_ignore_existing_tag(Some(false));
+        let vcs = std::sync::Arc::new(CountingTagVCS {
+            tag_exists: false,
+            refuse_existing: true,
+            created: std::sync::Mutex::new(Vec::new()),
+        });
+        let vcs_for_release: std::sync::Arc<dyn crate::vcs::ReleaseVCS + Send + Sync> = vcs;
+
+        let result = manager
+            .release_with_vcs(&source, Some("publish provenance"), Some(vcs_for_release))
+            .expect("release() must not propagate an error");
+
+        assert!(result.success, "release failed: {:?}", result.errors);
+        let installed = PackageSerializer::load_from_file(
+            &install_dir_for("provenance_pkg", "3.0.0").join("package.py"),
+        )
+        .expect("installed package definition should remain parseable");
+        assert!(installed.timestamp.is_some());
+        assert_eq!(installed.revision.as_deref(), Some("stub-commit"));
+        assert_eq!(installed.changelog.as_deref(), Some(""));
+        assert_eq!(
+            installed.release_message.as_deref(),
+            Some("publish provenance")
+        );
+        assert_eq!(installed.vcs.as_deref(), Some("counting-stub"));
+    }
+
+    #[test]
+    fn test_truncate_changelog_zero_keeps_full_content() {
+        assert_eq!(truncate_changelog("first\nsecond", 0), "first\nsecond");
+        assert_eq!(truncate_changelog("first\nsecond", 5), "first");
     }
 
     /// `--ignore-existing-tag` over an existing tag: the package is installed
