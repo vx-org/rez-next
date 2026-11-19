@@ -581,8 +581,14 @@ mod release_tests {
 
     #[test]
     fn test_release_manager_skip_tests_stored() {
-        let mgr = PyReleaseManager::new(None, false, true);
+        let mut mgr = PyReleaseManager::new(None, false, true);
         assert!(mgr.skip_tests, "skip_tests=true must be stored");
+        assert!(
+            mgr.ensure_latest,
+            "latest-version checks must be enabled by default"
+        );
+        mgr.set_ensure_latest(false);
+        assert!(!mgr.ensure_latest);
     }
 
     #[test]

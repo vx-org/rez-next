@@ -39,8 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum ReleaseMode {
     /// Normal release to `release_packages_path`.
     ///
-    /// Falls back to `local_packages_path` when `release_packages_path` is
-    /// empty or still the default `~/.rez/packages/int`.
+    /// Requires `release_packages_path` to exist before a release starts.
     Release,
     /// Local release to `local_packages_path`
     Local,
@@ -148,6 +147,8 @@ pub struct ReleaseManager {
     ignore_existing_tag: Option<bool>,
     /// Explicit release hooks. `None` uses the configured global hook list.
     release_hooks: Option<Vec<String>>,
+    /// Reject a release when a newer version is already published.
+    ensure_latest: bool,
     /// Optional zero-based variant selection. `None` releases every variant.
     variants: Option<Vec<usize>>,
 }
@@ -162,6 +163,7 @@ impl ReleaseManager {
             skip_vcs_validation: false,
             ignore_existing_tag: None,
             release_hooks: None,
+            ensure_latest: true,
             variants: None,
         }
     }
@@ -201,6 +203,11 @@ impl ReleaseManager {
     /// loaded package before any build work starts.
     pub fn set_variants(&mut self, variants: Option<Vec<usize>>) {
         self.variants = variants;
+    }
+
+    /// Set whether a newer published version should reject this release.
+    pub fn set_ensure_latest(&mut self, ensure_latest: bool) {
+        self.ensure_latest = ensure_latest;
     }
 
     /// Execute the complete release workflow, detecting the VCS from
@@ -338,6 +345,17 @@ impl ReleaseManager {
         let install_path = self.get_install_path(&package)?;
         result.install_path = install_path.to_string_lossy().to_string();
 
+        if self.mode == ReleaseMode::Release {
+            let release_path = self.get_install_base();
+            if release_path.as_os_str().is_empty() || !release_path.is_dir() {
+                result.errors.push(format!(
+                    "Release path does not exist or is not a directory: {}",
+                    release_path.display()
+                ));
+                return Ok(result);
+            }
+        }
+
         // Step 2: VCS detection and validation. A caller-supplied VCS is still
         // validated, so injecting one cannot bypass the repository-state check.
         let vcs = match vcs {
@@ -376,6 +394,14 @@ impl ReleaseManager {
         }
 
         self.populate_previous_release(&mut package, &mut result);
+
+        if self.ensure_latest {
+            self.reject_older_release(&package, &mut result);
+        }
+        if !result.errors.is_empty() {
+            result.success = false;
+            return Ok(result);
+        }
 
         // Step 3: Reject an already-released version before anything is built
         // or installed. The tag check must run first: the build step copies
@@ -542,14 +568,7 @@ impl ReleaseManager {
             ReleaseMode::Local | ReleaseMode::DryRun => {
                 PathBuf::from(expand_home(&config.local_packages_path))
             }
-            ReleaseMode::Release => {
-                let rp = &config.release_packages_path;
-                if !rp.is_empty() && rp != "~/.rez/packages/int" {
-                    PathBuf::from(expand_home(rp))
-                } else {
-                    PathBuf::from(expand_home(&config.local_packages_path))
-                }
-            }
+            ReleaseMode::Release => PathBuf::from(expand_home(&config.release_packages_path)),
         };
         install_base
     }
@@ -998,6 +1017,35 @@ impl ReleaseManager {
         }
     }
 
+    /// Reject a release when a newer package version is already available.
+    fn reject_older_release(&self, package: &Package, result: &mut ReleaseResult) {
+        let Some(current_version) = package.version.as_ref() else {
+            return;
+        };
+
+        match self.find_latest_release(package) {
+            Ok(Some(latest))
+                if latest
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version > current_version) =>
+            {
+                result.errors.push(format!(
+                    "Newer published version exists ({} > {}). Set ensure_latest=false to bypass.",
+                    latest
+                        .version
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_string(), ToString::to_string),
+                    current_version
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => result
+                .warnings
+                .push(format!("Failed to check for newer releases: {error}")),
+        }
+    }
+
     /// Find the newest released package version older than the package being built.
     fn find_previous_release(
         &self,
@@ -1007,7 +1055,30 @@ impl ReleaseManager {
             return Ok(None);
         };
 
+        Ok(self
+            .find_releases(package)?
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version < current_version)
+            })
+            .max_by(|left, right| left.version.cmp(&right.version)))
+    }
+
+    /// Find the newest package version visible from the configured repositories.
+    fn find_latest_release(&self, package: &Package) -> Result<Option<Arc<Package>>, RezCoreError> {
+        Ok(self
+            .find_releases(package)?
+            .into_iter()
+            .filter(|candidate| candidate.version.is_some())
+            .max_by(|left, right| left.version.cmp(&right.version)))
+    }
+
+    fn find_releases(&self, package: &Package) -> Result<Vec<Arc<Package>>, RezCoreError> {
         let mut repository_manager = RepositoryManager::new();
+
         let config = RezCoreConfig::load();
         let mut search_paths = vec![self.get_install_base()];
         search_paths.extend(
@@ -1031,16 +1102,7 @@ impl ReleaseManager {
                 "Failed to create release metadata runtime: {error}"
             ))
         })?;
-        let packages = runtime.block_on(repository_manager.find_packages(&package.name))?;
-        Ok(packages
-            .into_iter()
-            .filter(|candidate| {
-                candidate
-                    .version
-                    .as_ref()
-                    .is_some_and(|version| version < current_version)
-            })
-            .max_by(|left, right| left.version.cmp(&right.version)))
+        runtime.block_on(repository_manager.find_packages(&package.name))
     }
 
     /// Write the VCS metadata sidecar for an installed package.
@@ -1487,8 +1549,15 @@ version = "{}"
 
     #[test]
     fn test_release_manager_new() {
-        let _manager = ReleaseManager::new(ReleaseMode::Release, false, false);
-        // Just verify it creates without error
+        let manager = ReleaseManager::new(ReleaseMode::Release, false, false);
+        assert!(manager.ensure_latest);
+    }
+
+    #[test]
+    fn test_release_manager_can_disable_latest_version_check() {
+        let mut manager = ReleaseManager::new(ReleaseMode::Release, false, false);
+        manager.set_ensure_latest(false);
+        assert!(!manager.ensure_latest);
     }
 
     #[test]

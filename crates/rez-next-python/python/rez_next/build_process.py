@@ -427,6 +427,7 @@ class BuildProcessHelper(BuildProcess):
 
             manager = ReleaseManager()
             manager.set_skip_vcs_validation(self._skip_repo_errors)
+            manager.set_ensure_latest(self._ensure_latest)
             manager.set_variants(list(variants) if variants is not None else None)
             result = manager.release(
                 self.working_dir or os.getcwd(),

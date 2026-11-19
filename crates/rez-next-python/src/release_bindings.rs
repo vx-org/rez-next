@@ -823,6 +823,7 @@ pub struct PyReleaseManager {
     pub(crate) skip_tests: bool,
     pub(crate) variants: Option<Vec<usize>>,
     pub(crate) skip_vcs_validation: bool,
+    pub(crate) ensure_latest: bool,
 }
 
 #[pymethods]
@@ -836,6 +837,7 @@ impl PyReleaseManager {
             skip_tests,
             variants: None,
             skip_vcs_validation: false,
+            ensure_latest: true,
         }
     }
 
@@ -848,6 +850,11 @@ impl PyReleaseManager {
     #[pyo3(signature = (variants=None))]
     pub fn set_variants(&mut self, variants: Option<Vec<usize>>) {
         self.variants = variants;
+    }
+
+    /// Set whether a newer published version should reject this release.
+    pub fn set_ensure_latest(&mut self, ensure_latest: bool) {
+        self.ensure_latest = ensure_latest;
     }
 
     pub(crate) fn __str__(&self) -> String {
@@ -886,6 +893,7 @@ impl PyReleaseManager {
         let mut rust_manager = RustReleaseManager::new(mode, self.skip_build, self.skip_tests);
         rust_manager.set_skip_vcs_validation(self.skip_vcs_validation);
         rust_manager.set_ignore_existing_tag(ignore_existing_tag);
+        rust_manager.set_ensure_latest(self.ensure_latest);
         rust_manager.set_variants(self.variants.clone());
 
         let vcs = vcs

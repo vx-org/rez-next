@@ -99,6 +99,7 @@ pub fn execute(args: ReleaseArgs) -> RezCoreResult<()> {
     let mut manager = ReleaseManager::new(mode, false, false);
     manager.set_skip_vcs_validation(args.skip_repo_errors);
     manager.set_ignore_existing_tag(Some(args.ignore_existing_tag));
+    manager.set_ensure_latest(!args.no_latest);
     manager.set_variants(selected_variants);
 
     if args.verbose {
