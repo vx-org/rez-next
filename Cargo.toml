@@ -104,6 +104,7 @@ rez-next-cache = { version = "0.3.12", path = "crates/rez-next-cache" } # x-rele
 rez-next-suites = { version = "0.3.12", path = "crates/rez-next-suites" } # x-release-please-version
 rez-next-rex = { version = "0.3.12", path = "crates/rez-next-rex" } # x-release-please-version
 rez-next-config = { version = "0.3.12", path = "crates/rez-next-config" } # x-release-please-version
+rez-next-bind = { version = "0.3.12", path = "crates/rez-next-bind" } # x-release-please-version
 
 
 
@@ -139,7 +140,6 @@ rez-next-rex = { version = "0.3.12", path = "crates/rez-next-rex" } # x-release-
 rez-next-version = { version = "0.3.12", path = "crates/rez-next-version", default-features = false } # x-release-please-version
 rez-next-suites = { version = "0.3.12", path = "crates/rez-next-suites" } # x-release-please-version
 rez-next-common = { version = "0.3.12", path = "crates/rez-next-common", default-features = false } # x-release-please-version
-rez-next-bind = { version = "0.3.12", path = "crates/rez-next-bind" } # x-release-please-version
 rez-next-search = { version = "0.3.12", path = "crates/rez-next-search" } # x-release-please-version
 
 

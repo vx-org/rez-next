@@ -61,7 +61,8 @@ pub fn get_package_commands(name: &str, exe_path: Option<&PathBuf>) -> Option<St
             }
             Some("    env.PATH.prepend('{root}/bin')\n".to_string())
         }
-        "pip" | "cmake" | "git" | "gcc" | "clang" => {
+        "pip" | "cmake" | "git" | "gcc" | "clang" | "node" | "rust" | "go" | "java" | "ffmpeg"
+        | "imagemagick" => {
             if let Some(path) = exe_path {
                 let dir = path
                     .parent()
@@ -94,6 +95,12 @@ pub fn get_package_description(name: &str) -> String {
         "git" => "Git version control system",
         "gcc" => "GNU Compiler Collection",
         "clang" => "Clang/LLVM compiler",
+        "node" => "Node.js JavaScript runtime",
+        "rust" => "Rust programming language",
+        "go" => "Go programming language",
+        "java" => "Java Development Kit",
+        "ffmpeg" => "FFmpeg multimedia framework",
+        "imagemagick" => "ImageMagick image processing",
         _ => return format!("System package: {}", name),
     }
     .to_string()
@@ -123,6 +130,12 @@ pub fn get_default_tools(name: &str) -> Vec<String> {
         "git" => vec!["git".to_string()],
         "gcc" => vec!["gcc".to_string(), "g++".to_string(), "cpp".to_string()],
         "clang" => vec!["clang".to_string(), "clang++".to_string()],
+        "node" => vec!["node".to_string(), "nodejs".to_string()],
+        "rust" => vec!["rustc".to_string()],
+        "go" => vec!["go".to_string()],
+        "java" => vec!["java".to_string()],
+        "ffmpeg" => vec!["ffmpeg".to_string()],
+        "imagemagick" => vec!["convert".to_string(), "magick".to_string()],
         _ => vec![],
     }
 }

@@ -32,6 +32,10 @@ pub struct BindArgs {
     #[arg(value_name = "PKG")]
     pub package: Option<String>,
 
+    /// Explicit package version used when host detection is unavailable.
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
     /// Bind a set of standard packages to get started
     #[arg(long)]
     pub quickstart: bool,
@@ -310,13 +314,21 @@ fn bind_single_package(
     args: &BindArgs,
 ) -> RezCoreResult<BindResult> {
     let detected = detect::detect_system_tool(name);
+    let version_str = if let Some(version) = args.version.as_deref() {
+        version.to_string()
+    } else {
+        detected
+            .as_ref()
+            .map(|tool| tool.version.clone())
+            .ok_or_else(|| {
+                RezCoreError::ExecutionError(format!(
+                    "cannot bind '{name}': the tool was not found or its version could not be detected; \
+                     pass --version explicitly to bind without host detection"
+                ))
+            })?
+    };
 
-    let version_str = detected
-        .as_ref()
-        .map(|d| d.version.clone())
-        .unwrap_or_else(|| "1.0.0".to_string());
-
-    let exe_path = detected.as_ref().and_then(|d| d.executable_path.clone());
+    let exe_path = detected.and_then(|tool| tool.executable_path);
 
     let requires = if no_deps {
         vec![]

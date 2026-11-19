@@ -4,6 +4,7 @@
 //! Users can extend this by implementing custom binders.
 
 use crate::binder::{BindError, BindOptions, BindResult, PackageBinder};
+use crate::detect::{detect_tool_version, extract_version_from_output, find_tool_executable};
 
 /// Description of a known bindable tool.
 #[derive(Debug, Clone)]
@@ -21,7 +22,43 @@ pub struct BuiltinBinder {
     pub help_url: &'static str,
 }
 
+/// Result of detecting one built-in binder on the host system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedBuiltinTool {
+    /// Version parsed from the executable's version output.
+    pub version: String,
+
+    /// Absolute path to the executable that reported the version.
+    pub executable_path: std::path::PathBuf,
+}
+
 impl BuiltinBinder {
+    /// Detect this binder using its declared executable candidates.
+    pub fn detect(&self) -> Result<DetectedBuiltinTool, BindError> {
+        let mut found_executable = false;
+
+        for executable in self.executables {
+            let Some(path) = find_tool_executable(executable) else {
+                continue;
+            };
+            found_executable = true;
+
+            let raw_version = detect_tool_version(&path.to_string_lossy());
+            if let Some(version) = extract_version_from_output(&raw_version) {
+                return Ok(DetectedBuiltinTool {
+                    version,
+                    executable_path: path,
+                });
+            }
+        }
+
+        if found_executable {
+            Err(BindError::VersionNotFound(self.name.to_string()))
+        } else {
+            Err(BindError::ToolNotFound(self.name.to_string()))
+        }
+    }
+
     /// Execute the bind operation using the standard PackageBinder.
     pub fn bind(&self, options: &BindOptions) -> Result<BindResult, BindError> {
         let binder = PackageBinder::new();
@@ -127,9 +164,21 @@ static BUILTIN_BINDERS: &[BuiltinBinder] = &[
     },
 ];
 
+/// Return the complete built-in binder descriptors.
+pub fn builtin_binders() -> &'static [BuiltinBinder] {
+    BUILTIN_BINDERS
+}
+
 /// Get a built-in binder by tool name.
 pub fn get_builtin_binder(name: &str) -> Option<&'static BuiltinBinder> {
     BUILTIN_BINDERS.iter().find(|b| b.name == name)
+}
+
+/// Detect a built-in tool by its package name.
+pub fn detect_builtin_tool(name: &str) -> Result<DetectedBuiltinTool, BindError> {
+    get_builtin_binder(name)
+        .ok_or_else(|| BindError::ToolNotFound(name.to_string()))?
+        .detect()
 }
 
 /// List all known built-in binder names.
@@ -167,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_all_binders_have_executables() {
-        for b in BUILTIN_BINDERS {
+        for b in builtin_binders() {
             assert!(
                 !b.executables.is_empty(),
                 "Binder '{}' has no executables",
@@ -178,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_all_binders_have_non_empty_description() {
-        for b in BUILTIN_BINDERS {
+        for b in builtin_binders() {
             assert!(
                 !b.description.is_empty(),
                 "Binder '{}' has empty description",
@@ -189,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_all_binders_have_help_url() {
-        for b in BUILTIN_BINDERS {
+        for b in builtin_binders() {
             assert!(
                 !b.help_url.is_empty(),
                 "Binder '{}' has empty help_url",
