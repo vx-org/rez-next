@@ -185,6 +185,10 @@ name = "cache_operations_benchmark"
 harness = false
 
 [[bench]]
+name = "heuristic_benchmark"
+harness = false
+
+[[bench]]
 name = "rez_vs_reznext_benchmark"
 harness = false
 

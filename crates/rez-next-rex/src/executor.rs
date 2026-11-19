@@ -89,14 +89,26 @@ impl RexExecutor {
     /// Expand {variable} references in action values
     fn expand_action_vars(&self, action: RexAction) -> RexAction {
         let expand = |s: &str| -> String {
+            let expands_root = s.contains("{root}")
+                || s.contains("{this.root}")
+                || s.contains("$ROOT")
+                || s.contains("$THIS.ROOT");
             let mut result = s.to_string();
             for (key, value) in &self.context_vars {
                 result = result.replace(&format!("{{{}}}", key), value);
                 // Also support $NAME style
                 result = result.replace(&format!("${}", key.to_uppercase()), value);
             }
-            // Windows verbatim paths do not normalize forward-slash suffixes.
-            if cfg!(windows) && result.starts_with(r"\\?\") {
+            // Package definitions commonly write `{root}/bin`. Normalize the
+            // suffix when the root is a Windows path while preserving ordinary
+            // URL and shell values that do not expand the package root.
+            if cfg!(windows)
+                && expands_root
+                && self
+                    .context_vars
+                    .get("root")
+                    .is_some_and(|root| root.contains('\\'))
+            {
                 result = result.replace('/', r"\");
             }
             result

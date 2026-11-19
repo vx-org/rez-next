@@ -19,6 +19,14 @@ fn write_definition(directory: &Path, content: &str) -> PathBuf {
     definition
 }
 
+fn repository_path(repository: &Path, portable_path: &str) -> PathBuf {
+    portable_path
+        .split('/')
+        .fold(repository.to_path_buf(), |path, component| {
+            path.join(component)
+        })
+}
+
 #[rstest]
 #[case("windows", "x86_64", 0)]
 #[case("windows", "arm_64", 1)]
@@ -75,8 +83,8 @@ fn test_installation_plan_payload_root_matches_runtime_materialization() {
         ))
         .unwrap();
     let repository = temporary.path().join("repository");
-    let package_base = repository.join(&plan.package_relative_path);
-    let variant_root = repository.join(&plan.variant_relative_path);
+    let package_base = repository_path(&repository, &plan.package_relative_path);
+    let variant_root = repository_path(&repository, &plan.variant_relative_path);
     let binary_directory = variant_root.join("payload").join("bin");
     fs::create_dir_all(&binary_directory).unwrap();
     write_definition(&package_base, WITR);
@@ -341,9 +349,9 @@ fn test_installation_plan_serialized_hashed_layout_matches_runtime(
     );
 
     let repository = temporary.path().join("repository");
-    let package_base = repository.join(&plan.package_relative_path);
-    let variant_root = repository.join(&plan.variant_relative_path);
-    let binary_directory = variant_root.join("payload/bin");
+    let package_base = repository_path(&repository, &plan.package_relative_path);
+    let variant_root = repository_path(&repository, &plan.variant_relative_path);
+    let binary_directory = variant_root.join("payload").join("bin");
     fs::create_dir_all(&binary_directory).unwrap();
     fs::write(package_base.join(filename), content).unwrap();
     fs::write(

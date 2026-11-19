@@ -6,13 +6,13 @@ This guide covers the Criterion benchmark targets registered in `rez-next`.
 
 ## Registered benchmarks
 
-There are currently **11** benchmark targets registered in the root `Cargo.toml`.
+There are currently **12** benchmark targets registered in the root `Cargo.toml`.
 The up-to-date file list is maintained in `benches/README.md`.
 
 | Category | Bench targets |
 |----------|---------------|
 | Core version/package | `version_benchmark`, `package_benchmark`, `simple_package_benchmark` |
-| Solver | `solver_real_repo_bench`, `solver_bench_v2` |
+| Solver | `solver_real_repo_bench`, `solver_bench_v2`, `heuristic_benchmark` |
 | Runtime and tooling | `rex_benchmark`, `pip_conversion_benchmark` |
 | Context / dependency / cache | `context_operations_benchmark`, `depends_benchmark`, `cache_operations_benchmark` |
 | Comparative | `rez_vs_reznext_benchmark` |
@@ -80,6 +80,12 @@ cargo bench -- --save-baseline main
 # Compare after changes
 cargo bench -- --baseline main
 ```
+
+The main-branch workflow records normalized Criterion measurements in
+`metrics/benchmarking/history.json`. The record is keyed by commit and
+benchmark ID, which makes repeated runs auditable across different runners.
+Python binding overhead is measured separately by
+`metrics/benchmarking/scripts/python_bench.py` after building the PyO3 module.
 
 ## References
 

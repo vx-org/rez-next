@@ -21,6 +21,10 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
 
+concurrency:
+  group: performance-benchmarks-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
   # Quick benchmarks — version + package + rex + solver real repo (every PR)
@@ -136,6 +140,7 @@ jobs:
             --bench depends_benchmark \
             --bench pip_conversion_benchmark \
             --bench cache_operations_benchmark \
+            --bench heuristic_benchmark \
             2>&1 | tee benchmark-full.txt
 
       - name: Parse Criterion output → JSON
@@ -156,7 +161,8 @@ jobs:
         run: |
           python metrics/benchmarking/scripts/generate_results.py \
             --bench-json benchmark-full.json \
-            --out metrics/benchmarking/RESULTS.md
+            --out metrics/benchmarking/RESULTS.md \
+            --history metrics/benchmarking/history.json
 
       - name: Show regression summary
         run: |
@@ -177,6 +183,7 @@ jobs:
 
           # Stage results
           git add metrics/benchmarking/RESULTS.md
+          git add metrics/benchmarking/history.json
           git add metrics/benchmarking/artifacts/ || true
 
           # Only commit if something changed
@@ -198,6 +205,40 @@ jobs:
             metrics/benchmarking/RESULTS.md
             metrics/benchmarking/artifacts/
             target/criterion/
+          retention-days: 30
+
+  # Python binding overhead — keep this separate from Rust benchmarks so the
+  # binding build and interpreter startup do not affect Criterion timings.
+  python-binding:
+    name: Python Binding Overhead
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-python-binding-v1
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build the Python binding in an isolated environment
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip maturin
+          maturin develop --release --manifest-path crates/rez-next-python/Cargo.toml
+      - name: Run Python binding benchmark
+        run: |
+          . .venv/bin/activate
+          python metrics/benchmarking/scripts/python_bench.py \
+            --quick --json python-binding-benchmark.json
+      - name: Upload Python benchmark artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-python-binding-${{ github.sha }}
+          path: python-binding-benchmark.json
           retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────────────

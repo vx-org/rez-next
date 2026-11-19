@@ -533,6 +533,14 @@ impl EnvironmentManager {
 
         // Collect tool paths from packages
         for package in packages {
+            // An explicit command block owns PATH modifications for this
+            // package. Do not add a guessed root/bin path beside it.
+            if package.commands.is_some()
+                || package.pre_commands.is_some()
+                || package.post_commands.is_some()
+            {
+                continue;
+            }
             for _tool in &package.tools {
                 let tool_path = Self::package_tool_path(package);
                 if !tool_paths.contains(&tool_path) {

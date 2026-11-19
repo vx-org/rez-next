@@ -153,6 +153,29 @@ fn test_set_context_var() {
 }
 
 #[test]
+fn test_root_path_expansion_uses_host_separator() {
+    let root = if cfg!(windows) {
+        r"C:\opt\mypkg\1.0"
+    } else {
+        "/opt/mypkg/1.0"
+    };
+    let expected = std::path::Path::new(root)
+        .join("bin")
+        .to_string_lossy()
+        .into_owned();
+    let mut exec = RexExecutor::new();
+    let env = exec
+        .execute_commands(
+            r#"env.prepend_path("PATH", "{root}/bin")"#,
+            "mypkg",
+            Some(root),
+            None,
+        )
+        .unwrap();
+    assert_eq!(env.vars.get("PATH"), Some(&expected));
+}
+
+#[test]
 fn test_empty_commands_returns_empty_env() {
     let mut exec = RexExecutor::new();
     let env = exec.execute_commands("", "mypkg", None, None).unwrap();

@@ -281,13 +281,7 @@ fn test_resolve_rejects_malformed_conflict_and_weak_requests() {
     let temporary = tempfile::tempdir().unwrap();
     let resolver = RezRuntime::new([temporary.path()]).unwrap();
     let executor = runtime();
-    for request in [
-        "!!! not a request",
-        "!bad family",
-        "~bad family",
-        "",
-        ".feature>=1",
-    ] {
+    for request in ["!!! not a request", "!bad family", "~bad family", ""] {
         assert!(matches!(
             executor.block_on(resolver.resolve([request])).unwrap_err(),
             RezRuntimeError::InvalidRequirement { .. }

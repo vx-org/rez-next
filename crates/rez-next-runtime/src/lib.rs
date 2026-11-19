@@ -231,14 +231,21 @@ impl RezRuntime {
             .into_iter()
             .map(|requirement| requirement.as_ref().trim().to_string())
             .collect();
-        let requested = requirement_texts
-            .iter()
-            .map(|requirement| Self::parse_requirement(requirement))
-            .collect::<Result<Vec<_>, _>>()?;
         let requested_solver_requirements = requirement_texts
             .iter()
             .map(|requirement| Self::parse_solver_requirement(requirement))
             .collect::<Result<Vec<_>, _>>()?;
+        let requested = requirement_texts
+            .iter()
+            .zip(&requested_solver_requirements)
+            .map(|(text, requirement)| {
+                if requirement.name.starts_with('.') {
+                    Ok(Self::package_requirement_from_solver(requirement))
+                } else {
+                    Self::parse_requirement(text)
+                }
+            })
+            .collect::<Result<Vec<_>, RezRuntimeError>>()?;
         let mut package_requirements = Vec::new();
         let mut solver_requirements = Vec::new();
         if let Some(target) = &self.target {
@@ -400,6 +407,19 @@ impl RezRuntime {
         })
     }
 
+    fn package_requirement_from_solver(requirement: &Requirement) -> PackageRequirement {
+        PackageRequirement {
+            name: requirement.name.clone(),
+            version_spec: requirement
+                .version_constraint
+                .as_ref()
+                .map(ToString::to_string)
+                .filter(|spec| !spec.is_empty()),
+            weak: requirement.weak,
+            conflict: requirement.conflict,
+        }
+    }
+
     fn parse_solver_requirement(requirement: &str) -> Result<Requirement, RezRuntimeError> {
         let parsed: Requirement =
             requirement
@@ -408,8 +428,9 @@ impl RezRuntime {
                     requirement: requirement.to_string(),
                     source: RezCoreError::RequirementParse(message),
                 })?;
+        let is_ephemeral = parsed.name.starts_with('.');
         if parsed.name.is_empty()
-            || parsed.name.starts_with('.')
+            || (is_ephemeral && parsed.name.len() == 1)
             || !parsed
                 .name
                 .bytes()
