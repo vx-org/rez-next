@@ -17,6 +17,9 @@ async fn custom_build_system_runs_build_command_and_installs_definition() {
     )
     .await
     .unwrap();
+    tokio::fs::write(source.join("source-only.txt"), "source-only")
+        .await
+        .unwrap();
 
     let mut package = Package::new("custom_contract".to_string());
     package.version = Some(Version::parse("1.0.0").unwrap());
@@ -48,6 +51,13 @@ async fn custom_build_system_runs_build_command_and_installs_definition() {
             .join("1.0.0")
             .join("package.py")
             .is_file()
+    );
+    assert!(
+        !install_root
+            .join("custom_contract")
+            .join("1.0.0")
+            .join("source-only.txt")
+            .exists()
     );
 }
 
