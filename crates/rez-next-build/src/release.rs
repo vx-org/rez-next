@@ -1035,12 +1035,9 @@ impl ReleaseManager {
         release_message: Option<&str>,
         result: &mut ReleaseResult,
     ) {
-        package.timestamp = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-        );
+        if package.timestamp.is_none() {
+            package.timestamp = Some(package_timestamp());
+        }
         package.release_message = release_message.map(str::to_owned);
         package.changelog = result.changelog.as_deref().map(|changelog| {
             truncate_changelog(changelog, RezCoreConfig::load().max_package_changelog_chars)
@@ -1378,6 +1375,19 @@ fn truncate_changelog(changelog: &str, max_chars: usize) -> String {
         return changelog.to_string();
     }
     changelog.chars().take(max_chars).collect()
+}
+
+fn package_timestamp() -> i64 {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64)
+        })
+        .unwrap_or_default()
 }
 
 fn append_python_release_metadata(
@@ -2266,6 +2276,18 @@ version = "1.0.0"
             Some("publish provenance")
         );
         assert_eq!(installed.vcs.as_deref(), Some("counting-stub"));
+    }
+
+    #[test]
+    fn test_release_preserves_declared_timestamp() {
+        let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
+        let mut package = Package::new("timestamped_pkg".to_string());
+        package.timestamp = Some(1_234);
+        let mut result = ReleaseResult::default();
+
+        manager.populate_release_metadata(&mut package, &None, None, &mut result);
+
+        assert_eq!(package.timestamp, Some(1_234));
     }
 
     #[test]

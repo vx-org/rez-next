@@ -6,11 +6,12 @@ use crate::{
 };
 use rez_next_common::RezCoreError;
 use rez_next_context::{ContextConfig, EnvironmentManager, ShellExecutor, ShellType};
-use rez_next_package::{TestCommand, TestVariantFilter};
+use rez_next_package::serialization::{PackageFormat, PackageSerializer};
+use rez_next_package::{Package, TestCommand, TestVariantFilter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -568,15 +569,47 @@ impl BuildProcess {
             return Ok(None);
         }
 
-        tokio::fs::copy(&source, &destination)
-            .await
-            .map_err(|error| {
+        let timestamp = package_timestamp(&request.package);
+        if source
+            .extension()
+            .is_some_and(|extension| extension == "py")
+        {
+            let content = tokio::fs::read_to_string(&source).await.map_err(|error| {
                 RezCoreError::BuildError(format!(
-                    "Failed to install package definition {}: {}",
+                    "Failed to read package definition {}: {}",
                     source.display(),
                     error
                 ))
             })?;
+            let content = if request.package.timestamp.is_some() {
+                content
+            } else {
+                format!(
+                    "{content}\n\n# Package metadata written by rez-next\ntimestamp = {timestamp}\n"
+                )
+            };
+            tokio::fs::write(&destination, content)
+                .await
+                .map_err(|error| {
+                    RezCoreError::BuildError(format!(
+                        "Failed to install package definition {}: {}",
+                        destination.display(),
+                        error
+                    ))
+                })?;
+        } else {
+            let mut package = request.package.clone();
+            package.timestamp = Some(timestamp);
+            PackageSerializer::save_to_file(&package, &destination, PackageFormat::Yaml).map_err(
+                |error| {
+                    RezCoreError::BuildError(format!(
+                        "Failed to install package definition {}: {}",
+                        destination.display(),
+                        error
+                    ))
+                },
+            )?;
+        }
         Ok(Some(destination))
     }
 
@@ -779,6 +812,21 @@ impl BuildProcess {
 
         Ok((true, "Cleanup completed".to_string(), String::new()))
     }
+}
+
+fn package_timestamp(package: &Package) -> i64 {
+    package.timestamp.unwrap_or_else(|| {
+        std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs() as i64)
+            })
+            .unwrap_or_default()
+    })
 }
 
 fn package_test_is_selected(
