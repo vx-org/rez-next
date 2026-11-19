@@ -84,7 +84,10 @@ use package_bindings::{PyPackage, PyPackageFormat, PyPackageRequirement};
 use package_bindings::{load_package_from_file, save_package_to_file};
 use pip_bindings::PyPipPackage;
 use plugins_bindings::{PyPlugin, PyPluginType, PyRezPluginManager};
-use release_bindings::{PyReleaseManager, PyReleaseResult, PyVCSMetadata, PyVCSRevision};
+use release_bindings::{
+    PyGitVCS, PyMercurialVCS, PyReleaseManager, PyReleaseResult, PyReleaseVCS, PySvnVCS,
+    PyVCSMetadata, PyVCSRevision,
+};
 use release_hook_bindings::register_release_hook_module;
 use repository_bindings::PyRepositoryManager;
 use search_bindings::PySearchResult;
@@ -480,6 +483,10 @@ fn rez_next_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let release_mod = PyModule::new(m.py(), "release")?;
     release_mod.add_class::<PyReleaseManager>()?;
     release_mod.add_class::<PyReleaseResult>()?;
+    release_mod.add_class::<PyReleaseVCS>()?;
+    release_mod.add_class::<PyGitVCS>()?;
+    release_mod.add_class::<PyMercurialVCS>()?;
+    release_mod.add_class::<PySvnVCS>()?;
     release_mod.add_function(wrap_pyfunction!(
         release_bindings::release_package,
         &release_mod

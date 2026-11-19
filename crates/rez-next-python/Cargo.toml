@@ -14,7 +14,7 @@ name = "rez_next_bindings"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["git"]
 extension-module = ["pyo3/extension-module"]
 git = ["rez-next-build/git"]
 
