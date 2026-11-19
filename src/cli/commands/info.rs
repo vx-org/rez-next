@@ -91,7 +91,24 @@ fn is_rez_next_executable(path: &Path) -> bool {
     let Ok(current) = env::current_exe() else {
         return false;
     };
-    same_file_contents(path, &current)
+
+    if same_file_contents(path, &current) {
+        return true;
+    }
+
+    let Some(directory) = current.parent() else {
+        return false;
+    };
+    ["rez-next", "rez"]
+        .into_iter()
+        .map(|name| {
+            if cfg!(windows) {
+                directory.join(format!("{name}.exe"))
+            } else {
+                directory.join(name)
+            }
+        })
+        .any(|candidate| same_file_contents(path, &candidate))
 }
 
 fn same_file_contents(left: &Path, right: &Path) -> bool {
