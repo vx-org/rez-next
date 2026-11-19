@@ -319,6 +319,7 @@ fn get_subcommand_names() -> Vec<&'static str> {
         "test",
         "pkg-cache",
         "plugins",
+        "yaml2py",
     ]
 }
 

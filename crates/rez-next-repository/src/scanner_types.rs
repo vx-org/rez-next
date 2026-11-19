@@ -9,7 +9,10 @@ use std::time::SystemTime;
 ///
 /// Both `RepositoryScanner` and `HighPerformanceScanner` use this list as the
 /// single source of truth so the two scanners always stay in sync.
-pub const REZ_PACKAGE_FILENAMES: &[&str] = &["package.py"];
+///
+/// The order is significant. Rez prefers an executable `package.py` definition
+/// when both Python and YAML definitions are present in one package directory.
+pub const REZ_PACKAGE_FILENAMES: &[&str] = &["package.py", "package.yaml", "package.yml"];
 
 /// Enhanced scanner configuration with performance optimizations
 #[derive(Debug, Clone, Serialize, Deserialize)]

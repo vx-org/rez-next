@@ -67,7 +67,7 @@ pub enum PreprocessMode {
 pub struct DeveloperPackage {
     /// The underlying package definition.
     pub package: Package,
-    /// Path to the package definition file (package.py or package.yaml).
+    /// Path to the package definition file (package.py, package.yaml, or package.yml).
     pub filepath: PathBuf,
     /// Root directory of the package (parent of filepath).
     pub root: PathBuf,
@@ -93,7 +93,8 @@ impl DeveloperPackage {
 
     /// Load a DeveloperPackage from a directory path.
     ///
-    /// The directory should contain a `package.py` or `package.yaml` file.
+    /// The directory should contain a `package.py`, `package.yaml`, or
+    /// `package.yml` file.
     /// This is equivalent to rez's `DeveloperPackage.from_path(path)`.
     pub fn from_path(path: &Path) -> Result<Self, DeveloperPackageError> {
         let filepath = Self::find_definition_file(path)?;
@@ -106,9 +107,13 @@ impl DeveloperPackage {
     }
 
     /// Find the package definition file in a directory.
-    /// Looks for `package.py` first, then `package.yaml`.
+    /// Looks for `package.py` first, then YAML definitions.
     fn find_definition_file(dir: &Path) -> Result<PathBuf, DeveloperPackageError> {
-        let candidates = [dir.join("package.py"), dir.join("package.yaml")];
+        let candidates = [
+            dir.join("package.py"),
+            dir.join("package.yaml"),
+            dir.join("package.yml"),
+        ];
 
         for candidate in &candidates {
             if candidate.exists() && candidate.is_file() {
@@ -125,7 +130,10 @@ impl DeveloperPackage {
     fn load_package_definition(filepath: &Path) -> Result<Package, DeveloperPackageError> {
         let content = std::fs::read_to_string(filepath).map_err(DeveloperPackageError::Io)?;
 
-        if filepath.extension().and_then(|e| e.to_str()) == Some("yaml") {
+        if matches!(
+            filepath.extension().and_then(|e| e.to_str()),
+            Some("yaml" | "yml")
+        ) {
             crate::serialization::PackageSerializer::load_from_yaml(&content)
                 .map_err(|e| DeveloperPackageError::ParseError(e.to_string()))
         } else {
@@ -179,6 +187,15 @@ mod tests {
 
         let filepath = DeveloperPackage::find_definition_file(tmp.path()).unwrap();
         assert_eq!(filepath.file_name().unwrap(), "package.yaml");
+    }
+
+    #[test]
+    fn test_find_definition_yml() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("package.yml"), "name: test").unwrap();
+
+        let filepath = DeveloperPackage::find_definition_file(tmp.path()).unwrap();
+        assert_eq!(filepath.file_name().unwrap(), "package.yml");
     }
 
     #[test]

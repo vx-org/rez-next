@@ -10,6 +10,7 @@ pub mod release;
 pub mod test;
 pub mod view;
 pub mod which;
+pub mod yaml2py;
 
 pub mod bind;
 pub mod build;

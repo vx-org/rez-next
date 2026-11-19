@@ -523,6 +523,31 @@ requires = ["python>=3.7"]
     }
 
     #[test]
+    fn test_yaml_to_python_preserves_rez_metadata() {
+        let yaml = r#"
+name: maya_plugin
+version: '1.2.3'
+plugin_for: ['maya']
+requires: ['python-3.11']
+variants:
+  - ['linux-x86_64']
+commands: |
+  env.setenv('MAYA_PLUGIN_ROOT', '{root}')
+"#;
+
+        let package = PackageSerializer::load_from_yaml(yaml).unwrap();
+        let python = PackageSerializer::save_to_python(&package).unwrap();
+        let converted = PackageSerializer::load_from_python(&python).unwrap();
+
+        assert_eq!(converted.name, "maya_plugin");
+        assert_eq!(converted.version.unwrap().as_str(), "1.2.3");
+        assert_eq!(converted.plugin_for, vec!["maya"]);
+        assert_eq!(converted.requires, vec!["python-3.11"]);
+        assert_eq!(converted.variants, vec![vec!["linux-x86_64".to_string()]]);
+        assert!(converted.commands.unwrap().contains("MAYA_PLUGIN_ROOT"));
+    }
+
+    #[test]
     fn test_yaml_file_roundtrip_build_requires() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();

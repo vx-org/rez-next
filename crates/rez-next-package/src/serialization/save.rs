@@ -271,20 +271,20 @@ impl PackageSaver {
             content.push_str("# Do not edit manually\n\n");
         }
 
-        content.push_str(&format!("name = \"{}\"\n", package.name));
+        content.push_str(&format!("name = {}\n", python_string(&package.name)));
 
         if let Some(ref version) = package.version {
-            content.push_str(&format!("version = \"{}\"\n", version.as_str()));
+            content.push_str(&format!("version = {}\n", python_string(version.as_str())));
         }
 
         if let Some(ref description) = package.description {
-            content.push_str(&format!("description = \"{}\"\n", description));
+            content.push_str(&format!("description = {}\n", python_string(description)));
         }
 
         if !package.authors.is_empty() {
             content.push_str("authors = [\n");
             for author in &package.authors {
-                content.push_str(&format!("    \"{}\",\n", author));
+                content.push_str(&format!("    {},\n", python_string(author)));
             }
             content.push_str("]\n");
         }
@@ -292,7 +292,7 @@ impl PackageSaver {
         if !package.requires.is_empty() {
             content.push_str("requires = [\n");
             for req in &package.requires {
-                content.push_str(&format!("    \"{}\",\n", req));
+                content.push_str(&format!("    {},\n", python_string(req)));
             }
             content.push_str("]\n");
         }
@@ -300,7 +300,7 @@ impl PackageSaver {
         if !package.build_requires.is_empty() {
             content.push_str("build_requires = [\n");
             for req in &package.build_requires {
-                content.push_str(&format!("    \"{}\",\n", req));
+                content.push_str(&format!("    {},\n", python_string(req)));
             }
             content.push_str("]\n");
         }
@@ -308,7 +308,7 @@ impl PackageSaver {
         if !package.private_build_requires.is_empty() {
             content.push_str("private_build_requires = [\n");
             for req in &package.private_build_requires {
-                content.push_str(&format!("    \"{}\",\n", req));
+                content.push_str(&format!("    {},\n", python_string(req)));
             }
             content.push_str("]\n");
         }
@@ -321,7 +321,7 @@ impl PackageSaver {
                     if i > 0 {
                         content.push_str(", ");
                     }
-                    content.push_str(&format!("\"{}\"", req));
+                    content.push_str(&python_string(req));
                 }
                 content.push_str("],\n");
             }
@@ -331,10 +331,88 @@ impl PackageSaver {
         if !package.tools.is_empty() {
             content.push_str("tools = [\n");
             for tool in &package.tools {
-                content.push_str(&format!("    \"{}\",\n", tool));
+                content.push_str(&format!("    {},\n", python_string(tool)));
             }
             content.push_str("]\n");
         }
+
+        if let Some(value) = package.has_plugins {
+            content.push_str(&format!("has_plugins = {value}\n"));
+        }
+
+        if !package.plugin_for.is_empty() {
+            content.push_str("plugin_for = [\n");
+            for plugin in &package.plugin_for {
+                content.push_str(&format!("    {},\n", python_string(plugin)));
+            }
+            content.push_str("]\n");
+        }
+
+        if let Some(value) = package.hashed_variants {
+            content.push_str(&format!("hashed_variants = {value}\n"));
+        }
+
+        append_optional_string(
+            &mut content,
+            "requires_rez_version",
+            &package.requires_rez_version,
+        );
+        append_optional_string(&mut content, "build_command", &package.build_command);
+        append_optional_string(&mut content, "build_system", &package.build_system);
+        append_optional_string(&mut content, "uuid", &package.uuid);
+        append_optional_string(&mut content, "base", &package.base);
+        append_optional_string(&mut content, "help", &package.help);
+        append_optional_string(&mut content, "revision", &package.revision);
+        append_optional_string(&mut content, "changelog", &package.changelog);
+        append_optional_string(&mut content, "release_message", &package.release_message);
+        append_optional_string(
+            &mut content,
+            "previous_revision",
+            &package.previous_revision,
+        );
+        append_optional_string(&mut content, "vcs", &package.vcs);
+        append_optional_string(&mut content, "preprocess", &package.preprocess);
+
+        if let Some(value) = package.relocatable {
+            content.push_str(&format!("relocatable = {value}\n"));
+        }
+        if let Some(value) = package.cachable {
+            content.push_str(&format!("cachable = {value}\n"));
+        }
+        if let Some(value) = package.timestamp {
+            content.push_str(&format!("timestamp = {value}\n"));
+        }
+        if let Some(value) = package.format_version {
+            content.push_str(&format!("format_version = {value}\n"));
+        }
+        if let Some(ref value) = package.previous_version {
+            append_optional_string(
+                &mut content,
+                "previous_version",
+                &Some(value.as_str().to_string()),
+            );
+        }
+
+        if !package.tests.is_empty() {
+            let tests = serde_json::to_value(&package.tests).map_err(|error| {
+                RezCoreError::PackageParse(format!("Failed to serialize tests to Python: {error}"))
+            })?;
+            content.push_str(&format!("tests = {}\n", json_value_to_python(&tests)));
+        }
+
+        append_command_function(&mut content, "pre_commands", &package.pre_commands);
+        append_command_function(&mut content, "commands", &package.commands);
+        append_command_function(&mut content, "post_commands", &package.post_commands);
+        append_command_function(
+            &mut content,
+            "pre_build_commands",
+            &package.pre_build_commands,
+        );
+        append_command_function(
+            &mut content,
+            "pre_test_commands",
+            &package.pre_test_commands,
+        );
 
         for key in package.arbitrary_keys() {
             if let Some(value) = package.arbitrary_value(&key) {
@@ -440,5 +518,37 @@ impl PackageSaver {
         })?;
 
         Ok(())
+    }
+}
+
+fn python_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
+}
+
+fn append_optional_string(content: &mut String, name: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        content.push_str(&format!("{name} = {}\n", python_string(value)));
+    }
+}
+
+fn append_command_function(content: &mut String, name: &str, body: &Option<String>) {
+    let Some(body) = body else {
+        return;
+    };
+
+    content.push_str(&format!("\ndef {name}():\n"));
+    if body.trim().is_empty() {
+        content.push_str("    pass\n");
+        return;
+    }
+
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            content.push('\n');
+        } else {
+            content.push_str("    ");
+            content.push_str(line);
+            content.push('\n');
+        }
     }
 }

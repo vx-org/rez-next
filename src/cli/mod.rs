@@ -153,6 +153,10 @@ pub enum RezCommand {
         version: String,
     },
 
+    /// Convert a YAML package definition to package.py format
+    #[command(name = "yaml2py")]
+    Yaml2Py(commands::yaml2py::Yaml2PyArgs),
+
     /// Run basic functionality tests (development command)
     SelfTest,
 
@@ -296,6 +300,7 @@ impl RezCli {
                     .map_err(|e| RezCoreError::Solver(e.to_string()))
             }
             RezCommand::ParseVersion { version } => self.parse_version_command(version),
+            RezCommand::Yaml2Py(args) => commands::yaml2py::execute(args.clone()),
             RezCommand::SelfTest => self.run_tests(),
             RezCommand::SelfUpdate(args) => commands::self_update::execute(args.clone()),
         }

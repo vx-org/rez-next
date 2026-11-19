@@ -18,13 +18,13 @@ mod test_rez_package_filenames {
     }
 
     #[test]
-    fn test_excludes_package_yaml() {
-        assert!(!REZ_PACKAGE_FILENAMES.contains(&"package.yaml"));
+    fn test_contains_package_yaml() {
+        assert!(REZ_PACKAGE_FILENAMES.contains(&"package.yaml"));
     }
 
     #[test]
-    fn test_excludes_package_yml() {
-        assert!(!REZ_PACKAGE_FILENAMES.contains(&"package.yml"));
+    fn test_contains_package_yml() {
+        assert!(REZ_PACKAGE_FILENAMES.contains(&"package.yml"));
     }
 
     #[test]
@@ -43,8 +43,11 @@ mod test_rez_package_filenames {
     }
 
     #[test]
-    fn test_exactly_one_entry() {
-        assert_eq!(REZ_PACKAGE_FILENAMES, &["package.py"]);
+    fn test_package_definition_priority_is_stable() {
+        assert_eq!(
+            REZ_PACKAGE_FILENAMES,
+            &["package.py", "package.yaml", "package.yml"]
+        );
     }
 
     /// Validates that the constant stays in sync with ScannerConfig::default().
@@ -81,15 +84,15 @@ mod test_simd_pattern_matcher {
     }
 
     #[test]
-    fn test_does_not_match_package_yaml() {
+    fn test_matches_package_yaml() {
         let matcher = SIMDPatternMatcher::new();
-        assert!(!matcher.matches_package_pattern(Path::new("/some/dir/package.yaml")));
+        assert!(matcher.matches_package_pattern(Path::new("/some/dir/package.yaml")));
     }
 
     #[test]
-    fn test_does_not_match_package_yml() {
+    fn test_matches_package_yml() {
         let matcher = SIMDPatternMatcher::new();
-        assert!(!matcher.matches_package_pattern(Path::new("/some/dir/package.yml")));
+        assert!(matcher.matches_package_pattern(Path::new("/some/dir/package.yml")));
     }
 
     #[test]
@@ -159,9 +162,9 @@ mod test_simd_pattern_matcher {
     // --- filename-only paths (no parent dir) ---
 
     #[test]
-    fn test_does_not_match_bare_package_yaml() {
+    fn test_matches_bare_package_yaml() {
         let matcher = SIMDPatternMatcher::new();
-        assert!(!matcher.matches_package_pattern(Path::new("package.yaml")));
+        assert!(matcher.matches_package_pattern(Path::new("package.yaml")));
     }
 
     #[test]
@@ -434,6 +437,49 @@ mod test_scan_optimized_async {
         let result = scanner.scan_repository_optimized(tmp.path()).await.unwrap();
         assert_eq!(result.packages.len(), 1);
         assert_eq!(result.packages[0].package.name, "maya");
+    }
+
+    #[tokio::test]
+    async fn test_scan_valid_yaml_package_file_is_parsed() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("yaml_maya").join("2024.1");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.yaml"),
+            "name: yaml_maya\nversion: '2024.1'\nrequires: ['python-3.11']\n",
+        )
+        .unwrap();
+
+        let scanner = HighPerformanceScanner::new(HighPerformanceConfig::default());
+        let result = scanner.scan_repository_optimized(tmp.path()).await.unwrap();
+        assert_eq!(result.packages.len(), 1);
+        assert_eq!(result.packages[0].package.name, "yaml_maya");
+        assert_eq!(result.packages[0].package.requires, vec!["python-3.11"]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefers_package_py_when_yaml_is_also_present() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("dual").join("1.0.0");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.py"),
+            "name = 'dual'\nversion = '1.0.0'\ndescription = 'python'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("package.yaml"),
+            "name: dual\nversion: '1.0.0'\ndescription: yaml\n",
+        )
+        .unwrap();
+
+        let scanner = HighPerformanceScanner::new(HighPerformanceConfig::default());
+        let result = scanner.scan_repository_optimized(tmp.path()).await.unwrap();
+        assert_eq!(result.packages.len(), 1);
+        assert_eq!(
+            result.packages[0].package.description.as_deref(),
+            Some("python")
+        );
     }
 
     #[tokio::test]

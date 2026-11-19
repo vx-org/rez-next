@@ -247,7 +247,7 @@ async fn test_multi_format_priority_py_beats_yaml_no_duplicate() {
     assert_eq!(pkgs[0].description.as_deref(), Some("from python"));
 }
 
-/// A mixed-format repository only discovers canonical package.py definitions.
+/// A mixed-format repository discovers each supported package definition.
 #[tokio::test]
 async fn test_multi_format_mixed_repository_list_all() {
     let temp_dir = TempDir::new().unwrap();
@@ -289,5 +289,5 @@ async fn test_multi_format_mixed_repository_list_all() {
         names.contains(&"pypkg".to_string()),
         "package.py pkg missing"
     );
-    assert_eq!(names, vec!["pypkg"]);
+    assert_eq!(names, vec!["pypkg", "yamlpkg2", "ymlpkg"]);
 }

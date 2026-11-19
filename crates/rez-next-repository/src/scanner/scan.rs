@@ -10,12 +10,13 @@
 
 use super::RepositoryScanner;
 use crate::scanner_types::{
-    PackageScanResult, ScanCacheEntry, ScanError, ScanErrorType, ScanPerformanceMetrics, ScanResult,
+    PackageScanResult, REZ_PACKAGE_FILENAMES, ScanCacheEntry, ScanError, ScanErrorType,
+    ScanPerformanceMetrics, ScanResult,
 };
 use dashmap::DashMap;
 use memmap2::Mmap;
 use rez_next_common::RezCoreError;
-use rez_next_package::PackageSerializer;
+use rez_next_package::{PackageFormat, PackageSerializer};
 use smallvec::SmallVec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -201,16 +202,27 @@ impl RepositoryScanner {
             }
         };
 
-        let mut package_files = SmallVec::<[PathBuf; 8]>::new();
+        let mut matching_package_files = SmallVec::<[PathBuf; 8]>::new();
 
         while let Some(entry) = entries.next_entry().await.map_err(|e| {
             RezCoreError::Repository(format!("Failed to read directory entry: {}", e))
         })? {
             let path = entry.path();
             if path.is_file() && self.is_package_file(&path) {
-                package_files.push(path);
+                matching_package_files.push(path);
             }
         }
+
+        let package_files = REZ_PACKAGE_FILENAMES
+            .iter()
+            .find_map(|filename| {
+                matching_package_files
+                    .iter()
+                    .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(filename))
+                    .cloned()
+            })
+            .into_iter()
+            .collect::<SmallVec<[PathBuf; 1]>>();
 
         let package_futures = package_files.into_iter().map(|package_file| {
             let semaphore = self.semaphore.clone();
@@ -277,11 +289,19 @@ impl RepositoryScanner {
             self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        let _format = if self.config.smart_file_detection {
+        let format = if self.config.smart_file_detection {
             self.detect_package_format_smart(package_file, file_size)
                 .await?
         } else {
-            "yaml".to_string()
+            match package_file
+                .extension()
+                .and_then(|extension| extension.to_str())
+            {
+                Some("py") => "python".to_string(),
+                Some("json") => "json".to_string(),
+                Some("yaml" | "yml") => "yaml".to_string(),
+                _ => "yaml".to_string(),
+            }
         };
 
         let content =
@@ -304,9 +324,21 @@ impl RepositoryScanner {
         }
 
         let parse_start = std::time::Instant::now();
-        let package = PackageSerializer::load_from_python(&content).map_err(|e| {
-            RezCoreError::Repository(format!("Failed to parse package file: {}", e))
-        })?;
+        let package_format = match format.as_str() {
+            "python" => PackageFormat::Python,
+            "json" => PackageFormat::Json,
+            "yaml" => PackageFormat::Yaml,
+            unsupported => {
+                return Err(RezCoreError::Repository(format!(
+                    "Unsupported package format '{unsupported}' for {}",
+                    package_file.display()
+                )));
+            }
+        };
+        let package =
+            PackageSerializer::load_from_string(&content, package_format).map_err(|e| {
+                RezCoreError::Repository(format!("Failed to parse package file: {}", e))
+            })?;
         let parse_time = parse_start.elapsed().as_millis() as u64;
         self.parsing_time.fetch_add(parse_time, Ordering::Relaxed);
 

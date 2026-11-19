@@ -67,7 +67,12 @@ pub fn package_repo_stats(paths: Vec<String>) -> RepositoryStats {
             for entry in entries.flatten() {
                 let entry_path = entry.path();
                 if entry_path.is_dir() {
-                    let has_package_file = |dir: &std::path::Path| dir.join("package.py").exists();
+                    let has_package_file = |dir: &std::path::Path| {
+                        REZ_PACKAGE_FILENAMES
+                            .iter()
+                            .map(|name| dir.join(name))
+                            .any(|candidate| candidate.is_file())
+                    };
 
                     if has_package_file(&entry_path) {
                         combined_stats.package_count += 1;

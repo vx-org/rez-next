@@ -33,6 +33,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "complete",
     "bind",
     "parse-version",
+    "yaml2py",
     "self-test",
     "self-update",
 ];

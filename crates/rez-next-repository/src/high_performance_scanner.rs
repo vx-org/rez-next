@@ -14,7 +14,7 @@ use lru::LruCache;
 use memmap2::Mmap;
 use parking_lot::RwLock;
 use rez_next_common::RezCoreError;
-use rez_next_package::PackageSerializer;
+use rez_next_package::{PackageFormat, PackageSerializer};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -188,14 +188,26 @@ impl HighPerformanceScanner {
 
                     async move {
                         if let Ok(mut entries) = fs::read_dir(&dir).await {
+                            let mut matching_files = Vec::new();
                             while let Ok(Some(entry)) = entries.next_entry().await {
                                 let path = entry.path();
                                 if path.is_file() {
                                     // Use SIMD pattern matching for fast file filtering
                                     if pattern_matcher.matches_package_pattern(&path) {
-                                        package_files.insert(path.clone(), ());
+                                        matching_files.push(path);
                                     }
                                 }
+                            }
+
+                            if let Some(preferred) =
+                                REZ_PACKAGE_FILENAMES.iter().find_map(|filename| {
+                                    matching_files.iter().find(|path| {
+                                        path.file_name().and_then(|name| name.to_str())
+                                            == Some(filename)
+                                    })
+                                })
+                            {
+                                package_files.insert(preferred.clone(), ());
                             }
                         }
                     }
@@ -304,11 +316,23 @@ impl HighPerformanceScanner {
 
         // Phase 2: Parsing
         let parse_start = Instant::now();
-        let _format = self.detect_format_simd(path, &content)?;
-        let package = PackageSerializer::load_from_python(&content).map_err(|e| {
-            self.scan_errors.fetch_add(1, Ordering::Relaxed);
-            RezCoreError::Repository(format!("Failed to parse package file: {}", e))
-        })?;
+        let format = self.detect_format_simd(path, &content)?;
+        let package_format = match format.as_str() {
+            "python" => PackageFormat::Python,
+            "json" => PackageFormat::Json,
+            "yaml" => PackageFormat::Yaml,
+            unsupported => {
+                return Err(RezCoreError::Repository(format!(
+                    "Unsupported package format '{unsupported}' for {}",
+                    path.display()
+                )));
+            }
+        };
+        let package =
+            PackageSerializer::load_from_string(&content, package_format).map_err(|e| {
+                self.scan_errors.fetch_add(1, Ordering::Relaxed);
+                RezCoreError::Repository(format!("Failed to parse package file: {}", e))
+            })?;
         let parse_elapsed_ms = parse_start.elapsed().as_millis() as u64;
         self.parsing_time_ms
             .fetch_add(parse_elapsed_ms, Ordering::Relaxed);
@@ -343,7 +367,18 @@ impl HighPerformanceScanner {
     fn detect_format_simd(&self, path: &Path, content: &str) -> Result<String, RezCoreError> {
         self.simd_operations.fetch_add(1, Ordering::Relaxed);
 
-        // Use SIMD pattern matching for format detection
+        // The filename is authoritative for package definitions. Content
+        // heuristics are only used for callers that provide an extensionless
+        // path.
+        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            return match ext {
+                "yaml" | "yml" => Ok("yaml".to_string()),
+                "json" => Ok("json".to_string()),
+                "py" => Ok("python".to_string()),
+                _ => Ok("yaml".to_string()),
+            };
+        }
+
         if self.pattern_matcher.is_json_simd(content) {
             Ok("json".to_string())
         } else if self.pattern_matcher.is_yaml_simd(content) {
@@ -351,17 +386,7 @@ impl HighPerformanceScanner {
         } else if self.pattern_matcher.is_python_simd(content) {
             Ok("python".to_string())
         } else {
-            // Fallback to extension-based detection
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                match ext {
-                    "yaml" | "yml" => Ok("yaml".to_string()),
-                    "json" => Ok("json".to_string()),
-                    "py" => Ok("python".to_string()),
-                    _ => Ok("yaml".to_string()),
-                }
-            } else {
-                Ok("yaml".to_string())
-            }
+            Ok("yaml".to_string())
         }
     }
 
@@ -439,10 +464,10 @@ impl SIMDPatternMatcher {
     }
 
     /// Returns `true` only for recognised rez package definition filenames
-    /// (`package.py`).
+    /// (`package.py`, `package.yaml`, and `package.yml`).
     ///
     /// Uses the shared `REZ_PACKAGE_FILENAMES` constant for an O(n) linear
-    /// scan over the small slice (4 entries), which is branch-predictor-friendly
+    /// scan over the small slice, which is branch-predictor-friendly
     /// and avoids any heap allocation.
     pub fn matches_package_pattern(&self, path: &Path) -> bool {
         path.file_name()
