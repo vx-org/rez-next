@@ -632,6 +632,19 @@ static REGISTRY: Lazy<Vec<KeyDef>> = Lazy::new(|| {
             doc: "Directory a package is built in.",
         },
         KeyDef {
+            name: "build_script_names",
+            ty: KeyType::StrList,
+            default: Some(JsonValue::Array(vec![
+                JsonValue::String("build.sh".to_string()),
+                JsonValue::String("build.bat".to_string()),
+                JsonValue::String("build.py".to_string()),
+                JsonValue::String("build".to_string()),
+            ])),
+            origin: Origin::RezNext,
+            deprecated: false,
+            doc: "Custom build script detection order. rez has no equivalent key.",
+        },
+        KeyDef {
             name: "documentation_url",
             ty: KeyType::Str,
             default: Some(JsonValue::Null),

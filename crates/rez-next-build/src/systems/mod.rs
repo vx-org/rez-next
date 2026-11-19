@@ -31,7 +31,7 @@ pub use pypi::PypiBuildSystem;
 pub use python::PythonBuildSystem;
 
 use crate::{BuildEnvironment, BuildRequest, BuildStepResult};
-use rez_next_common::RezCoreError;
+use rez_next_common::{RezCoreError, config::RezCoreConfig};
 use rez_next_package::Package;
 use std::path::Path;
 use std::sync::Arc;
@@ -116,13 +116,18 @@ pub enum BuildSystem {
 impl BuildSystem {
     /// Detect build system from source directory
     pub fn detect(source_dir: &Path) -> Result<Self, RezCoreError> {
-        // Check for build script first (higher priority for rez packages)
-        let build_scripts = ["build.sh", "build.bat", "build.py", "build"];
-        for script in &build_scripts {
+        Self::detect_with_script_names(source_dir, &Self::default_build_script_names())
+    }
+
+    /// Detect a build system with an explicit custom script order.
+    pub fn detect_with_script_names(
+        source_dir: &Path,
+        build_script_names: &[String],
+    ) -> Result<Self, RezCoreError> {
+        // Check for build script first (higher priority for rez packages).
+        for script in build_script_names {
             if source_dir.join(script).exists() {
-                return Ok(BuildSystem::Custom(CustomBuildSystem::new(
-                    script.to_string(),
-                )));
+                return Ok(BuildSystem::Custom(CustomBuildSystem::new(script.clone())));
             }
         }
 
@@ -152,8 +157,27 @@ impl BuildSystem {
         )))
     }
 
+    fn default_build_script_names() -> Vec<String> {
+        vec![
+            "build.sh".to_string(),
+            "build.bat".to_string(),
+            "build.py".to_string(),
+            "build".to_string(),
+        ]
+    }
+
     /// Detect build system from source directory and package definition
     pub fn detect_with_package(source_dir: &Path, package: &Package) -> Result<Self, RezCoreError> {
+        let config = RezCoreConfig::load();
+        Self::detect_with_package_and_script_names(source_dir, package, &config.build_script_names)
+    }
+
+    /// Detect a build system with an explicit custom script order.
+    pub fn detect_with_package_and_script_names(
+        source_dir: &Path,
+        package: &Package,
+        build_script_names: &[String],
+    ) -> Result<Self, RezCoreError> {
         // Rez selects the custom build system whenever build_command is set.
         if let Some(ref build_command) = package.build_command {
             if build_command == "false" || build_command.trim().is_empty() {
@@ -200,7 +224,7 @@ impl BuildSystem {
             )));
         }
 
-        Self::detect(source_dir)
+        Self::detect_with_script_names(source_dir, build_script_names)
     }
 
     /// Configure the build
@@ -450,6 +474,20 @@ mod tests {
         match result {
             BuildSystem::Custom(c) => assert_eq!(c.script_name, "build.sh"),
             other => panic!("Expected Custom(build.sh), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_detect_custom_build_script_uses_configured_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("first-build"), "").unwrap();
+        std::fs::write(dir.path().join("second-build"), "").unwrap();
+        let scripts = vec!["second-build".to_string(), "first-build".to_string()];
+
+        let result = BuildSystem::detect_with_script_names(dir.path(), &scripts).unwrap();
+        match result {
+            BuildSystem::Custom(custom) => assert_eq!(custom.script_name, "second-build"),
+            other => panic!("Expected configured custom script, got {other:?}"),
         }
     }
 

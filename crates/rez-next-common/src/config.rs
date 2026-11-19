@@ -105,6 +105,12 @@ pub struct RezCoreConfig {
     /// Directory packages are built in (`build_directory`)
     pub build_directory: String,
 
+    /// Candidate custom build script names, in detection order.
+    ///
+    /// This is a rez-next compatibility extension. Upstream rez selects
+    /// custom builds through `build_command` and has no equivalent setting.
+    pub build_script_names: Vec<String>,
+
     /// Directory contexts are written to (`context_tmpdir`)
     pub context_tmpdir: String,
 }
@@ -182,6 +188,12 @@ impl Default for RezCoreConfig {
             platform_map: BTreeMap::new(),
             default_relocatable: true,
             build_directory: "build".to_string(),
+            build_script_names: vec![
+                "build.sh".to_string(),
+                "build.bat".to_string(),
+                "build.py".to_string(),
+                "build".to_string(),
+            ],
             context_tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
         }
     }
@@ -629,6 +641,7 @@ impl RezCoreConfig {
             "platform_map" => assign(&mut self.platform_map, &value),
             "default_relocatable" => assign(&mut self.default_relocatable, &value),
             "build_directory" => assign(&mut self.build_directory, &value),
+            "build_script_names" => assign_str_list(&mut self.build_script_names, &value),
             "context_tmpdir" => assign(&mut self.context_tmpdir, &value),
             // Nested cache.* keys: merge into the existing cache so sibling
             // keys set by a config file survive a partial env object.
@@ -1685,6 +1698,7 @@ mod tests {
              resetting_variables:\n  - REZ_USED\n\
              default_relocatable: true\n\
              build_directory: _build\n\
+             build_script_names:\n  - custom-build\n  - build.py\n\
              context_tmpdir: /tmp/ctx\n\
              platform_map:\n  centos: linux\n\
              env_var_separators:\n  MYVAR: \";\"\n",
@@ -1697,6 +1711,10 @@ mod tests {
             assert_eq!(cfg.resetting_variables, vec!["REZ_USED".to_string()]);
             assert!(cfg.default_relocatable);
             assert_eq!(cfg.build_directory, "_build");
+            assert_eq!(
+                cfg.build_script_names,
+                vec!["custom-build".to_string(), "build.py".to_string()]
+            );
             assert_eq!(cfg.context_tmpdir, "/tmp/ctx");
             assert_eq!(
                 cfg.platform_map.get("centos").map(String::as_str),
@@ -1723,6 +1741,15 @@ mod tests {
         assert!(cfg.platform_map.is_empty());
         assert!(cfg.default_relocatable);
         assert_eq!(cfg.build_directory, "build");
+        assert_eq!(
+            cfg.build_script_names,
+            vec![
+                "build.sh".to_string(),
+                "build.bat".to_string(),
+                "build.py".to_string(),
+                "build".to_string()
+            ]
+        );
         assert_eq!(
             cfg.context_tmpdir,
             std::env::temp_dir().to_string_lossy().to_string()

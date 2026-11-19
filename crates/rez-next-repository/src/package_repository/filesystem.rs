@@ -6,6 +6,7 @@
 use super::PackageRepository;
 use crate::resources::{PackageFamilyResource, PackageResource, VariantResource};
 use rez_next_common::RezCoreError;
+use rez_next_package::{Package, PackageInstallLayout};
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -571,14 +572,99 @@ impl PackageRepository for FilesystemPackageRepository {
 
     fn install_variant(
         &mut self,
-        _variant: &VariantResource,
-        _dry_run: bool,
-        _overrides: Option<HashMap<String, serde_json::Value>>,
+        variant: &VariantResource,
+        dry_run: bool,
+        overrides: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<PackageResource>, RezCoreError> {
-        Err(RezCoreError::Repository(
-            "Filesystem variant installation is not implemented; use the build or release workflow"
-                .to_string(),
-        ))
+        Self::validate_component(&variant.name, "package name")?;
+        let source_package_dir = variant_package_dir(variant)?;
+        let source_definition = find_definition(&source_package_dir).ok_or_else(|| {
+            RezCoreError::Repository(format!(
+                "Variant source does not contain a package definition: {}",
+                source_package_dir.display()
+            ))
+        })?;
+        let mut package = Package::from_path(&source_package_dir).map_err(|error| {
+            RezCoreError::Repository(format!(
+                "Failed to load variant package definition '{}': {error}",
+                source_definition.display()
+            ))
+        })?;
+        let overrides = overrides.unwrap_or_default();
+        apply_package_overrides(&mut package, &overrides)?;
+
+        let selected_variant = if package.variants.is_empty() {
+            None
+        } else {
+            Some(variant.index)
+        };
+        let layout = PackageInstallLayout::for_variant(&package, selected_variant)
+            .map_err(|error| RezCoreError::Repository(error.to_string()))?;
+        let target_package_dir = self.location.join(layout.package_relative_path());
+        let target_variant_dir = self.location.join(layout.variant_relative_path());
+        let source_variant_dir = variant_payload_dir(variant, &source_package_dir, &layout);
+
+        if dry_run {
+            return Ok(Some(PackageResource::new(
+                package,
+                FILESYSTEM_REPO_TYPE.to_string(),
+                self.location.to_string_lossy().to_string(),
+            )));
+        }
+
+        self.ensure_writable("install variant")?;
+        if source_variant_dir == target_variant_dir {
+            return Ok(Some(PackageResource::new(
+                package,
+                FILESYSTEM_REPO_TYPE.to_string(),
+                self.location.to_string_lossy().to_string(),
+            )));
+        }
+
+        fs::create_dir_all(&target_package_dir).map_err(|error| {
+            RezCoreError::Repository(format!(
+                "Failed to create package directory '{}': {error}",
+                target_package_dir.display()
+            ))
+        })?;
+        if let Err(error) = copy_directory_contents(&source_variant_dir, &target_variant_dir) {
+            return Err(RezCoreError::Repository(format!(
+                "Failed to install variant payload '{}': {error}",
+                source_variant_dir.display()
+            )));
+        }
+
+        let definition_name = source_definition
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("package.py");
+        let target_definition = target_package_dir.join(definition_name);
+        if source_package_dir != target_package_dir {
+            fs::copy(&source_definition, &target_definition).map_err(|error| {
+                RezCoreError::Repository(format!(
+                    "Failed to install package definition '{}': {error}",
+                    source_definition.display()
+                ))
+            })?;
+        }
+        if !overrides.is_empty() {
+            fs::write(
+                &target_package_dir.join("package.py"),
+                package.to_package_py(),
+            )
+            .map_err(|error| {
+                RezCoreError::Repository(format!(
+                    "Failed to write overridden package definition '{}': {error}",
+                    target_package_dir.join("package.py").display()
+                ))
+            })?;
+        }
+
+        Ok(Some(PackageResource::new(
+            package,
+            FILESYSTEM_REPO_TYPE.to_string(),
+            self.location.to_string_lossy().to_string(),
+        )))
     }
 
     fn get_parent_package_family(
@@ -631,6 +717,190 @@ impl PackageRepository for FilesystemPackageRepository {
     fn location(&self) -> &str {
         self.location.to_str().unwrap_or_default()
     }
+}
+
+fn find_definition(package_dir: &Path) -> Option<PathBuf> {
+    ["package.py", "package.yaml", "package.yml", "package.json"]
+        .iter()
+        .map(|name| package_dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn variant_package_dir(variant: &VariantResource) -> Result<PathBuf, RezCoreError> {
+    if let Some(root) = &variant.root {
+        let root = PathBuf::from(root);
+        if find_definition(&root).is_some() {
+            return Ok(root);
+        }
+        if let Some(parent) = root.parent()
+            && find_definition(parent).is_some()
+        {
+            return Ok(parent.to_path_buf());
+        }
+        return Ok(root);
+    }
+
+    let version = variant.version.as_deref().ok_or_else(|| {
+        RezCoreError::Repository("Cannot install an unversioned filesystem variant".to_string())
+    })?;
+    FilesystemPackageRepository::validate_component(version, "package version")?;
+    Ok(PathBuf::from(&variant.repository_location)
+        .join(FilesystemPackageRepository::validate_component(
+            &variant.name,
+            "package name",
+        )?)
+        .join(version))
+}
+
+fn variant_payload_dir(
+    variant: &VariantResource,
+    source_package_dir: &Path,
+    layout: &PackageInstallLayout,
+) -> PathBuf {
+    if let Some(root) = &variant.root {
+        let root = PathBuf::from(root);
+        if root != source_package_dir {
+            return root;
+        }
+    }
+    source_package_dir.join(layout.variant_subpath())
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    if !source.is_dir() {
+        return Err(std::io::Error::new(
+            ErrorKind::NotFound,
+            format!("source directory does not exist: {}", source.display()),
+        ));
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_package_overrides(
+    package: &mut Package,
+    overrides: &HashMap<String, serde_json::Value>,
+) -> Result<(), RezCoreError> {
+    for (name, value) in overrides {
+        match name.as_str() {
+            "name" => package.name = required_string_override(name, value)?,
+            "version" => {
+                package.version = Some(
+                    rez_next_version::Version::parse(&required_string_override(name, value)?)
+                        .map_err(|error| {
+                            RezCoreError::Repository(format!(
+                                "Invalid override for package attribute 'version': {error}"
+                            ))
+                        })?,
+                );
+            }
+            "description" => package.description = optional_string_override(value)?,
+            "authors" => package.authors = string_list_override(name, value)?,
+            "requires" => package.requires = string_list_override(name, value)?,
+            "build_requires" => package.build_requires = string_list_override(name, value)?,
+            "private_build_requires" => {
+                package.private_build_requires = string_list_override(name, value)?
+            }
+            "tools" => package.tools = string_list_override(name, value)?,
+            "build_command" => package.build_command = optional_string_override(value)?,
+            "build_system" => package.build_system = optional_string_override(value)?,
+            "commands" => package.commands = optional_string_override(value)?,
+            "pre_commands" => package.pre_commands = optional_string_override(value)?,
+            "post_commands" => package.post_commands = optional_string_override(value)?,
+            "pre_test_commands" => package.pre_test_commands = optional_string_override(value)?,
+            "pre_build_commands" => package.pre_build_commands = optional_string_override(value)?,
+            "help" => package.help = optional_string_override(value)?,
+            "uuid" => package.uuid = optional_string_override(value)?,
+            "relocatable" => package.relocatable = optional_bool_override(value)?,
+            "cachable" => package.cachable = optional_bool_override(value)?,
+            "revision" => package.revision = optional_string_override(value)?,
+            "changelog" => package.changelog = optional_string_override(value)?,
+            "release_message" => package.release_message = optional_string_override(value)?,
+            "previous_revision" => package.previous_revision = optional_string_override(value)?,
+            "vcs" => package.vcs = optional_string_override(value)?,
+            "base" => package.base = optional_string_override(value)?,
+            "requires_rez_version" => {
+                package.requires_rez_version = optional_string_override(value)?
+            }
+            "has_plugins" => package.has_plugins = optional_bool_override(value)?,
+            "hashed_variants" => package.hashed_variants = optional_bool_override(value)?,
+            "preprocess" => package.preprocess = optional_string_override(value)?,
+            unknown => {
+                return Err(RezCoreError::Repository(format!(
+                    "Unsupported package override attribute '{unknown}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn required_string_override(name: &str, value: &serde_json::Value) -> Result<String, RezCoreError> {
+    if value.as_str() == Some(super::REMOVE) {
+        return Err(RezCoreError::Repository(format!(
+            "Cannot remove package attribute '{name}'"
+        )));
+    }
+    value.as_str().map(str::to_owned).ok_or_else(|| {
+        RezCoreError::Repository(format!("Package override '{name}' must be a string"))
+    })
+}
+
+fn optional_string_override(value: &serde_json::Value) -> Result<Option<String>, RezCoreError> {
+    if value.as_str() == Some(super::REMOVE) || value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(|value| Some(value.to_owned()))
+        .ok_or_else(|| {
+            RezCoreError::Repository(
+                "Package string override must be a string or remove sentinel".to_string(),
+            )
+        })
+}
+
+fn optional_bool_override(value: &serde_json::Value) -> Result<Option<bool>, RezCoreError> {
+    if value.as_str() == Some(super::REMOVE) || value.is_null() {
+        return Ok(None);
+    }
+    value.as_bool().map(Some).ok_or_else(|| {
+        RezCoreError::Repository(
+            "Package boolean override must be a boolean or remove sentinel".to_string(),
+        )
+    })
+}
+
+fn string_list_override(
+    name: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<String>, RezCoreError> {
+    if value.as_str() == Some(super::REMOVE) || value.is_null() {
+        return Ok(Vec::new());
+    }
+    value
+        .as_array()
+        .ok_or_else(|| {
+            RezCoreError::Repository(format!("Package override '{name}' must be a string list"))
+        })?
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_owned).ok_or_else(|| {
+                RezCoreError::Repository(format!("Package override '{name}' must contain strings"))
+            })
+        })
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -999,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn install_variant_fails_closed_until_supported() {
+    fn install_variant_requires_source_definition() {
         let temp_dir = TempDir::new().unwrap();
         let mut repo = FilesystemPackageRepository::new(temp_dir.path());
         let variant = VariantResource::new(
@@ -1011,5 +1281,92 @@ mod tests {
         );
 
         assert!(repo.install_variant(&variant, false, None).is_err());
+    }
+
+    #[test]
+    fn install_variant_copies_payload_and_definition() {
+        let source = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_package = source.path().join("python/3.12.0");
+        fs::create_dir_all(source_package.join("bin")).unwrap();
+        fs::write(
+            source_package.join("package.py"),
+            "name = 'python'\nversion = '3.12.0'\n",
+        )
+        .unwrap();
+        fs::write(source_package.join("bin/python"), "python").unwrap();
+
+        let variant = VariantResource::new(
+            "python".to_string(),
+            Some("3.12.0".to_string()),
+            0,
+            FILESYSTEM_REPO_TYPE.to_string(),
+            source.path().to_string_lossy().to_string(),
+        )
+        .with_root(source_package.to_string_lossy().to_string());
+        let mut repo = FilesystemPackageRepository::new(destination.path());
+
+        let installed = repo.install_variant(&variant, false, None).unwrap();
+        assert_eq!(installed.unwrap().name(), "python");
+        assert_eq!(
+            fs::read_to_string(destination.path().join("python/3.12.0/bin/python")).unwrap(),
+            "python"
+        );
+        assert!(
+            destination
+                .path()
+                .join("python/3.12.0/package.py")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn install_variant_honours_dry_run_and_overrides() {
+        let source = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_package = source.path().join("python/3.12.0");
+        fs::create_dir_all(&source_package).unwrap();
+        fs::write(
+            source_package.join("package.py"),
+            "name = 'python'\nversion = '3.12.0'\n",
+        )
+        .unwrap();
+
+        let variant = VariantResource::new(
+            "python".to_string(),
+            Some("3.12.0".to_string()),
+            0,
+            FILESYSTEM_REPO_TYPE.to_string(),
+            source.path().to_string_lossy().to_string(),
+        )
+        .with_root(source_package.to_string_lossy().to_string());
+        let mut repo = FilesystemPackageRepository::new(destination.path());
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "name".to_string(),
+            serde_json::Value::String("python-renamed".to_string()),
+        );
+        overrides.insert(
+            "version".to_string(),
+            serde_json::Value::String("4.0.0".to_string()),
+        );
+        overrides.insert(
+            "description".to_string(),
+            serde_json::Value::String("copied package".to_string()),
+        );
+
+        repo.install_variant(&variant, true, Some(overrides.clone()))
+            .unwrap();
+        assert!(!destination.path().join("python-renamed").exists());
+
+        repo.install_variant(&variant, false, Some(overrides))
+            .unwrap();
+        let installed = destination.path().join("python-renamed/4.0.0");
+        assert!(installed.join("package.py").is_file());
+        let package = Package::from_path(&installed).unwrap();
+        assert_eq!(package.name, "python-renamed");
+        assert_eq!(package.version.unwrap().as_str(), "4.0.0");
+        assert_eq!(package.description.as_deref(), Some("copied package"));
     }
 }

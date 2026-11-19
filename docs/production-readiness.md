@@ -23,6 +23,11 @@ internal Python modules.
 - Checksum-verified self-update: release assets are installed only after an
   exact SHA-256 entry is found and verified.
 
+The rez-next extension key `build_script_names` controls the filename probe
+order for packages that use filename-based custom build detection. Its default
+is `build.sh`, `build.bat`, `build.py`, then `build`. Upstream rez has no
+equivalent setting because its custom build contract is `build_command`.
+
 ## Explicit exclusions
 
 Unsupported operations fail with an error instead of reporting success or a
