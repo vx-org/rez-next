@@ -4,7 +4,9 @@
 //! Implements VCS validation, build, tag creation, and deployment.
 
 use clap::Args;
-use rez_next_build::{BuildManager, BuildOptions, BuildRequest};
+use rez_next_build::{
+    BuildManager, BuildOptions, BuildRequest, GitVCS, MercurialVCS, ReleaseVCS, SvnVCS,
+};
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_package::serialization::PackageSerializer;
 use std::path::{Path, PathBuf};
@@ -21,8 +23,8 @@ pub struct ReleaseArgs {
     #[arg(short = 'F', long = "message-file")]
     pub message_file: Option<PathBuf>,
 
-    /// VCS type to use (git, svn, etc.)
-    #[arg(long = "vcs")]
+    /// VCS type to use (git, hg, or svn)
+    #[arg(long = "vcs", value_name = "VCS")]
     pub vcs: Option<String>,
 
     /// Build system type
@@ -89,6 +91,11 @@ pub fn execute(args: ReleaseArgs) -> RezCoreResult<()> {
         .as_deref()
         .unwrap_or_else(|| detect_vcs(&working_dir));
     ensure_supported_vcs(vcs_type)?;
+    let release_vcs = if vcs_type == "git" {
+        None
+    } else {
+        Some(create_vcs_backend(vcs_type, &working_dir)?)
+    };
 
     if args.verbose {
         println!("VCS: {}", vcs_type);
@@ -102,7 +109,18 @@ pub fn execute(args: ReleaseArgs) -> RezCoreResult<()> {
     // 4. Check for existing release tag
     if !args.ignore_existing_tag {
         let tag = format!("{}-{}", package.name, version_str);
-        if check_tag_exists(&working_dir, &tag) {
+        let tag_exists = match release_vcs.as_ref() {
+            Some(vcs) => vcs.tag_exists(&tag).map_err(|error| {
+                RezCoreError::BuildError(format!(
+                    "Failed to check {} tag '{}': {}",
+                    vcs.get_type_name(),
+                    tag,
+                    error
+                ))
+            })?,
+            None => check_tag_exists(&working_dir, &tag),
+        };
+        if tag_exists {
             return Err(RezCoreError::BuildError(format!(
                 "Release tag '{}' already exists. Use --ignore-existing-tag to override.",
                 tag
@@ -173,8 +191,16 @@ pub fn execute(args: ReleaseArgs) -> RezCoreResult<()> {
         .or_else(|| read_message_file(args.message_file.as_ref()))
         .unwrap_or_else(|| format!("Release {}", tag));
 
-    if vcs_type == "git" {
-        create_git_tag(&working_dir, &tag, &message, args.verbose)?;
+    match release_vcs {
+        Some(vcs) => vcs.create_tag(&tag, &message).map_err(|error| {
+            RezCoreError::BuildError(format!(
+                "Failed to create {} tag '{}': {}",
+                vcs.get_type_name(),
+                tag,
+                error
+            ))
+        })?,
+        None => create_git_tag(&working_dir, &tag, &message, args.verbose)?,
     }
 
     println!("Released {}-{} successfully!", package.name, version_str);
@@ -240,12 +266,32 @@ fn detect_vcs(working_dir: &Path) -> &'static str {
 }
 
 fn ensure_supported_vcs(vcs_type: &str) -> RezCoreResult<()> {
-    if vcs_type == "git" {
+    if matches!(vcs_type, "git" | "hg" | "svn") {
         return Ok(());
     }
     Err(RezCoreError::BuildError(format!(
-        "Release VCS '{vcs_type}' is not supported; only git releases currently provide transactional tagging"
+        "Release VCS '{vcs_type}' is not supported; choose git, hg, or svn"
     )))
+}
+
+fn create_vcs_backend(
+    vcs_type: &str,
+    working_dir: &Path,
+) -> RezCoreResult<Box<dyn ReleaseVCS + Send + Sync>> {
+    match vcs_type {
+        "git" => GitVCS::new(working_dir.to_path_buf())
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
+            .map_err(|error| RezCoreError::BuildError(error.to_string())),
+        "hg" => MercurialVCS::new(working_dir.to_path_buf())
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
+            .map_err(|error| RezCoreError::BuildError(error.to_string())),
+        "svn" => SvnVCS::new(working_dir.to_path_buf())
+            .map(|vcs| Box::new(vcs) as Box<dyn ReleaseVCS + Send + Sync>)
+            .map_err(|error| RezCoreError::BuildError(error.to_string())),
+        _ => Err(RezCoreError::BuildError(format!(
+            "Release VCS '{vcs_type}' is not supported"
+        ))),
+    }
 }
 
 /// Load developer package from working directory
@@ -293,6 +339,19 @@ fn validate_vcs_state(working_dir: &Path, vcs_type: &str, args: &ReleaseArgs) ->
             if args.verbose {
                 println!("Warning: Repository has unpushed commits:\n{}", unpushed);
             }
+        }
+    } else {
+        let vcs = create_vcs_backend(vcs_type, working_dir)?;
+        vcs.validate_repo_state()
+            .map_err(|error| RezCoreError::BuildError(error.to_string()))?;
+        if vcs.is_releasable_branch().ok().flatten() == Some(false) {
+            return Err(RezCoreError::BuildError(format!(
+                "Repository is not on a releasable {} branch",
+                vcs_type
+            )));
+        }
+        if args.verbose {
+            println!("{} repository is clean", vcs_type);
         }
     }
     Ok(())
@@ -444,10 +503,12 @@ mod tests {
     #[test]
     fn test_release_rejects_vcs_backends_without_tag_implementation() {
         assert!(ensure_supported_vcs("git").is_ok());
-        for vcs in ["unknown", "hg", "svn"] {
+        for vcs in ["unknown"] {
             let error = ensure_supported_vcs(vcs)
                 .expect_err("an unsupported VCS must not report a successful release");
             assert!(error.to_string().contains(vcs), "{error}");
         }
+        assert!(ensure_supported_vcs("hg").is_ok());
+        assert!(ensure_supported_vcs("svn").is_ok());
     }
 }
