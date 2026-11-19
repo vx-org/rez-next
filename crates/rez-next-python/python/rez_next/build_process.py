@@ -19,6 +19,8 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from .exceptions import ReleaseHookCancellingError as RezReleaseHookCancellingError
+
 logger = logging.getLogger(__name__)
 
 
@@ -235,7 +237,7 @@ class BuildProcessHelper(BuildProcess):
                 rxt_path = None
         return ctx, rxt_path
 
-    def pre_release(self):
+    def pre_release(self, release_message=None):
         """Validate pre-release conditions."""
         pkg = self.package
         if pkg is None:
@@ -269,6 +271,17 @@ class BuildProcessHelper(BuildProcess):
                         f"Newer published version exists ({prev_version} > {version}). "
                         "Set ensure_latest=False to bypass."
                     )
+        install_path = self.get_package_install_path(self.working_dir or os.getcwd())
+        self.run_hooks(
+            "pre_release",
+            user=os.getenv("USER") or os.getenv("USERNAME") or "",
+            install_path=install_path,
+            variants=None,
+            release_message=release_message,
+            changelog=None,
+            previous_version=None,
+            previous_revision=None,
+        )
         self._print("Pre-release validation passed.")
         return True
 
@@ -278,6 +291,17 @@ class BuildProcessHelper(BuildProcess):
         pkg = self.package
         version = getattr(pkg, "version", "unknown") if pkg else "unknown"
         self._print_header(f"Post-release: tagging {version} as {tag_name}")
+        install_path = self.get_package_install_path(self.working_dir or os.getcwd())
+        self.run_hooks(
+            "post_release",
+            user=os.getenv("USER") or os.getenv("USERNAME") or "",
+            install_path=install_path,
+            variants=[str(index) for index, _ in enumerate(getattr(pkg, "variants", None) or [None])],
+            release_message=release_message,
+            changelog=self.get_changelog(),
+            previous_version=None,
+            previous_revision=None,
+        )
         with self.repo_operation("tag"):
             if hasattr(self._vcs, "create_tag"):
                 self._vcs.create_tag(tag_name, message=release_message)
@@ -308,9 +332,16 @@ class BuildProcessHelper(BuildProcess):
         try:
             from rez_next.release_hook import run_hooks
 
-            run_hooks(hook_event, package=self.package, vcs=self._vcs, **kwargs)
+            run_hooks(
+                hook_event,
+                package=self.package,
+                source_path=self.working_dir or os.getcwd(),
+                **kwargs,
+            )
         except ReleaseHookCancellingError:
             raise
+        except RezReleaseHookCancellingError as e:
+            raise ReleaseHookCancellingError(str(e)) from e
         except (ModuleNotFoundError, ImportError):
             logger.debug("release_hook module not available, skipping %s", hook_event)
         except Exception as e:
@@ -387,7 +418,7 @@ class BuildProcessHelper(BuildProcess):
         name = getattr(pkg, "name", "unknown") if pkg else "unknown"
         version = getattr(pkg, "version", "unknown") if pkg else "unknown"
         self._print_header(f"Releasing {name}-{version}")
-        self.pre_release()
+        self.pre_release(release_message=release_message)
         build_count = self.build(install=True, variants=variants)
         if build_count == 0:
             raise ReleaseError("Build failed: no variants were built successfully")

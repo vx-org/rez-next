@@ -15,6 +15,7 @@ rez-next-common = { version = "0.3.12", path = "../rez-next-common" } # x-releas
 rez-next-version = { version = "0.3.12", path = "../rez-next-version" } # x-release-please-version
 rez-next-package = { version = "0.3.12", path = "../rez-next-package" } # x-release-please-version
 rez-next-context = { version = "0.3.12", path = "../rez-next-context" } # x-release-please-version
+rez-next-release-hook = { version = "0.3.12", path = "../rez-next-release-hook" } # x-release-please-version
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

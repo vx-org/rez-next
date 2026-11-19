@@ -76,6 +76,49 @@ def create_release_hooks(
     return hooks
 
 
+def run_hooks(
+    hook_event: ReleaseHookEvent | str,
+    *,
+    package: Any = None,
+    source_path: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """Run configured release hooks for one lifecycle event.
+
+    Hook failures are isolated so optional notifications cannot abort a
+    release. ``ReleaseHookCancellingError`` remains visible to the caller and
+    therefore preserves the upstream cancellation contract.
+    """
+    from rez_next.config import config
+    from rez_next.exceptions import ReleaseHookCancellingError
+
+    names = list(config.get("release_hooks", []) or [])
+    if not names:
+        return
+
+    if isinstance(hook_event, str):
+        method_name = hook_event
+    else:
+        method_name = getattr(hook_event, "__name__", None) or getattr(
+            hook_event, "func_name", None
+        )
+    if not method_name:
+        raise ValueError(f"Unsupported release hook event: {hook_event!r}")
+
+    if source_path is None:
+        source_path = getattr(package, "filepath", None) if package is not None else None
+    source_path = source_path or "."
+
+    for hook in create_release_hooks(names, source_path):
+        try:
+            method = getattr(hook, method_name)
+            method(**kwargs)
+        except ReleaseHookCancellingError:
+            raise
+        except Exception as exc:
+            logger.warning("Release hook %s failed: %s", method_name, exc)
+
+
 class ReleaseHook(abc.ABC):
     """Abstract base class for release hook implementations.
 

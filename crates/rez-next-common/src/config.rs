@@ -60,6 +60,9 @@ pub struct RezCoreConfig {
     /// Plugin paths
     pub plugin_path: Vec<String>,
 
+    /// Release hooks run during package releases.
+    pub release_hooks: Vec<String>,
+
     /// Package cache paths
     pub package_cache_path: Vec<String>,
 
@@ -169,6 +172,7 @@ impl Default for RezCoreConfig {
             default_shell: if cfg!(windows) { "cmd" } else { "bash" }.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             plugin_path: vec![],
+            release_hooks: vec![],
             package_cache_path: vec!["~/.rez/cache".to_string()],
             tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
             editor: if cfg!(windows) { "notepad" } else { "vi" }.to_string(),
@@ -625,6 +629,7 @@ impl RezCoreConfig {
             "default_shell" => assign(&mut self.default_shell, &value),
             "version" => assign(&mut self.version, &value),
             "plugin_path" => assign_path_list(&mut self.plugin_path, &value),
+            "release_hooks" => assign_str_list(&mut self.release_hooks, &value),
             "package_cache_path" => assign_path_list(&mut self.package_cache_path, &value),
             "tmpdir" => assign(&mut self.tmpdir, &value),
             "editor" => assign(&mut self.editor, &value),

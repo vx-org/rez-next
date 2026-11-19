@@ -8,6 +8,7 @@ use rez_next_common::{RezCoreConfig, RezCoreError};
 use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
 use rez_next_package::serialization::PackageSerializer;
 use rez_next_package::{Package, PackageInstallLayout, TestCommand};
+use rez_next_release_hook::{ReleaseHookError, ReleaseHookEvent};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -136,6 +137,8 @@ pub struct ReleaseManager {
     /// - `Some(true)`: proceed, equivalent to `rez release --ignore-existing-tag`.
     /// - `None`: legacy behaviour — warn and continue.
     ignore_existing_tag: Option<bool>,
+    /// Explicit release hooks. `None` uses the configured global hook list.
+    release_hooks: Option<Vec<String>>,
 }
 
 impl ReleaseManager {
@@ -147,6 +150,7 @@ impl ReleaseManager {
             skip_tests,
             skip_vcs_validation: false,
             ignore_existing_tag: None,
+            release_hooks: None,
         }
     }
 
@@ -168,6 +172,15 @@ impl ReleaseManager {
     /// allowing a re-release if the legacy default is ever tightened.
     pub fn set_ignore_existing_tag(&mut self, ignore_existing_tag: Option<bool>) {
         self.ignore_existing_tag = ignore_existing_tag;
+    }
+
+    /// Set the release hooks for this manager.
+    ///
+    /// Passing a list makes the release self-contained and is useful for
+    /// embedders that already own their release configuration. Passing `None`
+    /// restores the global `release_hooks` configuration.
+    pub fn set_release_hooks(&mut self, release_hooks: Option<Vec<String>>) {
+        self.release_hooks = release_hooks;
     }
 
     /// Execute the complete release workflow, detecting the VCS from
@@ -359,6 +372,20 @@ impl ReleaseManager {
             return Ok(result);
         }
 
+        if !self.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir,
+            &package,
+            &install_path,
+            message,
+            None,
+            None,
+            &mut result,
+        ) {
+            result.success = false;
+            return Ok(result);
+        }
+
         // Step 4: Build the package (if not skipped)
         if !self.skip_build {
             self.build_package(&package, &install_path, &mut result)?;
@@ -388,6 +415,23 @@ impl ReleaseManager {
 
         // Step 8: Install package definition
         self.install_package_definition(source_dir, &install_path, &package, &mut result)?;
+
+        let hook_changelog = result.changelog.clone().map(|value| vec![value]);
+        if result.errors.is_empty()
+            && !self.run_release_hooks(
+                ReleaseHookEvent::PostRelease,
+                source_dir,
+                &package,
+                &install_path,
+                message,
+                hook_changelog.as_deref(),
+                None,
+                &mut result,
+            )
+        {
+            result.success = false;
+            return Ok(result);
+        }
 
         // Step 9: Create the VCS tag, and only now. Every mutating step has
         // happened above, so `errors.is_empty()` means the package really was
@@ -703,6 +747,107 @@ impl ReleaseManager {
         Ok(())
     }
 
+    /// Run the configured hooks for one release lifecycle event.
+    ///
+    /// Hook construction failures and ordinary hook errors are warnings so an
+    /// optional notification hook cannot make a release unsafe to retry. A
+    /// cancellation is a deliberate release rejection and is recorded as an
+    /// error so the caller receives the normal `ReleaseResult` failure contract.
+    #[allow(clippy::too_many_arguments)]
+    fn run_release_hooks(
+        &self,
+        event: ReleaseHookEvent,
+        source_dir: &Path,
+        package: &Package,
+        install_path: &Path,
+        release_message: Option<&str>,
+        changelog: Option<&[String]>,
+        variants: Option<&[usize]>,
+        result: &mut ReleaseResult,
+    ) -> bool {
+        let hook_names = self
+            .release_hooks
+            .clone()
+            .unwrap_or_else(|| RezCoreConfig::load().release_hooks);
+        if hook_names.is_empty() {
+            return true;
+        }
+
+        rez_next_release_hook::init();
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default();
+        let previous_version = package
+            .previous_version
+            .as_ref()
+            .map(|version| version.as_str());
+        let previous_revision = package.previous_revision.as_deref();
+        let hook_names: Vec<&str> = hook_names.iter().map(String::as_str).collect();
+        let hooks =
+            rez_next_release_hook::create_release_hooks(&hook_names, source_dir.to_path_buf());
+
+        for hook in hooks {
+            let hook_result = match event {
+                ReleaseHookEvent::PreBuild => hook.pre_build(
+                    &user,
+                    install_path,
+                    variants,
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+                ReleaseHookEvent::PreRelease => hook.pre_release(
+                    &user,
+                    install_path,
+                    variants,
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+                ReleaseHookEvent::PostRelease => hook.post_release(
+                    &user,
+                    install_path,
+                    &Self::release_variant_names(package),
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+            };
+
+            match hook_result {
+                Ok(()) => {}
+                Err(ReleaseHookError::Cancelled(message)) => {
+                    result.errors.push(format!(
+                        "Release hook '{}' cancelled release: {message}",
+                        event.label()
+                    ));
+                    return false;
+                }
+                Err(ReleaseHookError::Error(message)) => {
+                    result.warnings.push(format!(
+                        "Release hook '{}' failed: {message}",
+                        event.label()
+                    ));
+                }
+            }
+        }
+
+        true
+    }
+
+    fn release_variant_names(package: &Package) -> Vec<String> {
+        if package.variants.is_empty() {
+            vec!["0".to_string()]
+        } else {
+            (0..package.variants.len())
+                .map(|index| index.to_string())
+                .collect()
+        }
+    }
+
     /// Generate changelog from VCS
     fn generate_changelog(
         &self,
@@ -962,8 +1107,10 @@ fn expand_home(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::vcs::{StubVCS, VCSMetadata};
+    use rez_next_release_hook::{ReleaseHook, ReleaseHookError};
     use std::fs::File;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     fn create_test_package(dir: &Path, name: &str, version: &str) -> PathBuf {
@@ -1051,6 +1198,178 @@ version = "{}"
             result.errors.is_empty(),
             "package test failed: {:?}",
             result.errors
+        );
+    }
+
+    struct CountingReleaseHook {
+        calls: std::sync::Arc<AtomicUsize>,
+        cancel: bool,
+        fail: bool,
+    }
+
+    impl ReleaseHook for CountingReleaseHook {
+        fn name() -> String {
+            "counting-release-hook".to_string()
+        }
+
+        fn new(_source_path: PathBuf) -> std::result::Result<Self, ReleaseHookError> {
+            unreachable!("the test registry factory constructs this hook")
+        }
+
+        fn pre_release(
+            &self,
+            _user: &str,
+            _install_path: &Path,
+            _variants: Option<&[usize]>,
+            _release_message: Option<&str>,
+            _changelog: Option<&[String]>,
+            _previous_version: Option<&str>,
+            _previous_revision: Option<&str>,
+        ) -> std::result::Result<(), ReleaseHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.cancel {
+                Err(ReleaseHookError::Cancelled("test cancellation".to_string()))
+            } else if self.fail {
+                Err(ReleaseHookError::Error("test failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn post_release(
+            &self,
+            _user: &str,
+            _install_path: &Path,
+            _variants: &[String],
+            _release_message: Option<&str>,
+            _changelog: Option<&[String]>,
+            _previous_version: Option<&str>,
+            _previous_revision: Option<&str>,
+        ) -> std::result::Result<(), ReleaseHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(ReleaseHookError::Error("test failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_release_hooks_run_for_pre_and_post_release() {
+        let hook_name = "counting-release-hook-lifecycle";
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        rez_next_release_hook::get_registry().register(hook_name, move |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: factory_calls.clone(),
+                cancel: false,
+                fail: false,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("hooked-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            Some("release"),
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PostRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            Some("release"),
+            None,
+            None,
+            &mut result,
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_release_hook_cancellation_becomes_release_error() {
+        let hook_name = "counting-release-hook-cancel";
+        rez_next_release_hook::get_registry().register(hook_name, |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                cancel: true,
+                fail: false,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("cancelled-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(!manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            None,
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("cancelled release"))
+        );
+    }
+
+    #[test]
+    fn test_release_hook_failure_is_a_warning() {
+        let hook_name = "counting-release-hook-error";
+        rez_next_release_hook::get_registry().register(hook_name, |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                cancel: false,
+                fail: true,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("hook-warning-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            None,
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(result.errors.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("test failure"))
         );
     }
 

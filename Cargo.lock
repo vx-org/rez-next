@@ -3004,6 +3004,7 @@ dependencies = [
  "rez-next-common",
  "rez-next-context",
  "rez-next-package",
+ "rez-next-release-hook",
  "rez-next-version",
  "rstest",
  "serde",
