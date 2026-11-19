@@ -1,18 +1,22 @@
-//! Plugins command implementation
+//! Plugins command implementation.
 //!
-//! Implements the `rez plugins` command for listing and managing package plugins.
+//! The command follows Rez's package-plugin contract. A package is a plugin
+//! for another package only when its package metadata declares that relation
+//! through the plugin_for field.
 
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_package::Package;
-use rez_next_repository::simple_repository::RepositoryManager;
-use std::collections::HashMap;
+use rez_next_repository::{
+    get_plugin_packages, package_repository::spec::resolve_filesystem_paths,
+};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Arguments for the plugins command
+/// Arguments for the plugins command.
 #[derive(Args, Clone, Debug)]
 pub struct PluginsArgs {
-    /// Package to list plugins for (optional; lists all if omitted)
+    /// Package to list plugins for.
     #[arg(
         value_name = "PKG",
         add = clap_complete::ArgValueCompleter::new(
@@ -21,16 +25,16 @@ pub struct PluginsArgs {
     )]
     pub package: Option<String>,
 
-    /// Set package search path
+    /// Set package search path.
     #[arg(long = "paths", value_name = "PATH")]
     pub paths: Vec<PathBuf>,
 
-    /// Verbose output
+    /// Include package metadata in the output.
     #[arg(short = 'v', long = "verbose")]
     pub verbose: bool,
 }
 
-/// Plugin information
+/// Plugin package information used by the command renderer.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     pub name: String,
@@ -39,9 +43,10 @@ pub struct PluginInfo {
     pub plugin_type: String,
     pub description: Option<String>,
     pub module_path: Option<String>,
+    pub plugin_for: Vec<String>,
 }
 
-/// Plugin discovery result
+/// Plugin discovery result.
 #[derive(Debug, Clone)]
 pub struct PluginDiscoveryResult {
     pub plugins: Vec<PluginInfo>,
@@ -49,70 +54,32 @@ pub struct PluginDiscoveryResult {
     pub total_found: usize,
 }
 
-/// Execute the plugins command
+/// Execute the plugins command.
 pub fn execute(args: PluginsArgs) -> RezCoreResult<()> {
-    if args.verbose {
-        if let Some(ref pkg) = args.package {
-            println!("🔌 Rez Plugins - Discovering package plugins...");
-            println!("Package: {}", pkg);
-        } else {
-            println!("🔌 Rez Plugins - Listing all available plugins...");
-        }
-    }
+    let package_name = args
+        .package
+        .as_deref()
+        .ok_or_else(|| RezCoreError::RequirementParse("a package name is required".to_string()))?;
+    let paths = package_paths(&args)?;
+    let packages = get_plugin_packages(package_name, Some(paths));
+    let discovery_result = PluginDiscoveryResult {
+        total_found: packages.len(),
+        plugins: packages.into_iter().map(plugin_info).collect(),
+        package_name: package_name.to_string(),
+    };
 
-    // If no package specified, just list available plugin types and exit successfully
-    if args.package.is_none() {
-        println!(
-            "Available plugin types: build_process, build_system, release_hook, release_vcs, shell"
-        );
-        println!("Built-in build_system plugins: binary_archive, pypi");
-        println!("Use 'rez plugins <package>' to list plugins for a specific package.");
-        return Ok(());
-    }
-
-    // Create async runtime
-    let runtime = tokio::runtime::Runtime::new().map_err(RezCoreError::Io)?;
-
-    runtime.block_on(async { execute_plugins_async(&args).await })
-}
-
-/// Execute plugins discovery asynchronously
-async fn execute_plugins_async(args: &PluginsArgs) -> RezCoreResult<()> {
-    // Setup repositories
-    let repo_manager = setup_repositories(args).await?;
-
-    // Find package
-    let pkg_name = args.package.as_deref().unwrap_or("*");
-    let package = find_package(&repo_manager, pkg_name).await?;
-
-    if args.verbose {
-        println!("Found package: {}", package.name);
-        if let Some(ref version) = package.version {
-            println!("Version: {}", version.as_str());
-        }
-        println!();
-    }
-
-    // Discover plugins
-    let discovery_result = discover_plugins(&package, args).await?;
-
-    // Display results
     display_plugins_result(&discovery_result, args.verbose);
-
     Ok(())
 }
 
-/// Setup repository manager
-async fn setup_repositories(args: &PluginsArgs) -> RezCoreResult<RepositoryManager> {
-    let paths: Vec<String> = if args.paths.is_empty() {
-        // Use real config paths
+fn package_paths(args: &PluginsArgs) -> RezCoreResult<Vec<String>> {
+    let entries: Vec<String> = if args.paths.is_empty() {
         let config = RezCoreConfig::load();
-        let mut p = config.packages_path.clone();
-        let local = config.local_packages_path.clone();
-        if !p.contains(&local) {
-            p.push(local);
+        let mut paths = config.packages_path;
+        if !paths.contains(&config.local_packages_path) {
+            paths.push(config.local_packages_path);
         }
-        p
+        paths
     } else {
         args.paths
             .iter()
@@ -120,250 +87,63 @@ async fn setup_repositories(args: &PluginsArgs) -> RezCoreResult<RepositoryManag
             .collect()
     };
 
-    RepositoryManager::from_package_paths(paths)
+    Ok(resolve_filesystem_paths(entries)?
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect())
 }
 
-/// Find a specific package
-async fn find_package(
-    repo_manager: &RepositoryManager,
-    package_name: &str,
-) -> RezCoreResult<Package> {
-    let packages = repo_manager.find_packages(package_name).await?;
-
-    if packages.is_empty() {
-        return Err(RezCoreError::RequirementParse(format!(
-            "Package '{}' not found",
-            package_name
-        )));
+fn plugin_info(package: Package) -> PluginInfo {
+    PluginInfo {
+        name: package.name.clone(),
+        package_name: package.name,
+        package_version: package.version.map(|version| version.as_str().to_string()),
+        plugin_type: "package".to_string(),
+        description: package.description,
+        module_path: package.filepath,
+        plugin_for: package.plugin_for,
     }
-
-    // Return latest version (first in list)
-    Ok((*packages.into_iter().next().unwrap()).clone())
 }
 
-/// Discover plugins for a package
-async fn discover_plugins(
-    package: &Package,
-    args: &PluginsArgs,
-) -> RezCoreResult<PluginDiscoveryResult> {
-    let mut plugins = Vec::new();
-
-    if args.verbose {
-        println!("🔍 Searching for plugins in package '{}'...", package.name);
-    }
-
-    // Check for common plugin types based on package tools and structure
-    plugins.extend(discover_command_plugins(package)?);
-    plugins.extend(discover_build_plugins(package)?);
-    plugins.extend(discover_shell_plugins(package)?);
-    plugins.extend(discover_extension_plugins(package)?);
-
-    if args.verbose {
-        println!("Found {} plugins", plugins.len());
-    }
-
-    let total_found = plugins.len();
-
-    Ok(PluginDiscoveryResult {
-        plugins,
-        package_name: package.name.clone(),
-        total_found,
-    })
-}
-
-/// Discover command plugins
-fn discover_command_plugins(package: &Package) -> RezCoreResult<Vec<PluginInfo>> {
-    let mut plugins = Vec::new();
-
-    // Check if package provides command-line tools
-    for tool in &package.tools {
-        plugins.push(PluginInfo {
-            name: tool.clone(),
-            package_name: package.name.clone(),
-            package_version: package.version.as_ref().map(|v| v.as_str().to_string()),
-            plugin_type: "command".to_string(),
-            description: Some(format!("Command-line tool provided by {}", package.name)),
-            module_path: None,
-        });
-    }
-
-    Ok(plugins)
-}
-
-/// Discover build system plugins
-fn discover_build_plugins(package: &Package) -> RezCoreResult<Vec<PluginInfo>> {
-    let mut plugins = Vec::new();
-
-    // Check for common build system indicators
-    let build_indicators = [
-        ("cmake", "CMake build system"),
-        ("make", "Make build system"),
-        ("python", "Python build system"),
-        ("pypi", "PyPI package installer"),
-        ("pip", "Python pip installer"),
-        ("setuptools", "Python setuptools"),
-        ("poetry", "Python Poetry"),
-        ("cargo", "Rust Cargo"),
-        ("npm", "Node.js npm"),
-        ("yarn", "Node.js Yarn"),
-    ];
-
-    for (indicator, description) in &build_indicators {
-        if package.tools.iter().any(|tool| tool.contains(indicator))
-            || package.requires.iter().any(|req| req.contains(indicator))
-        {
-            plugins.push(PluginInfo {
-                name: format!("{}_build", indicator),
-                package_name: package.name.clone(),
-                package_version: package.version.as_ref().map(|v| v.as_str().to_string()),
-                plugin_type: "build_system".to_string(),
-                description: Some(description.to_string()),
-                module_path: None,
-            });
-        }
-    }
-
-    Ok(plugins)
-}
-
-/// Discover shell plugins
-fn discover_shell_plugins(package: &Package) -> RezCoreResult<Vec<PluginInfo>> {
-    let mut plugins = Vec::new();
-
-    // Check for shell-related tools
-    let shell_tools = ["bash", "zsh", "fish", "powershell", "cmd"];
-
-    for tool in &package.tools {
-        if shell_tools.iter().any(|shell| tool.contains(shell)) {
-            plugins.push(PluginInfo {
-                name: format!("{}_shell", tool),
-                package_name: package.name.clone(),
-                package_version: package.version.as_ref().map(|v| v.as_str().to_string()),
-                plugin_type: "shell".to_string(),
-                description: Some(format!("Shell integration for {}", tool)),
-                module_path: None,
-            });
-        }
-    }
-
-    Ok(plugins)
-}
-
-/// Discover extension plugins
-fn discover_extension_plugins(package: &Package) -> RezCoreResult<Vec<PluginInfo>> {
-    let mut plugins = Vec::new();
-
-    // Check for common extension patterns
-    if package.name.contains("plugin") || package.name.contains("extension") {
-        plugins.push(PluginInfo {
-            name: package.name.clone(),
-            package_name: package.name.clone(),
-            package_version: package.version.as_ref().map(|v| v.as_str().to_string()),
-            plugin_type: "extension".to_string(),
-            description: package.description.clone(),
-            module_path: None,
-        });
-    }
-
-    Ok(plugins)
-}
-
-/// Display plugins discovery result
 fn display_plugins_result(result: &PluginDiscoveryResult, verbose: bool) {
     if result.plugins.is_empty() {
         eprintln!("package '{}' has no plugins.", result.package_name);
         return;
     }
 
-    if verbose {
-        println!("📋 Plugins found for package '{}':", result.package_name);
-        println!("{}", "=".repeat(60));
-        println!();
-
-        // Group plugins by type
-        let mut plugins_by_type: HashMap<String, Vec<&PluginInfo>> = HashMap::new();
-        for plugin in &result.plugins {
-            plugins_by_type
-                .entry(plugin.plugin_type.clone())
-                .or_default()
-                .push(plugin);
-        }
-
-        for (plugin_type, plugins) in plugins_by_type {
-            println!(
-                "🔧 {} Plugins:",
-                plugin_type.replace('_', " ").to_uppercase()
-            );
-            println!("{}", "-".repeat(40));
-
-            for plugin in plugins {
-                println!("  • {}", plugin.name);
-                if let Some(ref description) = plugin.description {
-                    println!("    Description: {}", description);
-                }
-                if let Some(ref version) = plugin.package_version {
-                    println!("    Version: {}", version);
-                }
-                println!();
-            }
-        }
-
-        println!("✅ Total: {} plugins found", result.total_found);
-    } else {
-        // Simple output format (compatible with original rez)
+    if !verbose {
         for plugin in &result.plugins {
             println!("{}", plugin.name);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_plugins_args_defaults() {
-        let args = PluginsArgs {
-            package: Some("test".to_string()),
-            paths: vec![],
-            verbose: false,
-        };
-
-        assert_eq!(args.package, Some("test".to_string()));
-        assert!(!args.verbose);
+        return;
     }
 
-    #[test]
-    fn test_discover_command_plugins() {
-        use rez_next_version::Version;
-
-        let mut package = Package::new("python".to_string());
-        package.version = Some(Version::parse("3.9.0").unwrap());
-        package.description = Some("Python interpreter".to_string());
-        package.tools = vec!["python".to_string(), "pip".to_string()];
-
-        let plugins = discover_command_plugins(&package).unwrap();
-        assert_eq!(plugins.len(), 2);
-        assert_eq!(plugins[0].name, "python");
-        assert_eq!(plugins[0].plugin_type, "command");
-        assert_eq!(plugins[1].name, "pip");
-        assert_eq!(plugins[1].plugin_type, "command");
+    let mut plugins_by_type: BTreeMap<&str, Vec<&PluginInfo>> = BTreeMap::new();
+    for plugin in &result.plugins {
+        plugins_by_type
+            .entry(plugin.plugin_type.as_str())
+            .or_default()
+            .push(plugin);
     }
 
-    #[test]
-    fn test_discover_build_plugins() {
-        use rez_next_version::Version;
-
-        let mut package = Package::new("cmake".to_string());
-        package.version = Some(Version::parse("3.20.0").unwrap());
-        package.description = Some("CMake build system".to_string());
-        package.tools = vec!["cmake".to_string()];
-
-        let plugins = discover_build_plugins(&package).unwrap();
-        // "cmake" tool matches both "cmake" and "make" indicators (contains match)
-        assert_eq!(plugins.len(), 2);
-        assert_eq!(plugins[0].name, "cmake_build");
-        assert_eq!(plugins[0].plugin_type, "build_system");
-        assert_eq!(plugins[1].name, "make_build");
+    println!("Plugins found for package '{}':", result.package_name);
+    for (plugin_type, plugins) in plugins_by_type {
+        println!("{} plugins:", plugin_type.replace('_', " "));
+        for plugin in plugins {
+            println!("  {}", plugin.name);
+            if let Some(description) = &plugin.description {
+                println!("    Description: {description}");
+            }
+            if let Some(version) = &plugin.package_version {
+                println!("    Version: {version}");
+            }
+            if !plugin.plugin_for.is_empty() {
+                println!("    Plugin for: {}", plugin.plugin_for.join(", "));
+            }
+            if let Some(module_path) = &plugin.module_path {
+                println!("    Definition: {module_path}");
+            }
+        }
     }
+    println!("Total: {} plugins found", result.total_found);
 }

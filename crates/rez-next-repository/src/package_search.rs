@@ -63,83 +63,96 @@ impl ResourceSearchResult {
 /// // let plugins = get_plugins("maya", None);
 /// ```
 pub fn get_plugins(package_name: &str, paths: Option<Vec<String>>) -> Vec<String> {
-    let search_paths = paths.unwrap_or_else(get_default_package_paths);
+    get_plugin_packages(package_name, paths)
+        .into_iter()
+        .map(|package| package.name)
+        .collect()
+}
 
-    let mut plugins = Vec::new();
-    let mut visited = HashSet::new();
+/// Load the latest package metadata for every package family that targets a
+/// package through its `plugin_for` field.
+///
+/// A package family can contain versions with different plugin metadata. The
+/// scan therefore considers every version and retains the highest matching
+/// version for each family. Repository order is deterministic, while the
+/// returned packages are sorted by package name.
+pub fn get_plugin_packages(package_name: &str, paths: Option<Vec<String>>) -> Vec<Package> {
+    let search_paths = paths.unwrap_or_else(get_default_package_paths);
+    let mut packages_by_name: HashMap<String, Package> = HashMap::new();
 
     for path in search_paths {
         let path = Path::new(&path);
-        if !path.exists() {
+        if !path.is_dir() {
             continue;
         }
 
-        // Scan for packages that have plugin_for == package_name
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let family_path = entry.path();
-                if !family_path.is_dir() {
-                    continue;
-                }
+        let mut family_paths = sorted_directories(path);
+        for family_path in family_paths.drain(..) {
+            let mut matching_packages =
+                sorted_package_versions(&family_path)
+                    .into_iter()
+                    .filter(|package| {
+                        package
+                            .plugin_for
+                            .iter()
+                            .any(|target| target == package_name)
+                    });
 
-                let family_name = family_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
-
-                if visited.contains(family_name) {
-                    continue;
-                }
-
-                // Check if this package is a plugin for package_name
-                if is_plugin_for(&family_path, package_name) {
-                    plugins.push(family_name.to_string());
-                    visited.insert(family_name.to_string());
-                }
-            }
-        }
-    }
-
-    plugins.sort();
-    plugins
-}
-
-/// Check if a package family is a plugin for the given package.
-fn is_plugin_for(family_path: &Path, target_package: &str) -> bool {
-    // Check version directories
-    if let Ok(entries) = std::fs::read_dir(family_path) {
-        for entry in entries.flatten() {
-            let version_path = entry.path();
-            if !version_path.is_dir() {
+            let Some(package) = matching_packages.next() else {
                 continue;
-            }
+            };
 
-            // Try to load package from this version
-            if let Some(pkg) = load_package_from_dir(&version_path) {
-                // Check plugin_for field (direct field on Package struct)
-                for plugin in &pkg.plugin_for {
-                    if plugin == target_package {
-                        return true;
-                    }
-                }
+            let should_replace = packages_by_name
+                .get(&package.name)
+                .is_none_or(|current| compare_package_versions(&package, current).is_gt());
+            if should_replace {
+                packages_by_name.insert(package.name.clone(), package);
             }
-
-            // Only check the first version
-            break;
         }
     }
 
-    false
+    let mut packages: Vec<Package> = packages_by_name.into_values().collect();
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    packages
 }
 
 /// Load a package from a version directory.
 fn load_package_from_dir(dir: &Path) -> Option<Package> {
-    let package_py = dir.join("package.py");
-    if !package_py.exists() {
-        return None;
-    }
+    ["package.py", "package.yaml", "package.yml", "package.json"]
+        .iter()
+        .map(|filename| dir.join(filename))
+        .find(|path| path.is_file())
+        .and_then(|path| Package::from_path(path).ok())
+}
 
-    Package::from_path(&package_py).ok()
+fn sorted_directories(path: &Path) -> Vec<std::path::PathBuf> {
+    let mut directories: Vec<_> = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|entry| entry.is_dir())
+        .collect();
+    directories.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    directories
+}
+
+fn sorted_package_versions(family_path: &Path) -> Vec<Package> {
+    let mut packages: Vec<_> = sorted_directories(family_path)
+        .into_iter()
+        .filter_map(|version_path| load_package_from_dir(&version_path))
+        .collect();
+    packages.sort_by(|left, right| compare_package_versions(right, left));
+    packages
+}
+
+fn compare_package_versions(left: &Package, right: &Package) -> std::cmp::Ordering {
+    match (&left.version, &right.version) {
+        (Some(left), Some(right)) => left.cmp(right),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => left.filepath.as_deref().cmp(&right.filepath.as_deref()),
+    }
 }
 
 /// Get the reverse dependency tree for a package.

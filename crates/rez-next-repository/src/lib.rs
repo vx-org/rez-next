@@ -27,7 +27,9 @@ pub use package_repository::filesystem::{InstallPackageVariantsRequest, install_
 pub use package_repository::{
     FilesystemPackageRepository, InstallVariantOptions, PackageRepository,
 };
-pub use package_search::{ResourceSearchResult, get_plugins, get_reverse_dependency_tree};
+pub use package_search::{
+    ResourceSearchResult, get_plugin_packages, get_plugins, get_reverse_dependency_tree,
+};
 pub use repository::{
     PackageSearchCriteria, Repository, RepositoryMetadata, RepositoryStats, RepositoryType,
     deduplicate_packages,
