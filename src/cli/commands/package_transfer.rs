@@ -3,8 +3,8 @@
 use crate::cli::utils::expand_home_path;
 use rez_next_common::{RezCoreError, error::RezCoreResult};
 use rez_next_package::{Package, PackageInstallLayout};
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
-use rez_next_repository::package_repository::{FilesystemPackageRepository, InstallVariantOptions};
+use rez_next_repository::package_repository::InstallVariantOptions;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_version::Version;
 use serde_json::Value;
@@ -42,13 +42,12 @@ pub(crate) async fn transfer_package(
     options: &PackageTransferOptions,
 ) -> RezCoreResult<PackageTransferResult> {
     let (package_name, version_spec, uri_variant) = resolve_source_spec(options)?;
-    let source_paths = source_paths(options);
-    let mut manager = RepositoryManager::new();
-    for (index, path) in source_paths.iter().enumerate() {
-        let repository =
-            FilesystemPackageRepository::with_name(path, format!("transfer_repo_{index}"));
-        manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
+    let source_paths = source_paths(options)?;
+    let manager = RepositoryManager::from_package_paths(
+        source_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    )?;
 
     let (source_package, source_path) = find_source_package(
         &manager,
@@ -154,22 +153,22 @@ pub(crate) async fn transfer_package(
     })
 }
 
-fn source_paths(options: &PackageTransferOptions) -> Vec<PathBuf> {
-    if !options.source_paths.is_empty() {
-        return options
+fn source_paths(options: &PackageTransferOptions) -> RezCoreResult<Vec<PathBuf>> {
+    let entries = if !options.source_paths.is_empty() {
+        options
             .source_paths
             .iter()
-            .map(|path| expand_home_path(&path.to_string_lossy()))
-            .collect();
-    }
-
-    let config = rez_next_common::config::RezCoreConfig::load();
-    config
-        .packages_path
-        .iter()
-        .map(|path| expand_home_path(path))
-        .filter(|path| path.exists())
-        .collect()
+            .map(|path| {
+                expand_home_path(&path.to_string_lossy())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    } else {
+        let config = rez_next_common::config::RezCoreConfig::load();
+        config.packages_path.clone()
+    };
+    resolve_filesystem_paths(entries).map_err(Into::into)
 }
 
 fn resolve_source_spec(

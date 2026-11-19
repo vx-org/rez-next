@@ -3,14 +3,9 @@
 //! Tab completion support for rez commands.
 //! Provides shell completion scripts and dynamic completion for packages, versions, etc.
 
-use crate::cli::utils::expand_home_path as expand_home;
 use clap::Args;
 use rez_next_common::{RezCoreConfig, error::RezCoreResult};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
-use rez_next_repository::package_repository::spec::RepositorySpec;
 use rez_next_repository::simple_repository::RepositoryManager;
-use std::collections::HashSet;
 
 /// Arguments for the complete command
 #[derive(Args, Clone)]
@@ -210,37 +205,8 @@ Register-ArgumentCompleter -Native -CommandName rez -ScriptBlock {{
 /// here — the completion path only reads package names and versions, and no
 /// other repository type is implemented yet.
 ///
-/// An entry naming a type that does not exist is reported on stderr and
-/// skipped. Completion output goes to stdout where the shell consumes it, so a
-/// diagnostic there would corrupt the completion list; but dropping the entry
-/// with no trace at all is what left a mistyped `packages_path` entry looking
-/// like an empty repository. Each entry is reported at most once per process,
-/// so one bad entry costs one line rather than one line per Tab.
-fn build_manager(config: &RezCoreConfig) -> RepositoryManager {
-    let mut manager = RepositoryManager::new();
-    let mut reported_unknown_types: HashSet<String> = HashSet::new();
-    for (i, entry) in config.packages_path.iter().enumerate() {
-        let parsed = RepositorySpec::parse_spec(entry);
-        if let Some(unknown) = parsed.unknown_type() {
-            if reported_unknown_types.insert(entry.clone()) {
-                eprintln!("rez-next: warning: {unknown}");
-            }
-            continue;
-        }
-        let Some(spec) = parsed.spec() else {
-            continue;
-        };
-        if !spec.is_filesystem() {
-            continue;
-        }
-        let path = expand_home(&spec.location);
-        if !path.exists() {
-            continue;
-        }
-        let repository = FilesystemPackageRepository::with_name(path, format!("repo_{i}"));
-        manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
-    manager
+fn build_manager(config: &RezCoreConfig) -> RezCoreResult<RepositoryManager> {
+    RepositoryManager::from_package_paths(config.packages_path.clone())
 }
 
 /// List package names matching a prefix
@@ -248,7 +214,7 @@ fn complete_package_names(prefix: &str) -> RezCoreResult<()> {
     let config = RezCoreConfig::load();
     let rt = tokio::runtime::Runtime::new().map_err(rez_next_common::RezCoreError::Io)?;
 
-    let manager = build_manager(&config);
+    let manager = build_manager(&config)?;
     let names = rt.block_on(manager.list_packages())?;
     for name in names {
         if name.starts_with(prefix) {
@@ -263,7 +229,7 @@ fn complete_package_versions(pkg_name: &str, prefix: &str) -> RezCoreResult<()> 
     let config = RezCoreConfig::load();
     let rt = tokio::runtime::Runtime::new().map_err(rez_next_common::RezCoreError::Io)?;
 
-    let manager = build_manager(&config);
+    let manager = build_manager(&config)?;
     let packages = rt.block_on(manager.find_packages(pkg_name))?;
     for pkg in packages {
         if let Some(ref v) = pkg.version {
@@ -410,7 +376,7 @@ mod tests {
         let root = make_repository(&[("python", &["3.9.1", "3.11.0"])]);
         let config = config_with_paths(vec![root.path().to_string_lossy().to_string()]);
 
-        let manager = build_manager(&config);
+        let manager = build_manager(&config).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let names = rt.block_on(manager.list_packages()).unwrap();
@@ -432,7 +398,7 @@ mod tests {
             root.path().to_string_lossy()
         )]);
 
-        let manager = build_manager(&config);
+        let manager = build_manager(&config).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let names = rt.block_on(manager.list_packages()).unwrap();
@@ -440,17 +406,15 @@ mod tests {
     }
 
     #[test]
-    fn build_manager_skips_non_filesystem_and_missing_paths() {
+    fn build_manager_skips_missing_paths() {
         let root = make_repository(&[("python", &["3.9.1"])]);
         let config = config_with_paths(vec![
-            // Not a filesystem repository, and no such type is implemented.
-            "memory@local".to_string(),
             // Filesystem, but the path does not exist.
             "/nonexistent/repository/path".to_string(),
             format!("filesystem@{}", root.path().to_string_lossy()),
         ]);
 
-        let manager = build_manager(&config);
+        let manager = build_manager(&config).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let names = rt.block_on(manager.list_packages()).unwrap();
@@ -472,7 +436,7 @@ mod tests {
             root.path().to_string_lossy().to_string(),
         ]);
 
-        let manager = build_manager(&config);
+        let manager = build_manager(&config).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let mut names = rt.block_on(manager.list_packages()).unwrap();
@@ -481,21 +445,17 @@ mod tests {
     }
 
     #[test]
-    fn build_manager_skips_an_unknown_repository_type() {
+    fn build_manager_rejects_an_unknown_repository_type() {
         // `server` is not a repository type. The entry must not be coerced
-        // into a path that silently fails to resolve, and it must not keep
-        // the rest of `packages_path` from being scanned.
+        // into a path that silently fails to resolve.
         let root = make_repository(&[("python", &["3.9.1"])]);
         let config = config_with_paths(vec![
             "server@host/path".to_string(),
             root.path().to_string_lossy().to_string(),
         ]);
 
-        let manager = build_manager(&config);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let names = rt.block_on(manager.list_packages()).unwrap();
-        assert_eq!(names, vec!["python".to_string()]);
+        let error = build_manager(&config).err().unwrap();
+        assert!(error.to_string().contains("server"));
     }
 
     #[test]

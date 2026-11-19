@@ -2,12 +2,11 @@
 //!
 //! Implements the `rez rm` command for removing packages from repositories.
 
-use crate::cli::utils::{expand_home_path, parse_time_spec};
+use crate::cli::utils::parse_time_spec;
 use clap::Args;
 use rez_next_common::{RezCoreError, error::RezCoreResult};
 use rez_next_package::Package;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use std::path::PathBuf;
 
@@ -386,26 +385,17 @@ async fn remove_ignored_since(args: &RmArgs) -> RezCoreResult<()> {
 async fn setup_repositories(args: &RmArgs) -> RezCoreResult<RepositoryManager> {
     use rez_next_common::config::RezCoreConfig;
 
-    let mut repo_manager = RepositoryManager::new();
-    let paths: Vec<PathBuf> = if !args.paths.is_empty() {
-        args.paths.clone()
+    let paths: Vec<String> = if !args.paths.is_empty() {
+        args.paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     } else {
         let config = RezCoreConfig::load();
-        config
-            .packages_path
-            .iter()
-            .map(|p| expand_home_path(p))
-            .filter(|p| p.exists())
-            .collect()
+        config.packages_path.clone()
     };
 
-    for (i, path) in paths.iter().enumerate() {
-        let repo_name = format!("repo_{i}");
-        let repository = FilesystemPackageRepository::with_name(path.clone(), repo_name);
-        repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
-
-    Ok(repo_manager)
+    RepositoryManager::from_package_paths(paths)
 }
 
 /// Find packages to remove (with version filter)
@@ -442,13 +432,13 @@ async fn remove_single_package(package: &Package, args: &RmArgs) -> RezCoreResul
     // Try to find actual path
     let mut package_path: Option<PathBuf> = None;
     let search_paths: Vec<PathBuf> = if !args.paths.is_empty() {
-        args.paths.clone()
+        resolve_filesystem_paths(
+            args.paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )?
     } else {
-        config
-            .packages_path
-            .iter()
-            .map(|p| expand_home_path(p))
-            .collect()
+        resolve_filesystem_paths(config.packages_path.clone())?
     };
 
     for base in &search_paths {

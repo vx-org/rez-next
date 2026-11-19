@@ -7,8 +7,7 @@ use clap::Args;
 use rez_next_common::{RezCoreError, SystemInfo, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext, ShellType};
 use rez_next_package::{PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_rex::{RexEnvironment, ShellType as RexShellType, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
@@ -238,7 +237,6 @@ fn resolve_environment(
     }
 
     // Setup repository manager from config or args
-    let mut repo_manager = RepositoryManager::new();
     let rez_config = RezCoreConfig::load();
     config.parent_variables = rez_config.parent_variables.clone();
     config.all_parent_variables = rez_config.all_parent_variables;
@@ -246,27 +244,26 @@ fn resolve_environment(
         configured_implicit_requirements(&rez_config, &SystemInfo::detect(), args.no_implicit)?;
 
     // Add configured package paths as repositories
-    let mut package_paths: Vec<PathBuf> = if let Some(ref paths_str) = args.paths {
+    let configured_entries: Vec<String> = if let Some(ref paths_str) = args.paths {
         split_package_paths(paths_str)
-    } else {
-        rez_config
-            .packages_path
-            .iter()
-            .map(|path| expand_home(path))
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
             .collect()
+    } else {
+        rez_config.packages_path.clone()
     };
+    let mut package_paths = resolve_filesystem_paths(configured_entries)?;
 
     if args.no_local {
         let local_packages_path = expand_home(&rez_config.local_packages_path);
         package_paths.retain(|path| !same_path(path, &local_packages_path));
     }
 
-    for (i, path) in package_paths.iter().enumerate() {
-        if path.exists() {
-            let repo = FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repo)));
-        }
-    }
+    let repo_manager = RepositoryManager::from_package_paths(
+        package_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    )?;
 
     let repo_arc = Arc::new(repo_manager);
 

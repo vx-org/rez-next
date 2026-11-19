@@ -128,8 +128,6 @@ fn load_package_from_directory(dir_path: &Path) -> RezCoreResult<Package> {
 /// Load package from configured repositories by name (and optional version)
 fn load_package_from_repos(spec: &str) -> RezCoreResult<Package> {
     use rez_next_common::config::RezCoreConfig;
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
 
     // Parse "name" or "name-version" spec
@@ -149,15 +147,12 @@ fn load_package_from_repos(spec: &str) -> RezCoreResult<Package> {
     };
 
     let config = RezCoreConfig::load();
-    let mut repo_manager = RepositoryManager::new();
-    for (i, path_str) in config.packages_path.iter().enumerate() {
-        let path = expand_home_path(path_str);
-        if path.exists() {
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(
-                FilesystemPackageRepository::with_name(path, format!("repo_{i}")),
-            )));
-        }
-    }
+    let paths = config
+        .packages_path
+        .iter()
+        .map(|path| expand_home_path(path).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let repo_manager = RepositoryManager::from_package_paths(paths)?;
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| RezCoreError::Repository(e.to_string()))?;
 

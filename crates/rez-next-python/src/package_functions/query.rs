@@ -25,7 +25,7 @@ pub fn get_latest_package(
 ) -> PyResult<Option<PyPackage>> {
     let rt = get_runtime();
 
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     let packages = rt
         .block_on(repo_manager.find_packages(name))
@@ -71,7 +71,7 @@ pub fn get_package(
 ) -> PyResult<Option<PyPackage>> {
     let rt = get_runtime();
 
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     let packages = rt
         .block_on(repo_manager.find_packages(name))
@@ -113,7 +113,7 @@ pub fn iter_packages(
 ) -> PyResult<Py<PyAny>> {
     let rt = get_runtime();
 
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     let packages = rt
         .block_on(repo_manager.find_packages(name))
@@ -157,7 +157,7 @@ pub fn iter_packages(
 pub fn get_package_family_names(paths: Option<Vec<String>>) -> PyResult<Vec<String>> {
     let rt = get_runtime();
 
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     // Use list_packages to get all family names
     let names = rt
@@ -177,7 +177,7 @@ pub fn walk_packages(py: Python, paths: Option<Vec<String>>) -> PyResult<Py<PyAn
 
     let rt = get_runtime();
 
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     // Get all family names first
     let family_names = rt
@@ -237,7 +237,7 @@ pub fn iter_package_families(paths: Option<Vec<String>>) -> PyResult<Vec<PyPacka
     use std::collections::HashMap;
 
     let rt = get_runtime();
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     // Get all family names
     let family_names = rt

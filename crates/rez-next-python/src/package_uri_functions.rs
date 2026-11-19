@@ -33,7 +33,7 @@ pub fn get_package_from_uri(
     let _ = py; // Used by PyO3 framework for GIL management
 
     let rt = crate::runtime::get_runtime();
-    let repo_manager = make_repo_manager(paths.clone());
+    let repo_manager = make_repo_manager(paths.clone())?;
 
     // Strategy 1: Try to find package by parsing URI as a file path
     let path = Path::new(uri);

@@ -5,8 +5,6 @@
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_package::Package;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -106,27 +104,23 @@ async fn execute_plugins_async(args: &PluginsArgs) -> RezCoreResult<()> {
 
 /// Setup repository manager
 async fn setup_repositories(args: &PluginsArgs) -> RezCoreResult<RepositoryManager> {
-    let mut repo_manager = RepositoryManager::new();
-    let paths: Vec<PathBuf> = if args.paths.is_empty() {
+    let paths: Vec<String> = if args.paths.is_empty() {
         // Use real config paths
         let config = RezCoreConfig::load();
-        let mut p: Vec<PathBuf> = config.packages_path.iter().map(PathBuf::from).collect();
-        let local = PathBuf::from(&config.local_packages_path);
+        let mut p = config.packages_path.clone();
+        let local = config.local_packages_path.clone();
         if !p.contains(&local) {
             p.push(local);
         }
         p
     } else {
-        args.paths.clone()
+        args.paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     };
 
-    for (i, path) in paths.iter().enumerate() {
-        let repo_name = format!("repo_{i}");
-        let repository = FilesystemPackageRepository::with_name(path.clone(), repo_name);
-        repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
-
-    Ok(repo_manager)
+    RepositoryManager::from_package_paths(paths)
 }
 
 /// Find a specific package

@@ -2,8 +2,6 @@
 
 use clap::Args;
 use rez_next_common::{RezCoreConfig, RezCoreError};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_version::Version;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -137,13 +135,16 @@ pub async fn execute_depends(args: DependsArgs) -> Result<(), RezCoreError> {
     }
 
     // Parse package paths - use real config when no explicit paths given
-    let package_paths: Vec<PathBuf> = if let Some(paths) = &args.paths {
+    let package_paths: Vec<String> = if let Some(paths) = &args.paths {
         split_package_paths(paths)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     } else {
         let config = RezCoreConfig::load();
-        let mut paths: Vec<PathBuf> = config.packages_path.iter().map(PathBuf::from).collect();
+        let mut paths = config.packages_path.clone();
         // Also include local packages path
-        let local = PathBuf::from(&config.local_packages_path);
+        let local = config.local_packages_path.clone();
         if !paths.contains(&local) {
             paths.push(local);
         }
@@ -155,14 +156,7 @@ pub async fn execute_depends(args: DependsArgs) -> Result<(), RezCoreError> {
     }
 
     // Create repository manager
-    let mut repo_manager = RepositoryManager::new();
-
-    // Add filesystem repositories
-    for (i, path) in package_paths.iter().enumerate() {
-        let repo_name = format!("repo_{i}");
-        let repository = FilesystemPackageRepository::with_name(path.clone(), repo_name);
-        repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
+    let repo_manager = RepositoryManager::from_package_paths(package_paths)?;
 
     // Build reverse dependency tree
     let tree = build_reverse_dependency_tree(

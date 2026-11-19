@@ -5,8 +5,6 @@
 use clap::Args;
 use rez_next_common::{RezCoreError, error::RezCoreResult};
 use rez_next_package::Package;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use std::path::PathBuf;
 
@@ -160,40 +158,18 @@ async fn execute_diff_async(args: &DiffArgs) -> RezCoreResult<()> {
 async fn setup_repositories(args: &DiffArgs) -> RezCoreResult<RepositoryManager> {
     use rez_next_common::config::RezCoreConfig;
 
-    let mut repo_manager = RepositoryManager::new();
-
-    let paths: Vec<PathBuf> = if !args.paths.is_empty() {
-        args.paths.clone()
+    let paths: Vec<String> = if !args.paths.is_empty() {
+        args.paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     } else {
         // Use configured package paths
         let config = RezCoreConfig::load();
-        config
-            .packages_path
-            .iter()
-            .map(|p| {
-                if let Some(rest) = p.strip_prefix("~/") {
-                    if let Some(home) =
-                        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
-                    {
-                        std::path::PathBuf::from(home).join(rest)
-                    } else {
-                        PathBuf::from(p)
-                    }
-                } else {
-                    PathBuf::from(p)
-                }
-            })
-            .filter(|p| p.exists())
-            .collect()
+        config.packages_path.clone()
     };
 
-    for (i, path) in paths.iter().enumerate() {
-        let repo_name = format!("repo_{i}");
-        let repository = FilesystemPackageRepository::with_name(path.clone(), repo_name);
-        repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
-
-    Ok(repo_manager)
+    RepositoryManager::from_package_paths(paths)
 }
 
 /// Find packages to diff

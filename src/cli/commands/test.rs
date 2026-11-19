@@ -14,8 +14,7 @@ use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_
 use rez_next_package::{
     Requirement, TestCommand, TestVariantFilter, serialization::PackageSerializer, shell_command,
 };
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
@@ -178,17 +177,19 @@ impl PackageTestRunner {
         args: &TestArgs,
     ) -> RezCoreResult<()> {
         let config = RezCoreConfig::load();
-        let mut search_paths: Vec<PathBuf> = args
+        let configured_entries: Vec<String> = args
             .paths
             .as_deref()
-            .map(|paths| std::env::split_paths(paths).collect())
-            .unwrap_or_default();
+            .map(|paths| {
+                std::env::split_paths(paths)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| config.packages_path.clone());
+        let mut search_paths = resolve_filesystem_paths(configured_entries)?;
         let local_path = expand_home_path(&config.local_packages_path);
-        for search_path in &config.packages_path {
-            let path = expand_home_path(search_path);
-            if (!args.no_local || path != local_path) && !search_paths.contains(&path) {
-                search_paths.push(path);
-            }
+        if args.paths.is_none() && args.no_local {
+            search_paths.retain(|path| path != &local_path);
         }
         let candidates = [working_dir.join("package.py")];
 
@@ -284,12 +285,11 @@ impl PackageTestRunner {
         let runtime = tokio::runtime::Runtime::new().map_err(|error| {
             RezCoreError::CliError(format!("Failed to create test runtime: {error}"))
         })?;
-        let mut repositories = RepositoryManager::new();
-        for (index, path) in search_paths.iter().filter(|path| path.exists()).enumerate() {
-            let repository =
-                FilesystemPackageRepository::with_name(path, format!("test_repo_{index}"));
-            repositories.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
+        let repositories = RepositoryManager::from_package_paths(
+            search_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )?;
         let repositories = Arc::new(repositories);
         let test_definitions: Vec<_> = self
             .test_definitions

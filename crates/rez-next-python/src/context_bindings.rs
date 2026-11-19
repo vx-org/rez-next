@@ -9,7 +9,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rez_next_context::{ContextStatus, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
-use rez_next_repository::simple_repository::{RepositoryManager, SimpleRepository};
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
+use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,16 +88,18 @@ impl PyResolvedContext {
             }
         }
 
-        let pkg_paths: Vec<PathBuf> = paths
+        let pkg_entries: Vec<String> = paths
             .as_ref()
-            .map(|p| p.iter().map(PathBuf::from).collect())
+            .map(|entries| entries.iter().map(|entry| expand_home(entry)).collect())
             .unwrap_or_else(|| {
                 config
                     .packages_path
                     .iter()
-                    .map(|p| PathBuf::from(expand_home(p)))
+                    .map(|entry| expand_home(entry))
                     .collect()
             });
+        let pkg_paths = resolve_filesystem_paths(pkg_entries)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         // Parse requirements
         let requirements: Vec<PackageRequirement> = packages
@@ -111,15 +114,12 @@ impl PyResolvedContext {
         };
 
         // Build repository manager
-        let mut repo_manager = RepositoryManager::new();
-        for (i, path) in pkg_paths.iter().enumerate() {
-            if path.exists() {
-                repo_manager.add_repository(Box::new(SimpleRepository::new(
-                    path.clone(),
-                    format!("repo_{}", i),
-                )));
-            }
-        }
+        let repo_manager = RepositoryManager::from_package_paths(
+            pkg_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         // Convert to Requirement for the resolver via string parsing
         let resolver_reqs: Vec<Requirement> = requirements

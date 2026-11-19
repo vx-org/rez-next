@@ -8,7 +8,7 @@ use clap::{Args, CommandFactory, Subcommand, ValueEnum};
 use clap_complete::CompletionCandidate;
 use clap_complete::env::Shells;
 use rez_next_common::{RezCoreConfig, error::RezCoreResult};
-use rez_next_repository::simple_repository::{RepositoryManager, SimpleRepository};
+use rez_next_repository::simple_repository::RepositoryManager;
 use serde::Serialize;
 
 use crate::cli::RezCli;
@@ -235,7 +235,7 @@ async fn query_packages(
     repositories: &[PathBuf],
     prefix: &str,
 ) -> RezCoreResult<Vec<PackageCompletion>> {
-    let manager = repository_manager(repositories);
+    let manager = repository_manager(repositories)?;
     let names = manager.list_packages().await?;
     let mut completions = Vec::new();
     for name in names.into_iter().filter(|name| name.starts_with(prefix)) {
@@ -258,7 +258,7 @@ async fn query_versions(
     package: &str,
     prefix: &str,
 ) -> RezCoreResult<Vec<String>> {
-    let manager = repository_manager(repositories);
+    let manager = repository_manager(repositories)?;
     let packages = manager.find_packages(package).await?;
     Ok(package_versions(
         packages.iter().map(|package| package.as_ref()),
@@ -267,7 +267,7 @@ async fn query_versions(
 }
 
 async fn query_request_candidates(prefix: &str) -> RezCoreResult<Vec<String>> {
-    let manager = repository_manager(&[]);
+    let manager = repository_manager(&[])?;
     let names = manager.list_packages().await?;
     let mut candidates = Vec::new();
     for name in names {
@@ -303,26 +303,23 @@ fn package_versions<'a>(
         .collect()
 }
 
-fn repository_manager(repositories: &[PathBuf]) -> RepositoryManager {
+fn repository_manager(repositories: &[PathBuf]) -> RezCoreResult<RepositoryManager> {
     let paths = if repositories.is_empty() {
         RezCoreConfig::load()
             .packages_path
             .into_iter()
-            .map(|path| expand_home_path(&path))
+            .map(|path| expand_home_path(&path).to_string_lossy().into_owned())
             .collect::<Vec<_>>()
     } else {
         repositories
             .iter()
-            .map(|path| expand_home_path(&path.to_string_lossy()))
+            .map(|path| {
+                expand_home_path(&path.to_string_lossy())
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect()
     };
 
-    let mut manager = RepositoryManager::new();
-    for (index, path) in paths.into_iter().filter(|path| path.exists()).enumerate() {
-        manager.add_repository(Box::new(SimpleRepository::new(
-            path,
-            format!("completion_repo_{index}"),
-        )));
-    }
-    manager
+    RepositoryManager::from_package_paths(paths)
 }

@@ -12,8 +12,6 @@ use rez_next_package::{
     Package, PackageInstallLayout, PackageRequirement, Requirement, TestCommand,
 };
 use rez_next_release_hook::{ReleaseHookError, ReleaseHookEvent};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::fs;
@@ -1117,25 +1115,16 @@ impl ReleaseManager {
     }
 
     fn find_releases(&self, package: &Package) -> Result<Vec<Arc<Package>>, RezCoreError> {
-        let mut repository_manager = RepositoryManager::new();
-
         let config = RezCoreConfig::load();
-        let mut search_paths = vec![self.get_install_base()];
+        let mut search_paths = vec![self.get_install_base().to_string_lossy().into_owned()];
         search_paths.extend(
             config
                 .packages_path
                 .iter()
-                .map(|search_path| PathBuf::from(expand_home(search_path))),
+                .map(|search_path| expand_home(search_path)),
         );
         search_paths.dedup();
-        for (index, path) in search_paths.into_iter().enumerate() {
-            if path.exists() {
-                let repository =
-                    FilesystemPackageRepository::with_name(path, format!("release_repo_{index}"));
-                repository_manager
-                    .add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-            }
-        }
+        let repository_manager = RepositoryManager::from_package_paths(search_paths)?;
 
         let runtime = tokio::runtime::Runtime::new().map_err(|error| {
             RezCoreError::BuildError(format!(
@@ -1455,16 +1444,10 @@ pub fn resolve_build_context(
         return Ok(None);
     }
 
-    let mut repository_manager = RepositoryManager::new();
     let config = RezCoreConfig::load();
-    for (index, search_path) in config.packages_path.iter().enumerate() {
-        let path = PathBuf::from(expand_home(search_path));
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path, format!("release_repo_{index}"));
-            repository_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let repository_manager = RepositoryManager::from_package_paths(
+        config.packages_path.iter().map(|path| expand_home(path)),
+    )?;
 
     let requirements = requirement_strings
         .iter()

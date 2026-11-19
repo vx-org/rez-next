@@ -23,8 +23,6 @@ use rez_next_build::{
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext};
 use rez_next_package::{Package, PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::{HashMap, HashSet};
@@ -436,16 +434,13 @@ pub(super) fn resolve_build_context(
         );
     }
 
-    let mut repo_manager = RepositoryManager::new();
     let config = RezCoreConfig::load();
-    for (index, search_path) in config.packages_path.iter().enumerate() {
-        let path = expand_home_path(search_path);
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path, format!("build_repo_{index}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let repo_paths = config
+        .packages_path
+        .iter()
+        .map(|path| expand_home_path(path).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let repo_manager = RepositoryManager::from_package_paths(repo_paths)?;
 
     let requirements = requirement_strings
         .iter()

@@ -78,7 +78,7 @@ fn resolve_package(py: Python<'_>, package_spec: &str) -> PyResult<(Package, Pat
             "Invalid package request '{package_spec}': {error}"
         ))
     })?;
-    let repo_manager = make_repo_manager(None);
+    let repo_manager = make_repo_manager(None)?;
     let packages = get_runtime()
         .block_on(repo_manager.find_packages(&requirement.name))
         .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
@@ -243,8 +243,12 @@ fn resolve_test_environment(
         .map_err(|error| error.to_string())
 }
 
-fn attach_test_environments(runner: &mut RustTestRunner, package: &Package, from_repository: bool) {
-    let repositories = Arc::new(make_repo_manager(None));
+fn attach_test_environments(
+    runner: &mut RustTestRunner,
+    package: &Package,
+    from_repository: bool,
+) -> Result<(), String> {
+    let repositories = Arc::new(make_repo_manager(None).map_err(|error| error.to_string())?);
     for definition in runner.test_definitions() {
         match resolve_test_environment(
             package,
@@ -256,6 +260,7 @@ fn attach_test_environments(runner: &mut RustTestRunner, package: &Package, from
             Err(error) => runner.set_test_environment_error(definition.name, error),
         }
     }
+    Ok(())
 }
 
 // ── PyPackageTestRunner ─────────────────────────────────────────────
@@ -277,7 +282,8 @@ impl PyPackageTestRunner {
         let mut runner = RustTestRunner::new(package_spec)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         runner = runner.with_package(package, package_root);
-        attach_test_environments(&mut runner, &package_for_environment, from_repository);
+        attach_test_environments(&mut runner, &package_for_environment, from_repository)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(runner)),
         })

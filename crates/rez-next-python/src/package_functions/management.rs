@@ -35,30 +35,31 @@ pub fn create_package(py: Python<'_>, data: Bound<'_, PyDict>) -> PyResult<PyPac
 }
 
 /// Resolve search paths from explicit paths or config.
-fn resolve_search_paths(src_paths: &Option<Vec<String>>) -> Vec<PathBuf> {
+fn resolve_search_paths(src_paths: &Option<Vec<String>>) -> PyResult<Vec<PathBuf>> {
     use rez_next_common::config::RezCoreConfig;
+    use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 
-    match src_paths {
-        Some(paths) if !paths.is_empty() => paths
-            .iter()
-            .map(|p| PathBuf::from(expand_home(p)))
-            .collect(),
+    let entries: Vec<String> = match src_paths {
+        Some(paths) if !paths.is_empty() => paths.iter().map(|p| expand_home(p)).collect(),
         _ => {
             let config = RezCoreConfig::load();
             config
                 .packages_path
                 .iter()
-                .map(|p| PathBuf::from(expand_home(p)))
+                .map(|p| expand_home(p))
                 .collect()
         }
-    }
+    };
+
+    resolve_filesystem_paths(entries)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Find the latest version of a package from the repository.
 fn find_latest_version(pkg_name: &str, src_paths: &Option<Vec<String>>) -> PyResult<String> {
     use super::make_repo_manager;
 
-    let repo_manager = make_repo_manager(src_paths.clone());
+    let repo_manager = make_repo_manager(src_paths.clone())?;
     let rt = get_runtime();
     let packages = rt
         .block_on(repo_manager.find_packages(pkg_name))
@@ -102,7 +103,7 @@ fn find_source_package(
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-    ));
+    ))?;
     let packages = get_runtime()
         .block_on(manager.find_packages(pkg_name))
         .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
@@ -226,7 +227,7 @@ pub fn copy_package_with_options(
     skip_payload: bool,
     overrides_json: Option<&str>,
 ) -> PyResult<String> {
-    let search_paths = resolve_search_paths(&src_paths);
+    let search_paths = resolve_search_paths(&src_paths)?;
     let source_version = match version {
         Some(version) => version.to_string(),
         None => find_latest_version(pkg_name, &src_paths)?,
@@ -349,7 +350,7 @@ pub fn move_package_with_options(
     )?;
     if !keep_source && !dry_run {
         let config = rez_next_package::package_remove::PackageRemoveConfig {
-            packages_path: resolve_search_paths(&src_paths),
+            packages_path: resolve_search_paths(&src_paths)?,
             force: true,
             prune_empty_families: true,
         };
@@ -378,7 +379,7 @@ pub fn copy_package(
 ) -> PyResult<String> {
     use rez_next_package::package_copy::{PackageCopyConfig, copy_package as domain_copy};
 
-    let search_paths = resolve_search_paths(&src_paths);
+    let search_paths = resolve_search_paths(&src_paths)?;
 
     // Determine version: use provided or find latest
     let ver_str: String = match version {
@@ -420,7 +421,7 @@ pub fn move_package(
 ) -> PyResult<String> {
     use rez_next_package::package_move::{PackageMoveConfig, move_package as domain_move};
 
-    let search_paths = resolve_search_paths(&src_paths);
+    let search_paths = resolve_search_paths(&src_paths)?;
 
     // Determine version: use provided or find latest
     let ver_str: String = match version {
@@ -461,7 +462,7 @@ pub fn remove_package(
         PackageRemoveConfig, remove_package_family, remove_package_version,
     };
 
-    let search_paths = resolve_search_paths(&paths);
+    let search_paths = resolve_search_paths(&paths)?;
 
     let config = PackageRemoveConfig {
         packages_path: search_paths,

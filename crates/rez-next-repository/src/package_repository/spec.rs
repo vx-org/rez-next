@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use super::FILESYSTEM_REPO_TYPE;
+use rez_next_common::RezCoreError;
 
 /// A `packages_path` entry resolved into a repository type and location.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,8 +195,56 @@ impl RepositorySpec {
 
     /// The location as a path, for filesystem repositories.
     pub fn path(&self) -> PathBuf {
+        if self.location == "~"
+            && let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+        {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = self
+            .location
+            .strip_prefix("~/")
+            .or_else(|| self.location.strip_prefix("~\\"))
+            && let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+        {
+            return PathBuf::from(home).join(rest);
+        }
         Path::new(&self.location).to_path_buf()
     }
+}
+
+/// Resolve repository entries that this build can serve as filesystem
+/// repositories.
+///
+/// The parser is shared by Python bindings and CLI consumers so a
+/// `packages_path` entry cannot be accepted by one surface and silently
+/// ignored by another. Missing filesystem locations are retained because
+/// callers may use the result for write operations that should report the
+/// missing location themselves. Read-only repository managers may choose to
+/// skip those paths when constructing their backends.
+pub fn resolve_filesystem_paths<I, S>(entries: I) -> Result<Vec<PathBuf>, RezCoreError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    entries
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.as_ref();
+            match RepositorySpec::parse_spec(entry) {
+                SpecParse::Path(spec) => Ok(spec.path()),
+                SpecParse::Typed(spec) if spec.is_filesystem() => {
+                    Ok(spec.path())
+                }
+                SpecParse::Typed(spec) => Err(RezCoreError::Repository(format!(
+                    "repository type {:?} is not supported in rez-next for packages_path entry {:?}",
+                    spec.repo_type, entry
+                ))),
+                SpecParse::UnknownType { repo_type, entry } => Err(RezCoreError::Repository(
+                    UnknownRepoType { repo_type, entry }.to_string(),
+                )),
+            }
+        })
+        .collect()
 }
 
 /// Whether `s` could be a repository type name.
@@ -402,5 +451,24 @@ mod tests {
         let spec = RepositorySpec::parse("server@host/path");
         assert_eq!(spec.repo_type, "filesystem");
         assert_eq!(spec.location, "server@host/path");
+    }
+
+    #[test]
+    fn filesystem_path_resolution_dispatches_typed_locations() {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let resolved = resolve_filesystem_paths([format!("filesystem@{path}")]).unwrap();
+        assert_eq!(resolved, vec![root.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn filesystem_path_resolution_rejects_unknown_and_unimplemented_types() {
+        let unknown = resolve_filesystem_paths(["server@host/path"]);
+        assert!(unknown.is_err());
+        assert!(unknown.unwrap_err().to_string().contains("server"));
+
+        let memory = resolve_filesystem_paths(["memory@local"]);
+        assert!(memory.is_err());
+        assert!(memory.unwrap_err().to_string().contains("memory"));
     }
 }

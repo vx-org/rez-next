@@ -240,7 +240,7 @@ pub fn get_developer_package(path: &str, _paths: Option<Vec<String>>) -> PyResul
 #[pyo3(signature = (prefix, paths=None))]
 pub fn get_completions(prefix: &str, paths: Option<Vec<String>>) -> PyResult<Vec<String>> {
     let rt = get_runtime();
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     // Get all family names
     let family_names = rt
@@ -401,7 +401,7 @@ pub fn get_last_release_time<'py>(
     paths: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
     let rt = get_runtime();
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     let packages = rt
         .block_on(repo_manager.find_packages(name))

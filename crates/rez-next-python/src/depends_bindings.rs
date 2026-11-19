@@ -159,20 +159,16 @@ pub fn compute_depends(
     pkg_paths: &[std::path::PathBuf],
     transitive: bool,
 ) -> Result<PyDependsResult, String> {
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
     use rez_next_version::VersionRange;
 
     let rt = get_runtime();
-    let mut repo_manager = RepositoryManager::new();
-    for (i, path) in pkg_paths.iter().enumerate() {
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let repo_manager = RepositoryManager::from_package_paths(
+        pkg_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    )
+    .map_err(|error| error.to_string())?;
 
     // Parse the optional target version range for filtering dependants
     let target_range: Option<VersionRange> = target_version_range
@@ -307,16 +303,17 @@ pub fn get_reverse_dependencies(
     use std::path::PathBuf;
 
     let config = RezCoreConfig::load();
-    let pkg_paths: Vec<PathBuf> = paths
-        .map(|p| p.into_iter().map(PathBuf::from).collect())
+    let pkg_paths: Vec<String> = paths
+        .map(|p| p.into_iter().map(|path| expand_home(&path)).collect())
         .unwrap_or_else(|| {
             config
                 .packages_path
                 .iter()
-                .map(|p| PathBuf::from(expand_home(p)))
+                .map(|p| expand_home(p))
                 .collect()
         });
 
+    let pkg_paths = pkg_paths.into_iter().map(PathBuf::from).collect::<Vec<_>>();
     compute_depends(package_name, version_range, &pkg_paths, transitive)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }

@@ -88,23 +88,19 @@ pub fn resolve_forward_tool(
     paths: Option<Vec<String>>,
 ) -> PyResult<Option<(String, String)>> {
     use rez_next_common::config::RezCoreConfig;
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
-    use std::path::PathBuf;
 
-    let _ = paths;
     let config = RezCoreConfig::load();
     let rt = get_runtime();
-
-    let mut repo_manager = RepositoryManager::new();
-    for (i, p) in config.packages_path.iter().enumerate() {
-        let path = PathBuf::from(crate::package_functions::expand_home(p));
-        if path.exists() {
-            let repository = FilesystemPackageRepository::with_name(path, format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let package_paths = paths.unwrap_or_else(|| {
+        config
+            .packages_path
+            .iter()
+            .map(|path| crate::package_functions::expand_home(path))
+            .collect()
+    });
+    let repo_manager = RepositoryManager::from_package_paths(package_paths)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
     // Collect all packages: list_packages() returns family names, then fetch each by
     // name. find_packages("") never matches anything because "" is not a valid
