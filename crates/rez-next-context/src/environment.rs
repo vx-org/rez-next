@@ -294,7 +294,12 @@ impl EnvironmentManager {
                     package
                         .version
                         .as_ref()
-                        .and_then(|version| version.component(index))
+                        .and_then(|version| match index {
+                            0 => version.major(),
+                            1 => version.minor(),
+                            2 => version.patch(),
+                            _ => None,
+                        })
                         .unwrap_or_default()
                         .to_string(),
                 ),
