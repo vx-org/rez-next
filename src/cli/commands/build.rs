@@ -480,7 +480,7 @@ pub(super) fn resolve_build_context(
             ..SolverConfig::default()
         },
     );
-    let resolution = rt.block_on(resolver.resolve(requirements))?;
+    let resolution = rt.block_on(resolver.resolve_build(requirements))?;
 
     let mut context = ResolvedContext::from_requirements(context_requirements);
     context.resolved_packages = resolution

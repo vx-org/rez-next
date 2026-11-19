@@ -235,6 +235,27 @@ impl DependencyResolver {
         &mut self,
         requirements: Vec<Requirement>,
     ) -> Result<DetailedResolutionResult, RezCoreError> {
+        self.resolve_with_mode(requirements, false).await
+    }
+
+    /// Resolve a build environment, propagating public `build_requires`.
+    ///
+    /// Private build requirements are intentionally absent here. The caller
+    /// adds the package currently being built's private requirements to the
+    /// root request, while dependencies contribute only their public build
+    /// requirements.
+    pub async fn resolve_build(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<DetailedResolutionResult, RezCoreError> {
+        self.resolve_with_mode(requirements, true).await
+    }
+
+    async fn resolve_with_mode(
+        &mut self,
+        requirements: Vec<Requirement>,
+        include_build_requires: bool,
+    ) -> Result<DetailedResolutionResult, RezCoreError> {
         let start_time = std::time::Instant::now();
 
         let (requirements, resolved_ephemerals) = resolve_ephemerals(requirements)?;
@@ -243,7 +264,9 @@ impl DependencyResolver {
         let mut resolution_state = ResolutionState::new(requirements.clone());
 
         // Perform resolution
-        let result = self.resolve_recursive(&mut resolution_state).await?;
+        let result = self
+            .resolve_recursive(&mut resolution_state, include_build_requires)
+            .await?;
 
         // Check for cyclic dependencies after full resolution
         if let Some(cycle) = resolution_state.detect_cycle() {
@@ -298,6 +321,7 @@ impl DependencyResolver {
     async fn resolve_recursive(
         &mut self,
         state: &mut ResolutionState,
+        include_build_requires: bool,
     ) -> Result<Vec<ResolvedPackageInfo>, RezCoreError> {
         // Get next requirement to resolve
         while let Some(requirement) = state.get_next_requirement() {
@@ -349,7 +373,12 @@ impl DependencyResolver {
 
                 // Try to resolve with this candidate
                 if let Ok((resolved_info, dependencies, conflicts)) = self
-                    .try_resolve_with_candidate(state, &candidate, &requirement)
+                    .try_resolve_with_candidate(
+                        state,
+                        &candidate,
+                        &requirement,
+                        include_build_requires,
+                    )
                     .await
                 {
                     if state.is_resolution_rejected(&resolved_info) {
@@ -368,7 +397,12 @@ impl DependencyResolver {
                 && !has_resolved_package
                 && let Some(candidate) = best_effort_candidate
                 && let Ok((resolved_info, dependencies, conflicts)) = self
-                    .try_resolve_with_candidate(state, &candidate, &requirement)
+                    .try_resolve_with_candidate(
+                        state,
+                        &candidate,
+                        &requirement,
+                        include_build_requires,
+                    )
                     .await
             {
                 let package_name = resolved_info.package.name.clone();
@@ -380,7 +414,7 @@ impl DependencyResolver {
             if !resolved
                 && self.config.strict_mode
                 && self
-                    .backtrack_dependency_source(state, &requirement)
+                    .backtrack_dependency_source(state, &requirement, include_build_requires)
                     .await?
             {
                 continue;
@@ -398,6 +432,7 @@ impl DependencyResolver {
         &mut self,
         state: &mut ResolutionState,
         failed_requirement: &Requirement,
+        include_build_requires: bool,
     ) -> Result<bool, RezCoreError> {
         let target_candidates = self.find_candidate_packages(failed_requirement).await?;
         let mut exact_sources = Vec::new();
@@ -436,7 +471,10 @@ impl DependencyResolver {
         exact_sources.extend(incompatible_sources);
         exact_sources.extend(other_sources);
         for source in exact_sources {
-            if self.backtrack_package(state, &source).await? {
+            if self
+                .backtrack_package(state, &source, include_build_requires)
+                .await?
+            {
                 return Ok(true);
             }
         }
@@ -448,6 +486,7 @@ impl DependencyResolver {
         &mut self,
         state: &mut ResolutionState,
         package_name: &str,
+        include_build_requires: bool,
     ) -> Result<bool, RezCoreError> {
         let Some(current) = state
             .resolved_packages
@@ -486,7 +525,12 @@ impl DependencyResolver {
                 .as_ref()
                 .unwrap_or(primary_requirement);
             if let Ok((resolved_info, dependencies, conflicts)) = self
-                .try_resolve_with_candidate(&mut trial_state, &candidate, requirement)
+                .try_resolve_with_candidate(
+                    &mut trial_state,
+                    &candidate,
+                    requirement,
+                    include_build_requires,
+                )
                 .await
             {
                 if trial_state.is_resolution_rejected(&resolved_info) {
@@ -579,6 +623,7 @@ impl DependencyResolver {
         state: &mut ResolutionState,
         candidate: &Arc<Package>,
         requirement: &Requirement,
+        include_build_requires: bool,
     ) -> Result<(ResolvedPackageInfo, Vec<Requirement>, Vec<Requirement>), RezCoreError> {
         // Determine which variant to use (if package has variants)
         let variant_index = self.select_variant(candidate, state);
@@ -591,7 +636,8 @@ impl DependencyResolver {
         }
 
         // Get the effective requires list (base + variant-specific)
-        let effective_requires = self.get_effective_requires(candidate, variant_index);
+        let effective_requires =
+            self.get_effective_requires(candidate, variant_index, include_build_requires);
 
         // Create resolved package info
         let resolved_info = ResolvedPackageInfo {
@@ -777,8 +823,17 @@ impl DependencyResolver {
         &self,
         package: &Package,
         variant_index: Option<usize>,
+        include_build_requires: bool,
     ) -> Vec<String> {
         let mut requires = package.requires.clone();
+
+        if include_build_requires {
+            for build_requirement in &package.build_requires {
+                if !requires.contains(build_requirement) {
+                    requires.push(build_requirement.clone());
+                }
+            }
+        }
 
         if let Some(idx) = variant_index
             && let Some(variant_reqs) = package.variants.get(idx)

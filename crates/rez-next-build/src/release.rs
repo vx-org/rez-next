@@ -1499,7 +1499,7 @@ pub fn resolve_build_context(
             ..SolverConfig::default()
         },
     );
-    let resolution = runtime.block_on(resolver.resolve(requirements))?;
+    let resolution = runtime.block_on(resolver.resolve_build(requirements))?;
 
     let mut context = rez_next_context::ResolvedContext::from_requirements(context_requirements);
     context.resolved_packages = resolution

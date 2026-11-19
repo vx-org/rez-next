@@ -183,6 +183,9 @@ impl PackageSaver {
                     "build_requires" => {
                         new_package.build_requires = filtered.build_requires.clone()
                     }
+                    "private_build_requires" => {
+                        new_package.private_build_requires = filtered.private_build_requires.clone()
+                    }
                     "variants" => new_package.variants = filtered.variants.clone(),
                     "tools" => new_package.tools = filtered.tools.clone(),
                     _ => {}
@@ -297,6 +300,14 @@ impl PackageSaver {
         if !package.build_requires.is_empty() {
             content.push_str("build_requires = [\n");
             for req in &package.build_requires {
+                content.push_str(&format!("    \"{}\",\n", req));
+            }
+            content.push_str("]\n");
+        }
+
+        if !package.private_build_requires.is_empty() {
+            content.push_str("private_build_requires = [\n");
+            for req in &package.private_build_requires {
                 content.push_str(&format!("    \"{}\",\n", req));
             }
             content.push_str("]\n");

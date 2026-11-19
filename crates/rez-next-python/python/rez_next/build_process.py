@@ -220,6 +220,8 @@ class BuildProcessHelper(BuildProcess):
             request.extend(str(r) for r in requires)
         build_requires = getattr(pkg, "build_requires", None) or []
         request.extend(str(r) for r in build_requires)
+        private_build_requires = getattr(pkg, "private_build_requires", None) or []
+        request.extend(str(r) for r in private_build_requires)
         try:
             ctx = ResolvedContext(request)
         except Exception as e:

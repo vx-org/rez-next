@@ -504,6 +504,7 @@ requires = ["python>=3.7"]
         let mut pkg = Package::new("py_build_pkg".to_string());
         pkg.version = Some(Version::parse("1.0.0").unwrap());
         pkg.build_requires = vec!["cmake-3".to_string()];
+        pkg.private_build_requires = vec!["internal_compiler-1".to_string()];
 
         let py = PackageSerializer::save_to_python(&pkg).unwrap();
         assert!(
@@ -511,6 +512,14 @@ requires = ["python>=3.7"]
             "Python output should have build_requires"
         );
         assert!(py.contains("cmake-3"), "Python output should list cmake-3");
+        assert!(
+            py.contains("private_build_requires"),
+            "Python output should preserve private build requirements"
+        );
+        assert!(
+            py.contains("internal_compiler-1"),
+            "Python output should list private build requirements"
+        );
     }
 
     #[test]
