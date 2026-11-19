@@ -91,8 +91,13 @@ impl CustomBuildSystem {
                 return self.execute_build_command(request, environment).await;
             }
             _ => {
+                let command = if request.install_path.is_some() {
+                    "install"
+                } else {
+                    "build"
+                };
                 return self
-                    .execute_build_script(request, environment, "build")
+                    .execute_build_script(request, environment, command)
                     .await;
             }
         }
@@ -149,10 +154,16 @@ impl CustomBuildSystem {
                 errors: String::new(),
                 duration_ms: 0,
             }),
-            _script_name => {
-                self.execute_build_script(request, environment, "install")
-                    .await
-            }
+            _script_name => Ok(BuildStepResult {
+                step: BuildStep::Installing,
+                success: true,
+                output: format!(
+                    "Custom build script '{}' already ran during compilation",
+                    self.script_name
+                ),
+                errors: String::new(),
+                duration_ms: 0,
+            }),
         }
     }
 

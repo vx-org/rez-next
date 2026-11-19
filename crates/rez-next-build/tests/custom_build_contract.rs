@@ -50,3 +50,55 @@ async fn custom_build_system_runs_build_command_and_installs_definition() {
             .is_file()
     );
 }
+
+#[tokio::test]
+async fn custom_script_runs_once_per_variant() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let build_root = temporary.path().join("build");
+    let install_root = temporary.path().join("repository");
+    tokio::fs::create_dir_all(&source).await.unwrap();
+    tokio::fs::write(
+        source.join("package.py"),
+        "name = 'custom_script_contract'\nversion = '1.0.0'\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        source.join("build.py"),
+        "import os\nfrom pathlib import Path\n\nmarker = Path(os.environ['REZ_BUILD_PATH']) / 'invocations'\ncount = int(marker.read_text()) if marker.exists() else 0\nmarker.write_text(str(count + 1))\n",
+    )
+    .await
+    .unwrap();
+
+    let mut package = Package::new("custom_script_contract".to_string());
+    package.version = Some(Version::parse("1.0.0").unwrap());
+    package.build_system = Some("build.py".to_string());
+
+    let config = BuildConfig {
+        build_dir: build_root.clone(),
+        ..BuildConfig::default()
+    };
+    let mut manager = BuildManager::with_config(config);
+    let mut request = BuildRequest::new(package, None, PathBuf::from(&source));
+    request.install_path = Some(install_root);
+
+    let build_ids = manager.start_build(request).await.unwrap();
+    let result = manager.wait_for_build(&build_ids[0]).await.unwrap();
+
+    assert!(
+        result.success,
+        "custom script build failed: {}",
+        result.errors
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(
+            build_root
+                .join("custom_script_contract")
+                .join("invocations")
+        )
+        .await
+        .unwrap(),
+        "1"
+    );
+}
