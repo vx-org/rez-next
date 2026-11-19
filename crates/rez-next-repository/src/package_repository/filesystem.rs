@@ -3,7 +3,7 @@
 //! This module implements the PackageRepository trait for filesystem-based repositories.
 //! It corresponds to the FilesystemPackageRepository class in rez's package_repository.py.
 
-use super::PackageRepository;
+use super::{InstallVariantOptions, PackageRepository};
 use crate::resources::{PackageFamilyResource, PackageResource, VariantResource};
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageInstallLayout};
@@ -576,6 +576,21 @@ impl PackageRepository for FilesystemPackageRepository {
         dry_run: bool,
         overrides: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<PackageResource>, RezCoreError> {
+        self.install_variant_with_options(
+            variant,
+            dry_run,
+            overrides,
+            InstallVariantOptions::default(),
+        )
+    }
+
+    fn install_variant_with_options(
+        &mut self,
+        variant: &VariantResource,
+        dry_run: bool,
+        overrides: Option<HashMap<String, serde_json::Value>>,
+        options: InstallVariantOptions,
+    ) -> Result<Option<PackageResource>, RezCoreError> {
         Self::validate_component(&variant.name, "package name")?;
         let source_package_dir = variant_package_dir(variant)?;
         let source_definition = find_definition(&source_package_dir).ok_or_else(|| {
@@ -627,7 +642,10 @@ impl PackageRepository for FilesystemPackageRepository {
                 target_package_dir.display()
             ))
         })?;
-        if let Err(error) = copy_directory_contents(&source_variant_dir, &target_variant_dir) {
+        if !options.skip_payload
+            && let Err(error) =
+                copy_directory_contents(&source_variant_dir, &target_variant_dir, options)
+        {
             return Err(RezCoreError::Repository(format!(
                 "Failed to install variant payload '{}': {error}",
                 source_variant_dir.display()
@@ -646,10 +664,17 @@ impl PackageRepository for FilesystemPackageRepository {
                     source_definition.display()
                 ))
             })?;
+            if options.keep_timestamp {
+                preserve_timestamps(&source_definition, &target_definition).map_err(|error| {
+                    RezCoreError::Repository(format!(
+                        "Failed to preserve package definition timestamp: {error}"
+                    ))
+                })?;
+            }
         }
         if !overrides.is_empty() {
             fs::write(
-                &target_package_dir.join("package.py"),
+                target_package_dir.join("package.py"),
                 package.to_package_py(),
             )
             .map_err(|error| {
@@ -658,6 +683,15 @@ impl PackageRepository for FilesystemPackageRepository {
                     target_package_dir.join("package.py").display()
                 ))
             })?;
+            if options.keep_timestamp {
+                let target_definition = target_package_dir.join("package.py");
+                preserve_timestamps(source_definition.as_path(), target_definition.as_path())
+                    .map_err(|error| {
+                        RezCoreError::Repository(format!(
+                            "Failed to preserve overridden package definition timestamp: {error}"
+                        ))
+                    })?;
+            }
         }
 
         Ok(Some(PackageResource::new(
@@ -719,6 +753,106 @@ impl PackageRepository for FilesystemPackageRepository {
     }
 }
 
+/// Request for installing selected variants from an existing filesystem package.
+#[derive(Debug, Clone)]
+pub struct InstallPackageVariantsRequest {
+    pub source_package: Package,
+    pub source_package_dir: PathBuf,
+    pub destination_repository: PathBuf,
+    pub destination_name: String,
+    pub destination_version: String,
+    pub variant_indices: Vec<usize>,
+    pub dry_run: bool,
+    pub overwrite: bool,
+    pub overrides: Option<HashMap<String, serde_json::Value>>,
+    pub options: InstallVariantOptions,
+}
+
+/// Install selected variants from an existing filesystem package into a
+/// destination repository through the canonical repository install hook.
+pub fn install_package_variants(
+    request: &InstallPackageVariantsRequest,
+) -> Result<(), RezCoreError> {
+    let mut destination_package = request.source_package.clone();
+    destination_package.name = request.destination_name.clone();
+    destination_package.version = Some(
+        rez_next_version::Version::parse(&request.destination_version).map_err(|error| {
+            RezCoreError::RequirementParse(format!(
+                "Invalid destination package version '{}': {error}",
+                request.destination_version
+            ))
+        })?,
+    );
+    let destination_package_dir = request.destination_repository.join(
+        PackageInstallLayout::package_base_relative_path(&destination_package)
+            .map_err(|error| RezCoreError::Repository(error.to_string()))?,
+    );
+    let same_canonical_path = fs::canonicalize(&request.source_package_dir)
+        .ok()
+        .zip(fs::canonicalize(&destination_package_dir).ok())
+        .is_some_and(|(source, destination)| source == destination);
+    if request.source_package_dir == destination_package_dir || same_canonical_path {
+        return Err(RezCoreError::Repository(
+            "Cannot install a package over itself".to_string(),
+        ));
+    }
+
+    let source_location = request
+        .source_package_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(&request.source_package_dir);
+    let mut repository = FilesystemPackageRepository::new(&request.destination_repository);
+    let overrides = request
+        .overrides
+        .clone()
+        .filter(|values| !values.is_empty());
+
+    for variant_index in &request.variant_indices {
+        let selected_variant = if request.source_package.variants.is_empty() {
+            None
+        } else {
+            Some(*variant_index)
+        };
+        let layout = PackageInstallLayout::for_variant(&request.source_package, selected_variant)
+            .map_err(|error| RezCoreError::Repository(error.to_string()))?;
+        let target_variant_dir = destination_package_dir.join(layout.variant_subpath());
+
+        if !request.dry_run && target_variant_dir.exists() {
+            if !request.overwrite {
+                return Err(RezCoreError::RequirementParse(format!(
+                    "Package variant already exists at destination: {}. Use --overwrite or --force.",
+                    target_variant_dir.display()
+                )));
+            }
+            fs::remove_dir_all(&target_variant_dir).map_err(RezCoreError::Io)?;
+        }
+
+        let source_variant_dir = request.source_package_dir.join(layout.variant_subpath());
+        let variant = VariantResource::new(
+            request.source_package.name.clone(),
+            request
+                .source_package
+                .version
+                .as_ref()
+                .map(|version| version.as_str().to_string()),
+            *variant_index,
+            FILESYSTEM_REPO_TYPE.to_string(),
+            source_location.to_string_lossy().into_owned(),
+        )
+        .with_root(source_variant_dir.to_string_lossy().into_owned());
+
+        repository.install_variant_with_options(
+            &variant,
+            request.dry_run,
+            overrides.clone(),
+            request.options,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn find_definition(package_dir: &Path) -> Option<PathBuf> {
     ["package.py", "package.yaml", "package.yml", "package.json"]
         .iter()
@@ -732,10 +866,16 @@ fn variant_package_dir(variant: &VariantResource) -> Result<PathBuf, RezCoreErro
         if find_definition(&root).is_some() {
             return Ok(root);
         }
-        if let Some(parent) = root.parent()
-            && find_definition(parent).is_some()
-        {
-            return Ok(parent.to_path_buf());
+
+        let mut candidate = root.as_path();
+        while let Some(parent) = candidate.parent() {
+            if parent == candidate {
+                break;
+            }
+            if find_definition(parent).is_some() {
+                return Ok(parent.to_path_buf());
+            }
+            candidate = parent;
         }
         return Ok(root);
     }
@@ -766,7 +906,11 @@ fn variant_payload_dir(
     source_package_dir.join(layout.variant_subpath())
 }
 
-fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+fn copy_directory_contents(
+    source: &Path,
+    destination: &Path,
+    options: InstallVariantOptions,
+) -> Result<(), std::io::Error> {
     if !source.is_dir() {
         return Err(std::io::Error::new(
             ErrorKind::NotFound,
@@ -779,13 +923,75 @@ fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), std:
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            copy_directory_contents(&source_path, &destination_path)?;
-        } else if file_type.is_file() {
+        let source_metadata = if file_type.is_symlink() && options.follow_symlinks {
+            Some(fs::metadata(&source_path)?)
+        } else {
+            None
+        };
+
+        if file_type.is_symlink() && !options.follow_symlinks {
+            copy_symlink(&source_path, &destination_path)?;
+        } else if source_metadata
+            .as_ref()
+            .is_some_and(std::fs::Metadata::is_dir)
+            || file_type.is_dir()
+        {
+            if options.shallow {
+                create_directory_symlink(&source_path, &destination_path)?;
+            } else {
+                copy_directory_contents(&source_path, &destination_path, options)?;
+            }
+        } else if source_metadata
+            .as_ref()
+            .is_some_and(std::fs::Metadata::is_file)
+            || file_type.is_file()
+        {
             fs::copy(&source_path, &destination_path)?;
         }
+
+        if options.keep_timestamp && !options.shallow && !file_type.is_symlink() {
+            preserve_timestamps(&source_path, &destination_path)?;
+        }
+    }
+    if options.keep_timestamp && !options.shallow {
+        preserve_timestamps(source, destination)?;
     }
     Ok(())
+}
+
+fn preserve_timestamps(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    let metadata = fs::metadata(source)?;
+    let accessed = filetime::FileTime::from_last_access_time(&metadata);
+    let modified = filetime::FileTime::from_last_modification_time(&metadata);
+    filetime::set_file_times(destination, accessed, modified)
+}
+
+fn copy_symlink(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    let target = fs::read_link(source)?;
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, destination)
+    }
+    #[cfg(windows)]
+    {
+        let metadata = fs::metadata(source);
+        if metadata.as_ref().is_ok_and(|value| value.is_dir()) {
+            std::os::windows::fs::symlink_dir(target, destination)
+        } else {
+            std::os::windows::fs::symlink_file(target, destination)
+        }
+    }
+}
+
+fn create_directory_symlink(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, destination)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(source, destination)
+    }
 }
 
 fn apply_package_overrides(
@@ -1368,5 +1574,149 @@ mod tests {
         assert_eq!(package.name, "python-renamed");
         assert_eq!(package.version.unwrap().as_str(), "4.0.0");
         assert_eq!(package.description.as_deref(), Some("copied package"));
+    }
+
+    #[test]
+    fn install_package_variants_uses_selected_payload_layout() {
+        let source = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_package = source.path().join("tool/1.0.0");
+        fs::create_dir_all(source_package.join("python-3.11")).unwrap();
+        fs::create_dir_all(source_package.join("python-3.12")).unwrap();
+        fs::write(
+            source_package.join("package.py"),
+            "name = 'tool'\nversion = '1.0.0'\nvariants = [['python-3.11'], ['python-3.12']]\n",
+        )
+        .unwrap();
+        fs::write(source_package.join("python-3.11/marker"), "old").unwrap();
+        fs::write(source_package.join("python-3.12/marker"), "selected").unwrap();
+
+        let package = Package::from_path(&source_package).unwrap();
+        install_package_variants(&InstallPackageVariantsRequest {
+            source_package: package,
+            source_package_dir: source_package.clone(),
+            destination_repository: destination.path().to_path_buf(),
+            destination_name: "tool".to_string(),
+            destination_version: "1.0.0".to_string(),
+            variant_indices: vec![1],
+            dry_run: false,
+            overwrite: false,
+            overrides: None,
+            options: InstallVariantOptions::default(),
+        })
+        .unwrap();
+
+        let installed = destination.path().join("tool/1.0.0");
+        assert_eq!(
+            fs::read_to_string(installed.join("python-3.12/marker")).unwrap(),
+            "selected"
+        );
+        assert!(!installed.join("python-3.11/marker").exists());
+        assert!(installed.join("package.py").is_file());
+    }
+
+    #[test]
+    fn install_package_variants_overwrites_only_the_selected_variant() {
+        let source = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_package = source.path().join("tool/1.0.0");
+        fs::create_dir_all(source_package.join("python-3.11")).unwrap();
+        fs::create_dir_all(source_package.join("python-3.12")).unwrap();
+        fs::write(
+            source_package.join("package.py"),
+            "name = 'tool'\nversion = '1.0.0'\nvariants = [['python-3.11'], ['python-3.12']]\n",
+        )
+        .unwrap();
+        fs::write(source_package.join("python-3.11/marker"), "new-11").unwrap();
+        fs::write(source_package.join("python-3.12/marker"), "new-12").unwrap();
+
+        let installed_package = destination.path().join("tool/1.0.0");
+        fs::create_dir_all(installed_package.join("python-3.11")).unwrap();
+        fs::create_dir_all(installed_package.join("python-3.12")).unwrap();
+        fs::write(installed_package.join("python-3.11/marker"), "keep-11").unwrap();
+        fs::write(installed_package.join("python-3.12/marker"), "old-12").unwrap();
+        fs::write(
+            installed_package.join("package.py"),
+            "name = 'tool'\nversion = '1.0.0'\nvariants = [['python-3.11'], ['python-3.12']]\n",
+        )
+        .unwrap();
+
+        let package = Package::from_path(&source_package).unwrap();
+        install_package_variants(&InstallPackageVariantsRequest {
+            source_package: package,
+            source_package_dir: source_package.clone(),
+            destination_repository: destination.path().to_path_buf(),
+            destination_name: "tool".to_string(),
+            destination_version: "1.0.0".to_string(),
+            variant_indices: vec![1],
+            dry_run: false,
+            overwrite: true,
+            overrides: None,
+            options: InstallVariantOptions::default(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(installed_package.join("python-3.11/marker")).unwrap(),
+            "keep-11"
+        );
+        assert_eq!(
+            fs::read_to_string(installed_package.join("python-3.12/marker")).unwrap(),
+            "new-12"
+        );
+    }
+
+    #[test]
+    fn install_variant_preserves_file_and_definition_timestamps() {
+        let source = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let source_package = source.path().join("tool/1.0.0");
+        fs::create_dir_all(source_package.join("bin")).unwrap();
+        fs::write(
+            source_package.join("package.py"),
+            "name = 'tool'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        fs::write(source_package.join("bin/tool"), "tool").unwrap();
+        let timestamp = filetime::FileTime::from_unix_time(1_234_567_890, 123);
+        filetime::set_file_mtime(source_package.join("package.py"), timestamp).unwrap();
+        filetime::set_file_mtime(source_package.join("bin/tool"), timestamp).unwrap();
+
+        let variant = VariantResource::new(
+            "tool".to_string(),
+            Some("1.0.0".to_string()),
+            0,
+            FILESYSTEM_REPO_TYPE.to_string(),
+            source.path().to_string_lossy().into_owned(),
+        )
+        .with_root(source_package.to_string_lossy().into_owned());
+        let mut repository = FilesystemPackageRepository::new(destination.path());
+        repository
+            .install_variant_with_options(
+                &variant,
+                false,
+                None,
+                InstallVariantOptions {
+                    keep_timestamp: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let target_package = destination.path().join("tool/1.0.0");
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(
+                &fs::metadata(target_package.join("package.py")).unwrap()
+            )
+            .seconds(),
+            timestamp.seconds()
+        );
+        assert_eq!(
+            filetime::FileTime::from_last_modification_time(
+                &fs::metadata(target_package.join("bin/tool")).unwrap()
+            )
+            .seconds(),
+            timestamp.seconds()
+        );
     }
 }

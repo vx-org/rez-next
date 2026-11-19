@@ -23,7 +23,10 @@ pub mod simple_repository;
 pub use cache::*;
 pub use filesystem::*;
 pub use high_performance_scanner::*;
-pub use package_repository::{FilesystemPackageRepository, PackageRepository};
+pub use package_repository::filesystem::{InstallPackageVariantsRequest, install_package_variants};
+pub use package_repository::{
+    FilesystemPackageRepository, InstallVariantOptions, PackageRepository,
+};
 pub use package_search::{ResourceSearchResult, get_plugins, get_reverse_dependency_tree};
 pub use repository::{
     PackageSearchCriteria, Repository, RepositoryMetadata, RepositoryStats, RepositoryType,

@@ -1,25 +1,67 @@
-"""Regression tests for public compatibility surfaces that are not implemented yet."""
+"""Regression tests for public compatibility surfaces."""
 
 import pytest
-from rez_next.exceptions import PackageCopyError, PackageMoveError
 from rez_next.package_copy import copy_package
 from rez_next.package_move import move_package
 from rez_next.resolver import Resolver
 
 
-def test_copy_rejects_unsupported_dry_run(tmp_path):
-    with pytest.raises(PackageCopyError, match="dry_run"):
-        copy_package("tool", str(tmp_path), dry_run=True)
+def _write_package(root, name="tool", version="1.0.0"):
+    package_dir = root / name / version
+    package_dir.mkdir(parents=True)
+    (package_dir / "package.py").write_text(
+        f"name = '{name}'\nversion = '{version}'\n",
+        encoding="utf-8",
+    )
+    (package_dir / "payload.txt").write_text("payload", encoding="utf-8")
+    return package_dir
 
 
-def test_copy_rejects_unsupported_destination_rename(tmp_path):
-    with pytest.raises(PackageCopyError, match="dest_name"):
-        copy_package("tool", str(tmp_path), dest_name="renamed")
+def test_copy_supports_dry_run(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write_package(source)
+
+    result = copy_package(
+        "tool",
+        str(destination),
+        dry_run=True,
+        package_repos=[source],
+    )
+
+    assert result["copied"]
+    assert not destination.exists()
 
 
-def test_move_rejects_unsupported_timestamp_preservation(tmp_path):
-    with pytest.raises(PackageMoveError, match="keep_timestamp"):
-        move_package("tool", str(tmp_path), keep_timestamp=True)
+def test_copy_supports_destination_rename(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write_package(source)
+
+    copy_package(
+        "tool",
+        str(destination),
+        dest_name="renamed",
+        package_repos=[source],
+    )
+
+    assert (destination / "renamed" / "1.0.0" / "package.py").is_file()
+
+
+def test_move_supports_timestamp_preservation(tmp_path):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _write_package(source)
+
+    move_package(
+        "tool",
+        str(destination),
+        keep_timestamp=True,
+        package_repos=[source],
+    )
+
+    assert (destination / "tool" / "1.0.0" / "package.py").is_file()
+    assert not (source / "tool" / "1.0.0").exists()
 
 
 def test_resolver_defaults_to_uncached_execution():

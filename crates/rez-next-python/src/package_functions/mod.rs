@@ -14,7 +14,10 @@ pub(crate) mod query;
 pub(crate) mod utility;
 
 // ── Re-exports for lib.rs ───────────────────────────────────────────────────────
-pub use management::{copy_package, create_package, move_package, remove_package};
+pub use management::{
+    copy_package, copy_package_with_options, create_package, move_package,
+    move_package_with_options, remove_package,
+};
 pub use query::{
     get_latest_package, get_latest_package_from_string, get_package, get_package_family_names,
     get_package_from_string, iter_package_families, iter_packages, resolve_packages, walk_packages,

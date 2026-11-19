@@ -16,6 +16,7 @@ Design:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -94,6 +95,7 @@ def copy_package(
     skip_payload: bool = False,
     overrides: dict[str, Any] | None = None,
     verbose: bool = False,
+    package_repos: list[Any] | None = None,
 ) -> dict[str, list[tuple[Any, Any]]]:
     """Copy a package to another repository.
 
@@ -119,41 +121,28 @@ def copy_package(
     Raises:
         PackageCopyError: If the copy operation fails.
     """
-    if shallow:
-        raise PackageCopyError("Shallow copy (symlinks) not yet supported in rez-next")
-
-    unsupported = {
-        "variants": variants is not None,
-        "dest_name": dest_name is not None,
-        "dest_version": dest_version is not None,
-        "follow_symlinks": follow_symlinks,
-        "dry_run": dry_run,
-        "keep_timestamp": keep_timestamp,
-        "skip_payload": skip_payload,
-    }
-    requested = [name for name, enabled in unsupported.items() if enabled]
-    if requested:
-        raise PackageCopyError("Unsupported copy options: " + ", ".join(requested))
-
-    if overrides:
-        raise PackageCopyError(
-            "Custom overrides not yet supported in rez-next. "
-            "For name/version changes, use dest_name/dest_version parameters."
-        )
-
     pkg_name = _resolve_package_name(package)
     pkg_version = _resolve_package_version(package)
     dest_path = _resolve_dest_path(dest_repository)
 
     try:
-        from rez_next._native.packages_ import copy_package as _native_copy
+        from rez_next._native.packages_ import copy_package_with_options as _native_copy
 
         result_path = _native_copy(
             pkg_name=pkg_name,
             dest_path=dest_path,
             version=pkg_version,
-            src_paths=None,
+            src_paths=_resolve_src_paths(package_repos),
             force=force or overwrite,
+            variants=variants,
+            shallow=shallow,
+            dest_name=dest_name,
+            dest_version=dest_version,
+            follow_symlinks=follow_symlinks,
+            dry_run=dry_run,
+            keep_timestamp=keep_timestamp,
+            skip_payload=skip_payload,
+            overrides_json=json.dumps(overrides) if overrides is not None else None,
         )
     except Exception as e:
         raise PackageCopyError(f"Failed to copy {pkg_name}: {e}") from e
@@ -170,7 +159,11 @@ def copy_package(
     if result_path:
         # Try to construct a lightweight result
         src_info = (pkg_name, str(pkg_version or "(no version)"))
-        dst_info = (pkg_name, str(pkg_version or "(no version)"))
+        copied_name = dest_name or (overrides or {}).get("name", pkg_name)
+        copied_version = dest_version or (overrides or {}).get(
+            "version", pkg_version or "(no version)"
+        )
+        dst_info = (copied_name, str(copied_version))
         result["copied"].append((src_info, dst_info))
 
     return result

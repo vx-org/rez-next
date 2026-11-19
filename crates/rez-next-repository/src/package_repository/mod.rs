@@ -25,6 +25,19 @@ use std::path::PathBuf;
 /// Special value for `install_variant` overrides parameter to indicate removal
 pub const REMOVE: &str = "__remove__";
 
+/// Options that affect payload installation without changing package metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallVariantOptions {
+    /// Preserve source file and directory timestamps.
+    pub keep_timestamp: bool,
+    /// Install top-level payload directories as symlinks.
+    pub shallow: bool,
+    /// Follow source symlinks while copying payloads.
+    pub follow_symlinks: bool,
+    /// Install the package definition without copying the payload.
+    pub skip_payload: bool,
+}
+
 // ── PackageRepository trait ─────────────────────────────────────────────────────
 
 /// PackageRepository trait
@@ -134,6 +147,22 @@ pub trait PackageRepository: Send + Sync {
         dry_run: bool,
         overrides: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Option<PackageResource>, RezCoreError>;
+
+    /// Install a variant with payload-copy options.
+    ///
+    /// Repository implementations that do not support a particular payload
+    /// option retain the normal `install_variant` contract. Filesystem
+    /// repositories implement all options in their canonical install path.
+    fn install_variant_with_options(
+        &mut self,
+        variant: &VariantResource,
+        dry_run: bool,
+        overrides: Option<HashMap<String, serde_json::Value>>,
+        options: InstallVariantOptions,
+    ) -> Result<Option<PackageResource>, RezCoreError> {
+        let _ = options;
+        self.install_variant(variant, dry_run, overrides)
+    }
 
     /// Get the parent package family of a package
     fn get_parent_package_family(

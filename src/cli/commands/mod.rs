@@ -24,6 +24,7 @@ pub mod gui;
 pub mod help;
 pub mod info;
 pub mod mv;
+pub(crate) mod package_transfer;
 pub mod pip;
 pub mod pkg_cache;
 pub mod plugins;

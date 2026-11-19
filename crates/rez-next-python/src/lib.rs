@@ -106,11 +106,12 @@ use version_bindings::{PyVersion, PyVersionRange};
 use bundle_functions::{bundle_context, list_bundles, unbundle_context};
 use cli_functions::{cli_main, cli_run};
 use package_functions::{
-    copy_package, create_package, dump_package_data, get_completions, get_developer_package,
-    get_last_release_time, get_latest_package, get_latest_package_from_string, get_package,
-    get_package_family_names, get_package_from_string, iter_package_families, iter_packages,
-    move_package, package_family_schema, package_release_keys, package_schema, remove_package,
-    resolve_packages, schema_keys, test_function, variant_schema, walk_packages,
+    copy_package, copy_package_with_options, create_package, dump_package_data, get_completions,
+    get_developer_package, get_last_release_time, get_latest_package,
+    get_latest_package_from_string, get_package, get_package_family_names, get_package_from_string,
+    iter_package_families, iter_packages, move_package, move_package_with_options,
+    package_family_schema, package_release_keys, package_schema, remove_package, resolve_packages,
+    schema_keys, test_function, variant_schema, walk_packages,
 };
 use package_repository_bindings::register_package_repository_submodule;
 use package_uri_functions::{
@@ -184,7 +185,9 @@ fn rez_next_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(iter_packages, m)?)?;
     m.add_function(wrap_pyfunction!(get_package_family_names, m)?)?;
     m.add_function(wrap_pyfunction!(copy_package, m)?)?;
+    m.add_function(wrap_pyfunction!(copy_package_with_options, m)?)?;
     m.add_function(wrap_pyfunction!(move_package, m)?)?;
+    m.add_function(wrap_pyfunction!(move_package_with_options, m)?)?;
     m.add_function(wrap_pyfunction!(remove_package, m)?)?;
     m.add_function(wrap_pyfunction!(walk_packages, m)?)?;
     m.add_function(wrap_pyfunction!(iter_package_families, m)?)?;
@@ -257,7 +260,9 @@ fn rez_next_bindings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     packages_.add_function(wrap_pyfunction!(iter_package_families, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(create_package, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(copy_package, &packages_)?)?;
+    packages_.add_function(wrap_pyfunction!(copy_package_with_options, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(move_package, &packages_)?)?;
+    packages_.add_function(wrap_pyfunction!(move_package_with_options, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(remove_package, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(get_package_from_string, &packages_)?)?;
     packages_.add_function(wrap_pyfunction!(

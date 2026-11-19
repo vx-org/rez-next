@@ -32,6 +32,7 @@ dashmap = "6.1"
 parking_lot = "0.12"
 num_cpus = "1.17"
 tracing.workspace = true
+filetime = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
