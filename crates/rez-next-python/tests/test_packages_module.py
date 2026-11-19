@@ -177,16 +177,41 @@ class TestIterPackageFamilies:
             assert isinstance(result[0], PackageFamily)
 
 
-class TestUnsupportedVariantUriLookup:
-    """Variant URI lookup must not disguise an unsupported operation as a miss."""
+class TestVariantUriLookup:
+    """Variant URI lookup resolves filesystem package resources."""
 
-    def test_get_variant_from_uri_fails_closed(self):
-        with pytest.raises(NotImplementedError, match="variant URI lookup"):
-            packages_.get_variant_from_uri("/packages/tool/1.0.0/package.py[0]")
+    def test_get_variant_from_uri(self, tmp_path):
+        package_dir = tmp_path / "tool" / "1.0.0"
+        package_dir.mkdir(parents=True)
+        package_file = package_dir / "package.py"
+        package_file.write_text(
+            "name = 'tool'\nversion = '1.0.0'\nvariants = [['python-3.11']]\n",
+            encoding="utf-8",
+        )
 
-    def test_get_variant_fails_closed(self):
-        with pytest.raises(NotImplementedError, match="variant URI lookup"):
-            packages_.get_variant("/packages/tool/1.0.0/package.py", 0)
+        variant = packages_.get_variant_from_uri(
+            f"{package_file}[0]", [str(tmp_path)]
+        )
+
+        assert variant.name == "tool"
+        assert str(variant.version) == "1.0.0"
+        assert variant.index == 0
+
+    def test_get_variant_from_package_uri(self, tmp_path):
+        package_dir = tmp_path / "tool" / "1.0.0"
+        package_dir.mkdir(parents=True)
+        package_file = package_dir / "package.py"
+        package_file.write_text(
+            "name = 'tool'\nversion = '1.0.0'\nvariants = [['python-3.11']]\n",
+            encoding="utf-8",
+        )
+
+        variant = packages_.get_variant(
+            str(package_file), 0, [str(tmp_path)]
+        )
+
+        assert variant.name == "tool"
+        assert variant.index == 0
 
 
 class TestCreatePackage:

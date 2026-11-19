@@ -35,8 +35,6 @@ repository miss:
 
 - Rez internal implementation namespaces are not mirrored.
 - In-process Python CLI dispatch is not supported; invoke `rez` or `rez-next`.
-- Variant lookup by URI and direct filesystem `install_variant` are not yet
-  supported.
 - The pure-Python `Resolver` does not provide a solve cache until safe
   repository invalidation is implemented.
 - CLI build script generation (`--scripts`) is not yet supported. The command

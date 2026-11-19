@@ -151,6 +151,13 @@ pub struct PyVariantResource {
     inner: VariantResource,
 }
 
+impl PyVariantResource {
+    /// Wrap a repository variant resource for Python callers.
+    pub(crate) fn from_inner(inner: VariantResource) -> Self {
+        Self { inner }
+    }
+}
+
 #[pymethods]
 impl PyVariantResource {
     /// Create a new variant resource.

@@ -4,10 +4,13 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::package_bindings::PyPackage;
+use crate::package_resources_bindings::PyVariantResource;
 use rez_next_package::serialization::PackageSerializer;
+use rez_next_package::{Package, PackageInstallLayout};
+use rez_next_repository::resources::VariantResource;
 
 /// Get a package given its URI.
 ///
@@ -173,20 +176,18 @@ fn find_package_in_path(
 ///
 /// Equivalent to `rez.packages.get_variant_from_uri(uri, paths=None)`.
 ///
-/// Variant URI lookup is not part of the supported compatibility surface yet.
-/// The function raises `NotImplementedError` instead of returning `None`, so
-/// callers cannot confuse an unsupported operation with a repository miss.
 #[pyfunction]
 #[pyo3(signature = (uri, paths=None))]
 pub fn get_variant_from_uri(
-    _py: Python<'_>,
+    py: Python<'_>,
     uri: &str,
     paths: Option<Vec<String>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let _ = (uri, paths);
-    Err(pyo3::exceptions::PyNotImplementedError::new_err(
-        "variant URI lookup is not implemented; iterate variants from a resolved package instead",
-    ))
+    let Some((package_uri, index)) = parse_variant_uri(uri) else {
+        return Ok(None);
+    };
+
+    resolve_variant(py, package_uri, index, paths)
 }
 
 /// Get a variant given its package URI and variant index.
@@ -195,15 +196,200 @@ pub fn get_variant_from_uri(
 #[pyfunction]
 #[pyo3(signature = (uri, index=None, paths=None))]
 pub fn get_variant(
-    _py: Python<'_>,
+    py: Python<'_>,
     uri: &str,
     index: Option<usize>,
     paths: Option<Vec<String>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let _ = (uri, index, paths);
-    Err(pyo3::exceptions::PyNotImplementedError::new_err(
-        "variant URI lookup is not implemented; iterate variants from a resolved package instead",
+    let (package_uri, uri_index) = match parse_variant_uri(uri) {
+        Some((package_uri, uri_index)) => (package_uri, uri_index),
+        None => (uri, None),
+    };
+
+    if let (Some(uri_index), Some(index)) = (uri_index, index)
+        && uri_index != index
+    {
+        return Ok(None);
+    }
+
+    resolve_variant(py, package_uri, index.or(uri_index), paths)
+}
+
+/// Parse the trailing variant index from a variant URI.
+///
+/// An empty index denotes Rez's null variant. The current native resource model
+/// represents that variant with index zero after validating that the package has
+/// no declared variants.
+fn parse_variant_uri(uri: &str) -> Option<(&str, Option<usize>)> {
+    let end = uri.strip_suffix(']')?;
+    let start = end.rfind('[')?;
+    let package_uri = &end[..start];
+    if package_uri.is_empty() {
+        return None;
+    }
+
+    let index_text = &end[start + 1..];
+    let index = if index_text.is_empty() {
+        None
+    } else {
+        Some(index_text.parse().ok()?)
+    };
+
+    Some((package_uri, index))
+}
+
+/// Resolve a package URI and materialize the requested filesystem variant.
+fn resolve_variant(
+    py: Python<'_>,
+    package_uri: &str,
+    index: Option<usize>,
+    paths: Option<Vec<String>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((mut package, package_file, repository_location)) =
+        load_package_uri(package_uri, paths.as_deref())?
+    else {
+        return Ok(None);
+    };
+
+    let variant_index = match (package.variants.is_empty(), index) {
+        (true, None) => 0,
+        (true, Some(_)) => return Ok(None),
+        (false, Some(index)) if index < package.variants.len() => index,
+        (false, _) => return Ok(None),
+    };
+
+    let mut variant = if package.variants.is_empty() {
+        VariantResource::new(
+            package.name.clone(),
+            package
+                .version
+                .as_ref()
+                .map(|version| version.as_str().to_string()),
+            variant_index,
+            "filesystem".to_string(),
+            repository_location.to_string_lossy().to_string(),
+        )
+    } else {
+        VariantResource::from_package(
+            &package,
+            variant_index,
+            "filesystem".to_string(),
+            repository_location.to_string_lossy().to_string(),
+        )
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("variant index disappeared"))?
+    };
+
+    let selected_index = if package.variants.is_empty() {
+        None
+    } else {
+        Some(variant_index)
+    };
+    let layout = PackageInstallLayout::for_variant(&package, selected_index)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    variant.root = Some(
+        repository_location
+            .join(layout.variant_relative_path())
+            .to_string_lossy()
+            .to_string(),
+    );
+
+    // Keep the source definition path available to callers that inspect the
+    // parent package through the returned resource.
+    package.filepath = Some(package_file.to_string_lossy().to_string());
+    Ok(Some(
+        PyVariantResource::from_inner(variant)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
     ))
+}
+
+/// Load a package definition addressed by a filesystem URI.
+fn load_package_uri(
+    uri: &str,
+    paths: Option<&[String]>,
+) -> PyResult<Option<(Package, PathBuf, PathBuf)>> {
+    let (file_uri, combined_version) = split_combined_package_uri(uri);
+    let mut candidates = Vec::new();
+    let direct = PathBuf::from(file_uri);
+
+    if let Some(search_paths) = paths {
+        for search_path in search_paths {
+            let root = PathBuf::from(search_path);
+            if direct.starts_with(&root) {
+                candidates.push(direct.clone());
+            } else if !direct.is_absolute() {
+                let relative = Path::new(file_uri.trim_start_matches(['/', '\\'])).to_path_buf();
+                candidates.push(root.join(relative));
+            }
+        }
+    } else {
+        candidates.push(direct.clone());
+    }
+
+    candidates.dedup();
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+
+        let mut package = PackageSerializer::load_from_file(&candidate)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        package.filepath = Some(candidate.to_string_lossy().to_string());
+        if let Some(version) = combined_version {
+            package.version = Some(
+                rez_next_version::Version::parse(version)
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?,
+            );
+        }
+
+        let repository_location = repository_root(&candidate, &package);
+        return Ok(Some((package, candidate, repository_location)));
+    }
+
+    Ok(None)
+}
+
+/// Split a combined package URI and return its base filename and version.
+fn split_combined_package_uri(uri: &str) -> (&str, Option<&str>) {
+    let Some(file_name_start) = uri.rfind(['/', '\\']) else {
+        return (uri, None);
+    };
+    let file_name = &uri[file_name_start + 1..];
+    let Some(version_start) = file_name.rfind('<') else {
+        return (uri, None);
+    };
+    if !file_name.ends_with('>') {
+        return (uri, None);
+    }
+
+    let base_end = file_name_start + 1 + version_start;
+    (
+        &uri[..base_end],
+        Some(&file_name[version_start + 1..file_name.len() - 1]),
+    )
+}
+
+/// Derive the package repository root from a package definition path.
+fn repository_root(package_file: &Path, package: &Package) -> PathBuf {
+    let Some(package_dir) = package_file.parent() else {
+        return PathBuf::new();
+    };
+
+    let is_versioned = package
+        .version
+        .as_ref()
+        .and_then(|version| package_dir.file_name().map(|name| (version, name)))
+        .is_some_and(|(version, name)| name == version.as_str());
+    if is_versioned {
+        package_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(package_dir)
+            .to_path_buf()
+    } else {
+        package_dir.parent().unwrap_or(package_dir).to_path_buf()
+    }
 }
 
 /// Get a package from a repository handle.
