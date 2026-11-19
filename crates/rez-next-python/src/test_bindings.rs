@@ -343,11 +343,16 @@ impl PyPackageTestRunner {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    /// Run a specific test by name.
-    pub fn run_test(&self, test_name: String) -> PyResult<i32> {
+    /// Run a specific test by name, optionally passing extra command arguments.
+    #[pyo3(signature = (test_name, extra_test_args=None))]
+    pub fn run_test(
+        &self,
+        test_name: String,
+        extra_test_args: Option<Vec<String>>,
+    ) -> PyResult<i32> {
         let mut runner = self.inner.lock().unwrap();
         runner
-            .run_test(&test_name)
+            .run_test_with_args(&test_name, extra_test_args.as_deref().unwrap_or_default())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 

@@ -11,7 +11,9 @@ use crate::cli::utils::expand_home_path;
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
-use rez_next_package::{Requirement, TestVariantFilter, serialization::PackageSerializer};
+use rez_next_package::{
+    Requirement, TestCommand, TestVariantFilter, serialization::PackageSerializer, shell_command,
+};
 use rez_next_repository::package_repository::FilesystemPackageRepository;
 use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
@@ -37,6 +39,10 @@ pub struct TestArgs {
     /// Test names to run (defaults to all tests)
     #[arg(value_name = "TEST")]
     pub tests: Vec<String>,
+
+    /// Arguments forwarded to the single selected test after `--`.
+    #[arg(skip)]
+    pub extra_args: Vec<String>,
 
     /// List available tests and exit
     #[arg(short = 'l', long = "list")]
@@ -113,15 +119,6 @@ pub struct TestDefinition {
     pub run_on: Vec<String>,
     /// Whether this test is on by default
     pub on_variants: Option<TestVariantFilter>,
-}
-
-/// Test command format
-#[derive(Debug, Clone)]
-pub enum TestCommand {
-    /// Simple string command
-    String(String),
-    /// List of arguments
-    List(Vec<String>),
 }
 
 /// Test runner for package tests
@@ -248,20 +245,11 @@ impl PackageTestRunner {
         from_repository: bool,
     ) -> RezCoreResult<()> {
         for (test_name, definition) in &package.tests {
-            let cmd = match &definition.command {
-                rez_next_package::TestCommand::String(command) => {
-                    TestCommand::String(command.clone())
-                }
-                rez_next_package::TestCommand::List(arguments) => {
-                    TestCommand::List(arguments.clone())
-                }
-            };
-
             self.test_definitions.insert(
                 test_name.clone(),
                 TestDefinition {
                     name: test_name.clone(),
-                    command: cmd,
+                    command: definition.command.clone(),
                     requires: definition.requires.clone(),
                     run_on: definition.run_on.clone(),
                     on_variants: definition.on_variants.clone(),
@@ -437,6 +425,15 @@ impl PackageTestRunner {
 
     /// Run a specific test by name
     pub fn run_test(&mut self, test_name: &str) -> RezCoreResult<i32> {
+        self.run_test_with_args(test_name, &[])
+    }
+
+    /// Run a specific test with arguments forwarded after `--`.
+    pub fn run_test_with_args(
+        &mut self,
+        test_name: &str,
+        extra_args: &[String],
+    ) -> RezCoreResult<i32> {
         if self.verbose > 0 {
             println!("Running test: {}", test_name);
         }
@@ -455,7 +452,7 @@ impl PackageTestRunner {
         } else {
             // Look up the test definition
             if let Some(test_def) = self.test_definitions.get(test_name) {
-                self.execute_test_command(test_name, test_def)
+                self.execute_test_command(test_name, test_def, extra_args)
             } else {
                 (
                     TestStatus::Error,
@@ -529,18 +526,22 @@ impl PackageTestRunner {
         &self,
         test_name: &str,
         test_def: &TestDefinition,
+        extra_args: &[String],
     ) -> (TestStatus, String, Option<String>, i32) {
-        let (program, args) = match &test_def.command {
+        let command = test_def
+            .command
+            .expanded_for_root(&self.working_dir)
+            .with_extra_args(extra_args);
+        let (mut command, display) = match command {
             TestCommand::String(cmd) => {
-                // Shell-execute the string command
-                if cfg!(windows) {
-                    ("cmd".to_string(), vec!["/c".to_string(), cmd.clone()])
-                } else {
-                    ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
-                }
+                let display = format!("shell: {cmd}");
+                (shell_command(&cmd), display)
             }
             TestCommand::List(parts) if !parts.is_empty() => {
-                (parts[0].clone(), parts[1..].to_vec())
+                let display = parts.join(" ");
+                let mut command = Command::new(&parts[0]);
+                command.args(&parts[1..]);
+                (command, display)
             }
             _ => {
                 return (
@@ -553,12 +554,10 @@ impl PackageTestRunner {
         };
 
         if self.verbose > 0 {
-            println!("  Executing: {} {}", program, args.join(" "));
+            println!("  Executing: {}", display);
         }
 
-        let mut command = Command::new(&program);
         command
-            .args(&args)
             .current_dir(&self.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -749,6 +748,12 @@ pub fn execute(args: TestArgs) -> RezCoreResult<()> {
                 .to_string(),
         ));
     }
+    if !args.extra_args.is_empty() && args.tests.len() != 1 {
+        return Err(RezCoreError::CliError(
+            "You can only pass extra arguments to a single, specified test. Please rerun the command and specify a single test to run."
+                .to_string(),
+        ));
+    }
 
     // Create test runner
     let mut runner = PackageTestRunner::new(args.package.clone(), &args)?;
@@ -790,7 +795,7 @@ pub fn execute(args: TestArgs) -> RezCoreResult<()> {
     // Run tests
     let mut exit_code = 0;
     for test_name in &tests_to_run {
-        let result = runner.run_test(test_name)?;
+        let result = runner.run_test_with_args(test_name, &args.extra_args)?;
         if result != 0 && exit_code == 0 {
             exit_code = result;
         }

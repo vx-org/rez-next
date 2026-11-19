@@ -74,6 +74,27 @@ class TestPackageTestModule:
         with pytest.raises(PackageNotFoundError):
             PackageTestRunner("definitely_missing_contract_pkg")
 
+    def test_package_test_runner_expands_root_and_forwards_extra_args(
+        self, tmp_path, monkeypatch
+    ):
+        """Package tests receive the package root and argv passthrough."""
+        package_root = tmp_path / "packages" / "argv_pkg" / "1.0.0"
+        package_root.mkdir(parents=True)
+        (package_root / "package.py").write_text(
+            "name = 'argv_pkg'\n"
+            "version = '1.0.0'\n"
+            "tests = {'argv': ['python', '-c', "
+            "\"import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])\", "
+            "'{root}/argv-result.txt']}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("REZ_PACKAGES_PATH", str(tmp_path / "packages"))
+
+        runner = PackageTestRunner("argv_pkg")
+
+        assert runner.run_test("argv", ["value with spaces"]) == 0
+        assert (package_root / "argv-result.txt").read_text() == "value with spaces"
+
     def test_package_test_results_creation(self):
         """Test PackageTestResults can be created."""
         results = PackageTestResults()

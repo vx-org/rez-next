@@ -1283,23 +1283,11 @@ impl ReleaseManager {
         install_path: &Path,
         environment: &std::collections::HashMap<String, String>,
     ) -> Result<std::process::Output, std::io::Error> {
-        let root = install_path.to_string_lossy();
-        let expand = |value: &str| {
-            value
-                .replace("{this.root}", &root)
-                .replace("{this.base}", &root)
-                .replace("{root}", &root)
-                .replace("{base}", &root)
-        };
-
-        match &definition.command {
-            TestCommand::String(command) => Self::execute_test_command_with_environment(
-                &expand(command),
-                install_path,
-                environment,
-            ),
+        match definition.command.expanded_for_root(install_path) {
+            TestCommand::String(command) => {
+                Self::execute_test_command_with_environment(&command, install_path, environment)
+            }
             TestCommand::List(arguments) if !arguments.is_empty() => {
-                let arguments: Vec<_> = arguments.iter().map(|argument| expand(argument)).collect();
                 std::process::Command::new(&arguments[0])
                     .args(&arguments[1..])
                     .current_dir(install_path)
@@ -1319,26 +1307,11 @@ impl ReleaseManager {
         install_path: &Path,
         environment: &std::collections::HashMap<String, String>,
     ) -> Result<std::process::Output, std::io::Error> {
-        #[cfg(windows)]
-        {
-            std::process::Command::new("cmd")
-                .arg("/c")
-                .arg(cmd)
-                .current_dir(install_path)
-                .env_clear()
-                .envs(environment)
-                .output()
-        }
-        #[cfg(not(windows))]
-        {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(install_path)
-                .env_clear()
-                .envs(environment)
-                .output()
-        }
+        rez_next_package::shell_command(cmd)
+            .current_dir(install_path)
+            .env_clear()
+            .envs(environment)
+            .output()
     }
 }
 

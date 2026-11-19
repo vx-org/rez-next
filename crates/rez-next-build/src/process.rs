@@ -668,22 +668,13 @@ impl BuildProcess {
             let executor = ShellExecutor::with_shell(ShellType::detect())
                 .with_environment(test_environment.clone())
                 .with_working_directory(request.source_dir.clone());
-            let root = install_dir.to_string_lossy();
-            let expand = |value: &str| {
-                value
-                    .replace("{this.root}", &root)
-                    .replace("{this.base}", &root)
-                    .replace("{root}", &root)
-                    .replace("{base}", &root)
-            };
-            let result = match &definition.command {
+            let command = definition.command.expanded_for_root(install_dir);
+            let result = match command {
                 TestCommand::String(command) => {
-                    let command = expand(command);
                     output.push_str(&format!("Running package test '{name}': {command}\n"));
                     executor.execute(&command).await
                 }
                 TestCommand::List(arguments) => {
-                    let arguments: Vec<_> = arguments.iter().map(|arg| expand(arg)).collect();
                     let Some(program) = arguments.first() else {
                         let errors = format!("Package test '{name}' has an empty argv command");
                         let rollback_error = Self::rollback_install_dir(install_dir).await;

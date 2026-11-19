@@ -16,7 +16,12 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Check if this is a command that supports grouped arguments (with '--')
-    if args.len() > 1 && (args[1] == "env" || args[1] == "build") {
+    let grouped_command = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| matches!(arg.as_str(), "env" | "build" | "test"));
+    if grouped_command {
         handle_grouped_command(args);
     } else {
         // Standard argument parsing
@@ -73,6 +78,11 @@ fn handle_grouped_command(args: Vec<String>) {
                             build_args.build_args = Some(extra);
                         }
                         // Fall through to normal execute with updated args
+                    }
+                    RezCommand::Test(test_args)
+                        if arg_groups.len() > 1 && !arg_groups[1].is_empty() =>
+                    {
+                        test_args.extra_args = arg_groups[1].clone();
                     }
                     _ => {}
                 }

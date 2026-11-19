@@ -3,6 +3,8 @@
 use rez_next_version::Version;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 
 use super::requirement::PackageRequirement;
 
@@ -43,6 +45,110 @@ impl TestCommand {
             Self::String(command) => command.clone(),
             Self::List(arguments) => arguments.join(" "),
         }
+    }
+
+    /// Expand package-root tokens in a test command.
+    ///
+    /// Rez formats both shell commands and argv commands with the selected
+    /// variant before execution. The build and test entry points share this
+    /// method so that package tests behave consistently in every workflow.
+    #[must_use]
+    pub fn expanded_for_root(&self, root: &Path) -> Self {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root = root.to_string_lossy();
+        let expand = |value: &str| {
+            value
+                .replace("{this.root}", &root)
+                .replace("{this.base}", &root)
+                .replace("{root}", &root)
+                .replace("{base}", &root)
+        };
+
+        match self {
+            Self::String(command) => Self::String(expand(command)),
+            Self::List(arguments) => {
+                Self::List(arguments.iter().map(|argument| expand(argument)).collect())
+            }
+        }
+    }
+
+    /// Append command-line arguments using the execution mode of the command.
+    ///
+    /// String commands are interpreted by a shell and therefore receive
+    /// shell-quoted arguments. List commands are launched directly and retain
+    /// each argument as one argv item.
+    #[must_use]
+    pub fn with_extra_args(&self, extra_args: &[String]) -> Self {
+        if extra_args.is_empty() {
+            return self.clone();
+        }
+
+        match self {
+            Self::String(command) => Self::String(format!(
+                "{command} {}",
+                extra_args
+                    .iter()
+                    .map(|argument| shell_quote(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )),
+            Self::List(arguments) => Self::List(
+                arguments
+                    .iter()
+                    .cloned()
+                    .chain(extra_args.iter().cloned())
+                    .collect(),
+            ),
+        }
+    }
+}
+
+/// Create a process configured to execute a shell command string.
+pub fn shell_command(command: &str) -> Command {
+    let mut process = if cfg!(windows) {
+        Command::new("cmd")
+    } else {
+        Command::new("sh")
+    };
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        process.raw_arg(format!("/d /s /c {command}"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        process.args(["-c", command]);
+    }
+
+    process
+}
+
+fn shell_quote(argument: &str) -> String {
+    #[cfg(windows)]
+    {
+        if argument.is_empty()
+            || argument.chars().any(|character| {
+                character.is_whitespace() || matches!(character, '"' | '&' | '|' | '<' | '>')
+            })
+        {
+            return format!("\"{}\"", argument.replace('"', "\\\""));
+        }
+        argument.to_string()
+    }
+
+    #[cfg(not(windows))]
+    {
+        if !argument.is_empty()
+            && argument.chars().all(|character| {
+                character.is_ascii_alphanumeric() || "_+-=.,/@:%".contains(character)
+            })
+        {
+            return argument.to_string();
+        }
+        format!("'{}'", argument.replace('\'', "'\\''"))
     }
 }
 

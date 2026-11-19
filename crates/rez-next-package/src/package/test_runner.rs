@@ -8,7 +8,7 @@
 //! See the Python bindings (`rez_next._native.test`) for usage examples.
 
 use crate::serialization::PackageSerializer;
-use crate::types::{Package, TestCommand, TestVariantFilter};
+use crate::types::{Package, TestCommand, TestVariantFilter, shell_command};
 use rez_next_common::{RezCoreResult, error::RezCoreError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -297,16 +297,20 @@ impl PackageTestRunner {
         Ok(matched_tests)
     }
 
-    /// Run a specific test by name.
-    ///
-    /// # Arguments
-    ///
-    /// * `test_name` - Name of the test to run.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the test cannot be run.
+    /// Run a specific test by name without extra command-line arguments.
     pub fn run_test(&mut self, test_name: &str) -> RezCoreResult<i32> {
+        self.run_test_with_args(test_name, &[])
+    }
+
+    /// Run a specific test and append command-line arguments to its command.
+    ///
+    /// String commands receive shell-quoted arguments. List commands receive
+    /// the arguments as direct argv values.
+    pub fn run_test_with_args(
+        &mut self,
+        test_name: &str,
+        extra_test_args: &[String],
+    ) -> RezCoreResult<i32> {
         if self.verbose > 0 {
             tracing::info!("Running test: {}", test_name);
         }
@@ -331,7 +335,7 @@ impl PackageTestRunner {
             } else {
                 // Look up the test definition
                 if let Some(test_def) = self.test_definitions.get(test_name) {
-                    self.execute_test_command(test_name, test_def)
+                    self.execute_test_command(test_name, test_def, extra_test_args)
                 } else {
                     (
                         TestStatus::Error,
@@ -403,18 +407,22 @@ impl PackageTestRunner {
         &self,
         test_name: &str,
         test_def: &TestDefinition,
+        extra_test_args: &[String],
     ) -> (TestStatus, String, Option<String>, i32) {
-        let (program, args) = match &test_def.command {
+        let command = test_def
+            .command
+            .expanded_for_root(&self.working_dir)
+            .with_extra_args(extra_test_args);
+        let (mut command, command_display) = match command {
             TestCommand::String(cmd) => {
-                // Shell-execute the string command
-                if cfg!(windows) {
-                    ("cmd".to_string(), vec!["/c".to_string(), cmd.clone()])
-                } else {
-                    ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
-                }
+                let display = format!("shell: {cmd}");
+                (shell_command(&cmd), display)
             }
             TestCommand::List(parts) if !parts.is_empty() => {
-                (parts[0].clone(), parts[1..].to_vec())
+                let display = parts.join(" ");
+                let mut command = Command::new(&parts[0]);
+                command.args(&parts[1..]);
+                (command, display)
             }
             _ => {
                 return (
@@ -427,12 +435,10 @@ impl PackageTestRunner {
         };
 
         if self.verbose > 0 {
-            tracing::debug!("Executing: {} {}", program, args.join(" "));
+            tracing::debug!("Executing: {}", command_display);
         }
 
-        let mut command = Command::new(&program);
         command
-            .args(&args)
             .current_dir(&self.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
