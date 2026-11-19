@@ -270,6 +270,10 @@ impl BuildProcess {
         errors: Arc<Mutex<String>>,
         child_process: Arc<Mutex<Option<Child>>>,
     ) -> Result<(), RezCoreError> {
+        if config.clean_before_build || request.options.force_rebuild {
+            environment.clean().await?;
+        }
+
         let event_sender = config.event_sender.clone();
         emit_build_event(
             event_sender.as_ref(),

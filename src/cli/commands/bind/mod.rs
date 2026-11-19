@@ -353,6 +353,7 @@ fn bind_single_package(
         help: None,
         uuid: None,
         config: HashMap::new(),
+        extra_fields: HashMap::new(),
         plugin_for: vec![],
         has_plugins: None,
         relocatable: None,

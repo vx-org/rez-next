@@ -56,7 +56,7 @@ pub struct BuildArgs {
     #[arg(long = "fail-graph")]
     pub fail_graph: bool,
 
-    /// Request build scripts (currently unsupported; never runs a build)
+    /// Request generated build environment scripts
     #[arg(short = 's', long = "scripts")]
     pub scripts: bool,
 
@@ -156,9 +156,31 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
             "Generating build environment scripts (--scripts) is not yet supported".to_string(),
         ));
     }
+    if args.process != "local" {
+        return Err(RezCoreError::BuildError(format!(
+            "Build process '{}' is not supported by rez-next",
+            args.process
+        )));
+    }
+    if args
+        .child_build_args
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(RezCoreError::BuildError(
+            "--child-build-args is not supported because rez-next has no child build process"
+                .to_string(),
+        ));
+    }
+    if args.fail_graph {
+        return Err(RezCoreError::BuildError(
+            "--fail-graph is not supported because rez-next has no build-graph renderer"
+                .to_string(),
+        ));
+    }
 
     // Determine source directory first
-    let (source_dir, package) = if let Some(ref source_url) = args.source {
+    let (source_dir, mut package) = if let Some(ref source_url) = args.source {
         // Network or remote source
         fetch_and_load_remote_source(source_url, &args)?
     } else {
@@ -167,6 +189,18 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
         let package = load_current_package(&working_dir)?;
         (working_dir, package)
     };
+
+    if let Some(build_system) = args.build_system.as_deref() {
+        if build_system.trim().is_empty() {
+            return Err(RezCoreError::BuildError(
+                "--build-system requires a non-empty value".to_string(),
+            ));
+        }
+        package.build_system = Some(build_system.to_string());
+        if build_system != "custom" {
+            package.build_command = None;
+        }
+    }
 
     // Handle view-pre option
     if args.view_pre {
@@ -177,7 +211,7 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
 
     // Create build options
     let build_options = BuildOptions {
-        force_rebuild: args.force || args.clean,
+        force_rebuild: args.force,
         skip_tests: args.skip_tests,
         release_mode: args.release,
         build_args: parse_build_args(&args.build_args),
@@ -615,6 +649,7 @@ fn execute_build(
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let build_config = BuildConfig {
         event_sender: Some(event_sender),
+        clean_before_build: args.clean,
         ..Default::default()
     };
     let mut build_manager = BuildManager::with_config(build_config);
