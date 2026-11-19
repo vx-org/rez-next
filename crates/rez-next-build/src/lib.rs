@@ -97,7 +97,7 @@ pub fn create_build_system(system_type: &str) -> Option<BuildSystem> {
         )),
         "pypi" | "pip" | "rez_pip" => Some(BuildSystem::Pypi(systems::PypiBuildSystem::new())),
         "custom" => Some(BuildSystem::Custom(systems::CustomBuildSystem::new(
-            "default".to_string(),
+            "build_command".to_string(),
         ))),
         _ => None,
     }

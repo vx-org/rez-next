@@ -7,6 +7,7 @@ use crate::{
 use rez_next_common::RezCoreError;
 use rez_next_context::{ContextConfig, EnvironmentManager, ShellExecutor, ShellType};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -544,13 +545,64 @@ impl BuildProcess {
         _config: &BuildConfig,
     ) -> Result<(bool, String, String), RezCoreError> {
         let build_system = BuildSystem::detect_with_package(&request.source_dir, &request.package)?;
-        let install_result = build_system.install(request, environment).await?;
+        let mut install_result = build_system.install(request, environment).await?;
+
+        if install_result.success
+            && let Some(definition) = Self::install_package_definition(request, environment).await?
+        {
+            if !install_result.output.is_empty() {
+                install_result.output.push('\n');
+            }
+            install_result.output.push_str(&format!(
+                "Installed package definition: {}",
+                definition.display()
+            ));
+        }
 
         Ok((
             install_result.success,
             install_result.output,
             install_result.errors,
         ))
+    }
+
+    async fn install_package_definition(
+        request: &BuildRequest,
+        environment: &BuildEnvironment,
+    ) -> Result<Option<PathBuf>, RezCoreError> {
+        let source = request
+            .package
+            .filepath
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                ["package.py", "package.yaml", "package.yml"]
+                    .iter()
+                    .map(|name| request.source_dir.join(name))
+                    .find(|path| path.is_file())
+            });
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let Some(file_name) = source.file_name() else {
+            return Ok(None);
+        };
+        let destination = environment.get_install_dir().join(file_name);
+        if source == destination {
+            return Ok(None);
+        }
+
+        tokio::fs::copy(&source, &destination)
+            .await
+            .map_err(|error| {
+                RezCoreError::BuildError(format!(
+                    "Failed to install package definition {}: {}",
+                    source.display(),
+                    error
+                ))
+            })?;
+        Ok(Some(destination))
     }
 
     async fn execute_package_test_step(

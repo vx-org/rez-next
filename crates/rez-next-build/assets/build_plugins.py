@@ -44,8 +44,11 @@ class BuildContext:
             os.environ.get("REZ_BUILD_INSTALL_PATH", build_path / "install")
         ).resolve()
         host_platform = _host_platform()
-        target_platform = os.environ.get("REZ_BUILD_TARGET_PLATFORM", host_platform)
-        target_arch = os.environ.get("REZ_BUILD_TARGET_ARCH", platform.machine().lower())
+        host_arch = _canonical_arch(platform.machine())
+        target_platform = _canonical_platform(
+            os.environ.get("REZ_BUILD_TARGET_PLATFORM", host_platform)
+        )
+        target_arch = _canonical_arch(os.environ.get("REZ_BUILD_TARGET_ARCH", host_arch))
         target_os = os.environ.get("REZ_BUILD_TARGET_OS", target_platform.split("-", 1)[0])
         variant_requires = tuple(
             req for req in os.environ.get("REZ_BUILD_VARIANT_REQUIRES", "").split() if req
@@ -59,7 +62,7 @@ class BuildContext:
             variant_index=int(os.environ.get("REZ_BUILD_VARIANT_INDEX", "0") or "0"),
             variant_requires=variant_requires,
             host_platform=host_platform,
-            host_arch=platform.machine().lower(),
+            host_arch=host_arch,
             target_platform=target_platform,
             target_arch=target_arch,
             target_os=target_os,
@@ -282,8 +285,30 @@ def _looks_like_path(value: str | os.PathLike[str]) -> bool:
 def _host_platform() -> str:
     system = platform.system().lower()
     if system == "darwin":
-        system = "macos"
-    return f"{system}-{platform.machine().lower()}"
+        system = "osx"
+    return f"{system}-{_canonical_arch(platform.machine())}"
+
+
+def _canonical_arch(value: str) -> str:
+    normalized = value.strip().lower()
+    return {
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "x86-64": "x86_64",
+        "aarch64": "arm_64",
+        "arm64": "arm_64",
+        "armv8": "arm_64",
+        "arm_64": "arm_64",
+        "i386": "x86",
+        "i686": "x86",
+    }.get(normalized, normalized)
+
+
+def _canonical_platform(value: str) -> str:
+    platform_name, separator, arch = value.partition("-")
+    if not separator:
+        return value
+    return f"{platform_name}-{_canonical_arch(arch)}"
 
 
 def _subprocess_env() -> dict[str, str]:

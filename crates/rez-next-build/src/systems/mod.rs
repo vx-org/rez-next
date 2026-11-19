@@ -154,9 +154,9 @@ impl BuildSystem {
 
     /// Detect build system from source directory and package definition
     pub fn detect_with_package(source_dir: &Path, package: &Package) -> Result<Self, RezCoreError> {
-        // Check for explicit build_command first
+        // Rez selects the custom build system whenever build_command is set.
         if let Some(ref build_command) = package.build_command {
-            if build_command == "false" || build_command.is_empty() {
+            if build_command == "false" || build_command.trim().is_empty() {
                 return Ok(BuildSystem::Custom(CustomBuildSystem::new(
                     "copy-only".to_string(),
                 )));
@@ -180,6 +180,11 @@ impl BuildSystem {
                 }
                 "pypi" | "pip" | "rez_pip" => {
                     return Ok(BuildSystem::Pypi(PypiBuildSystem::new()));
+                }
+                "custom" => {
+                    return Err(RezCoreError::BuildError(
+                        "build_system = \"custom\" requires a non-empty build_command".to_string(),
+                    ));
                 }
                 _ => {
                     return Ok(BuildSystem::Custom(CustomBuildSystem::new(
@@ -502,5 +507,18 @@ mod tests {
             BuildSystem::Custom(c) => assert_eq!(c.script_name, "build_command"),
             other => panic!("Expected Custom(build_command), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_detect_with_package_custom_requires_build_command() {
+        let dir = PathBuf::from("/nonexistent");
+        let mut pkg = rez_next_package::Package::new("test-pkg".to_string());
+        pkg.build_system = Some("custom".to_string());
+        let error = BuildSystem::detect_with_package(&dir, &pkg).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a non-empty build_command")
+        );
     }
 }

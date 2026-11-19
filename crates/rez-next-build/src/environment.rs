@@ -1,7 +1,7 @@
 //! Build environment management
 
 use crate::{BuildEvent, BuildEventKind, BuildStep};
-use rez_next_common::{RezCoreError, utils::get_thread_count};
+use rez_next_common::{RezCoreError, SystemInfo, utils::get_thread_count};
 use rez_next_context::ResolvedContext;
 use rez_next_package::{Package, PackageInstallLayout, PackageRequirement};
 use std::collections::HashMap;
@@ -129,6 +129,8 @@ impl BuildEnvironment {
             }
         }
 
+        Self::set_target_environment(&mut env_vars, &[]);
+
         Ok(Self {
             package: package.clone(),
             build_dir: package_build_dir,
@@ -222,6 +224,7 @@ impl BuildEnvironment {
             variant_requires.join(" "),
         );
         Self::set_build_requirements(&mut self.env_vars, &self.package, variant_requires);
+        Self::set_target_environment(&mut self.env_vars, variant_requires);
     }
 
     /// Set the variant subpath for the build environment.
@@ -330,6 +333,39 @@ impl BuildEnvironment {
             "REZ_BUILD_REQUIRES_UNVERSIONED".to_string(),
             unversioned.join(" "),
         );
+    }
+
+    fn set_target_environment(env_vars: &mut HashMap<String, String>, variant_requires: &[String]) {
+        let system = SystemInfo::detect();
+        let mut platform = system.platform;
+        let mut arch = canonical_architecture(&system.arch);
+        let mut os = system.os;
+
+        for requirement in variant_requires {
+            let Ok(parsed) = PackageRequirement::parse(requirement) else {
+                continue;
+            };
+            let Some(value) = parsed.version_spec().map(strip_requirement_operator) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+
+            match parsed.name() {
+                "platform" => platform = value.to_string(),
+                "arch" => arch = canonical_architecture(value),
+                "os" => os = value.to_string(),
+                _ => {}
+            }
+        }
+
+        env_vars.insert(
+            "REZ_BUILD_TARGET_PLATFORM".to_string(),
+            format!("{platform}-{arch}"),
+        );
+        env_vars.insert("REZ_BUILD_TARGET_ARCH".to_string(), arch);
+        env_vars.insert("REZ_BUILD_TARGET_OS".to_string(), os);
     }
 
     /// Get the variant install path (for hash variants)
@@ -494,6 +530,27 @@ impl BuildEnvironment {
     }
 }
 
+fn strip_requirement_operator(value: &str) -> &str {
+    value
+        .strip_prefix(">=")
+        .or_else(|| value.strip_prefix("<="))
+        .or_else(|| value.strip_prefix("=="))
+        .or_else(|| value.strip_prefix("!="))
+        .or_else(|| value.strip_prefix('>'))
+        .or_else(|| value.strip_prefix('<'))
+        .unwrap_or(value)
+        .trim()
+}
+
+fn canonical_architecture(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "amd64" | "x64" | "x86-64" | "x86_64" => "x86_64".to_string(),
+        "aarch64" | "arm64" | "arm_64" | "armv8" => "arm_64".to_string(),
+        "i386" | "i686" => "x86".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +574,44 @@ mod tests {
         assert_eq!(vars.get("REZ_BUILD_ENV"), Some(&"1".to_string()));
         assert_eq!(vars.get("REZ_BUILD_TYPE"), Some(&"local".to_string()));
         assert_eq!(vars.get("REZ_BUILD_INSTALL"), Some(&"0".to_string()));
+    }
+
+    #[test]
+    fn test_target_env_vars_follow_host_and_selected_variant() {
+        let pkg = make_test_package("test-pkg", "1.0.0");
+        let base = PathBuf::from("/tmp/build");
+        let mut env = BuildEnvironment::new(&pkg, &base, None).unwrap();
+        let host = SystemInfo::detect();
+
+        let vars = env.get_env_vars();
+        assert_eq!(vars.get("REZ_BUILD_TARGET_ARCH"), Some(&host.arch));
+        assert_eq!(vars.get("REZ_BUILD_TARGET_OS"), Some(&host.os));
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_PLATFORM"),
+            Some(&format!("{}-{}", host.platform, host.arch))
+        );
+
+        env.set_variant_env(
+            2,
+            &[
+                "platform-windows".to_string(),
+                "arch-amd64".to_string(),
+                "os-windows-10".to_string(),
+            ],
+        );
+        let vars = env.get_env_vars();
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_PLATFORM"),
+            Some(&"windows-x86_64".to_string())
+        );
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_ARCH"),
+            Some(&"x86_64".to_string())
+        );
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_OS"),
+            Some(&"windows-10".to_string())
+        );
     }
 
     #[test]

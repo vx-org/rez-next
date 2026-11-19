@@ -54,7 +54,7 @@ sys.argv = [script_path, *script_args]
 runpy.run_path(script_path, run_name="__main__")
 "#;
 
-/// Custom build system — handles build scripts and copy-only installs
+/// Custom build system — handles Rez build commands, scripts, and copy-only installs
 #[derive(Debug, Clone)]
 pub struct CustomBuildSystem {
     pub(crate) script_name: String,
@@ -86,7 +86,10 @@ impl CustomBuildSystem {
         _child_process: Arc<Mutex<Option<Child>>>,
     ) -> Result<BuildStepResult, RezCoreError> {
         match self.script_name.as_str() {
-            "default" | "copy-only" | "build_command" => {}
+            "default" | "copy-only" => {}
+            "build_command" => {
+                return self.execute_build_command(request, environment).await;
+            }
             _ => {
                 return self
                     .execute_build_script(request, environment, "build")
@@ -139,7 +142,13 @@ impl CustomBuildSystem {
     ) -> Result<BuildStepResult, RezCoreError> {
         match self.script_name.as_str() {
             "default" | "copy-only" => self.copy_files_install(request, environment).await,
-            "build_command" => self.execute_build_command(request, environment).await,
+            "build_command" => Ok(BuildStepResult {
+                step: BuildStep::Installing,
+                success: true,
+                output: "Custom build command completed during compilation".to_string(),
+                errors: String::new(),
+                duration_ms: 0,
+            }),
             _script_name => {
                 self.execute_build_script(request, environment, "install")
                     .await
@@ -190,55 +199,32 @@ impl CustomBuildSystem {
         request: &BuildRequest,
         environment: &BuildEnvironment,
     ) -> Result<BuildStepResult, RezCoreError> {
-        let install_dir = environment.get_install_dir();
-
-        tokio::fs::create_dir_all(install_dir).await.map_err(|e| {
-            RezCoreError::BuildError(format!("Failed to create install directory: {}", e))
-        })?;
-
         let build_command = request.package.build_command.as_ref().ok_or_else(|| {
             RezCoreError::BuildError("build_command not found in package".to_string())
         })?;
 
         let executor = ShellExecutor::with_shell(rez_next_context::ShellType::detect())
             .with_environment(Self::script_env(environment))
-            .with_working_directory(request.source_dir.clone());
+            .with_working_directory(environment.get_build_dir().clone());
 
         let expanded_command =
             self.expand_build_command_variables(build_command, request, environment);
 
         let result = executor.execute(&expanded_command).await?;
-
-        if result.is_success() {
-            let copy_result = Self::copy_package_files(&request.source_dir, install_dir).await;
-            match copy_result {
-                Ok(files_copied) => Ok(BuildStepResult {
-                    step: BuildStep::Installing,
-                    success: true,
-                    output: format!(
-                        "{}\nCopied {} source files to install directory",
-                        result.stdout, files_copied
-                    ),
-                    errors: result.stderr,
-                    duration_ms: result.execution_time_ms,
-                }),
-                Err(e) => Ok(BuildStepResult {
-                    step: BuildStep::Installing,
-                    success: false,
-                    output: result.stdout,
-                    errors: format!("{}\nFailed to copy source files: {}", result.stderr, e),
-                    duration_ms: result.execution_time_ms,
-                }),
-            }
+        let success = result.is_success();
+        let errors = if success {
+            result.stderr
         } else {
-            Ok(BuildStepResult {
-                step: BuildStep::Installing,
-                success: false,
-                output: result.stdout,
-                errors: result.stderr,
-                duration_ms: result.execution_time_ms,
-            })
-        }
+            Self::format_command_failure(&expanded_command, &result)
+        };
+
+        Ok(BuildStepResult {
+            step: BuildStep::Compiling,
+            success,
+            output: result.stdout,
+            errors,
+            duration_ms: result.execution_time_ms,
+        })
     }
 
     /// Expand variables in build command
@@ -251,7 +237,12 @@ impl CustomBuildSystem {
         let mut expanded = command.to_string();
 
         expanded = expanded.replace("{root}", &request.source_dir.to_string_lossy());
-        expanded = expanded.replace("{install}", "install");
+        let install = if request.install_path.is_some() {
+            "install"
+        } else {
+            ""
+        };
+        expanded = expanded.replace("{install}", install);
         expanded = expanded.replace(
             "{build_path}",
             &environment.get_build_dir().to_string_lossy(),
@@ -268,7 +259,11 @@ impl CustomBuildSystem {
             expanded = expanded.replace("{version}", "");
         }
 
-        expanded = expanded.replace("{variant_index}", "");
+        let variant_index = request
+            .variant_index
+            .map(|index| index.to_string())
+            .unwrap_or_default();
+        expanded = expanded.replace("{variant_index}", &variant_index);
         expanded
     }
 
@@ -679,6 +674,38 @@ mod tests {
     fn test_custom_build_system_new() {
         let custom = CustomBuildSystem::new("build.py".to_string());
         assert_eq!(custom.script_name, "build.py");
+    }
+
+    #[test]
+    fn test_build_command_variables_use_request_state() {
+        let mut package = rez_next_package::Package::new("test-pkg".to_string());
+        package.version = Some(rez_next_version::Version::parse("1.2.3").unwrap());
+        let mut request = BuildRequest::new(package, None, PathBuf::from("/source/test-pkg"));
+        request.install_path = Some(PathBuf::from("/repo"));
+        request.variant_index = Some(2);
+        let environment =
+            BuildEnvironment::new(&request.package, &PathBuf::from("/build"), None).unwrap();
+
+        let custom = CustomBuildSystem::new("build_command".to_string());
+        assert_eq!(
+            custom.expand_build_command_variables(
+                "{install} {variant_index}",
+                &request,
+                &environment,
+            ),
+            "install 2"
+        );
+
+        request.install_path = None;
+        request.variant_index = None;
+        assert_eq!(
+            custom.expand_build_command_variables(
+                "<{install}>{variant_index}",
+                &request,
+                &environment,
+            ),
+            "<>"
+        );
     }
 
     #[test]

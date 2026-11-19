@@ -1125,7 +1125,7 @@ if os.environ["REZ_BUILD_PROJECT_VERSION"] != "0.0.0":
 // ── New tests for BuildType, get_build_process_types, create_build_system ─────
 #[cfg(test)]
 mod build_type_tests {
-    use crate::{BuildType, create_build_system, get_build_process_types};
+    use crate::{BuildSystem, BuildType, create_build_system, get_build_process_types};
 
     #[test]
     fn build_type_name() {
@@ -1172,6 +1172,13 @@ mod build_type_tests {
         assert!(create_build_system("pypi").is_some());
         assert!(create_build_system("rez_pip").is_some());
         assert!(create_build_system("custom").is_some());
+
+        match create_build_system("custom").unwrap() {
+            BuildSystem::Custom(custom) => {
+                assert_eq!(custom.script_name, "build_command")
+            }
+            other => panic!("Expected custom build system, got {other:?}"),
+        }
     }
 
     #[test]
