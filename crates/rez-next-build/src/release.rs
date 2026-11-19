@@ -5,8 +5,9 @@
 
 use crate::vcs::{ReleaseVCS, VCSMetadata, detect_vcs};
 use rez_next_common::{RezCoreConfig, RezCoreError};
+use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
 use rez_next_package::serialization::PackageSerializer;
-use rez_next_package::{Package, PackageInstallLayout};
+use rez_next_package::{Package, PackageInstallLayout, TestCommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -360,7 +361,7 @@ impl ReleaseManager {
 
         // Step 4: Build the package (if not skipped)
         if !self.skip_build {
-            self.build_package(source_dir, &package, &install_path, &mut result)?;
+            self.build_package(&package, &install_path, &mut result)?;
         }
 
         // Step 5: Run tests (if not skipped)
@@ -369,7 +370,12 @@ impl ReleaseManager {
                 .warnings
                 .push("Tests skipped (skip_tests=true)".to_string());
         } else {
-            self.run_tests(source_dir, &package, &install_path, &mut result)?;
+            self.run_tests(&package, &install_path, &mut result)?;
+        }
+
+        if !result.errors.is_empty() {
+            result.success = false;
+            return Ok(result);
         }
 
         // Step 6: Generate changelog (if VCS is available)
@@ -515,7 +521,6 @@ impl ReleaseManager {
     /// Build the package (including variants)
     fn build_package(
         &self,
-        source_dir: &Path,
         package: &Package,
         install_path: &Path,
         result: &mut ReleaseResult,
@@ -584,16 +589,6 @@ impl ReleaseManager {
             result
                 .warnings
                 .push("No variants defined, using base install path".to_string());
-        }
-
-        // The definition belongs at the package base for every variant layout.
-        let pkg_file = source_dir.join("package.py");
-        if pkg_file.exists()
-            && let Err(error) = fs::copy(&pkg_file, install_path.join("package.py"))
-        {
-            result
-                .errors
-                .push(format!("Failed to copy package.py: {error}"));
         }
 
         Ok(())
@@ -808,48 +803,76 @@ impl ReleaseManager {
         Ok(())
     }
 
-    /// Run package tests
-    ///
-    /// Executes tests defined in `package.py::tests()` function.
-    /// Tests are shell commands that are executed in the install path.
+    /// Run package tests configured for the pre-release phase.
     fn run_tests(
         &self,
-        source_dir: &Path,
-        _package: &Package,
+        package: &Package,
         install_path: &Path,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        // Try to get test commands from package.py::tests()
-        let test_commands = Self::get_test_commands(source_dir)?;
+        let mut tests: Vec<_> = package
+            .tests
+            .iter()
+            .filter(|(_, definition)| definition.run_on.iter().any(|tag| tag == "pre_release"))
+            .collect();
+        tests.sort_by_key(|(name, _)| *name);
 
-        if test_commands.is_empty() {
+        if tests.is_empty() {
             result
                 .warnings
-                .push("No test commands found in package.py::tests()".to_string());
+                .push("No pre_release package tests defined".to_string());
             return Ok(());
         }
 
-        // Execute each test command
-        for (i, cmd) in test_commands.iter().enumerate() {
-            match Self::execute_test_command(cmd, install_path) {
+        let mut base_environment = std::env::vars().collect();
+        normalize_environment_paths(&mut base_environment);
+        let manager = EnvironmentManager::with_base_environment(
+            ContextConfig {
+                inherit_parent_env: true,
+                ..ContextConfig::default()
+            },
+            base_environment,
+        );
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!("Failed to create test runtime: {error}"))
+        })?;
+        let definition_name = package
+            .filepath
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .unwrap_or_else(|| std::ffi::OsStr::new("package.py"));
+
+        for (name, definition) in tests {
+            let mut test_package = package.clone();
+            test_package.filepath = Some(
+                install_path
+                    .join(definition_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            test_package
+                .requires
+                .extend(definition.requires.iter().cloned());
+            let environment = runtime.block_on(manager.generate_environment(&[test_package]))?;
+            match Self::execute_test_definition(definition, install_path, &environment) {
                 Ok(output) => {
                     if !output.status.success() {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         result.errors.push(format!(
-                            "Test {} failed:\nCommand: {}\nError: {}",
-                            i + 1,
-                            cmd,
+                            "Package test '{name}' failed:\nCommand: {}\nError: {}",
+                            definition.command.as_string(),
                             stderr
                         ));
+                        break;
                     }
                 }
                 Err(e) => {
                     result.errors.push(format!(
-                        "Failed to execute test {}: {}\nCommand: {}",
-                        i + 1,
+                        "Failed to execute package test '{name}': {}\nCommand: {}",
                         e,
-                        cmd
+                        definition.command.as_string()
                     ));
+                    break;
                 }
             }
         }
@@ -857,72 +880,55 @@ impl ReleaseManager {
         Ok(())
     }
 
-    /// Get test commands from package.py::tests() function
-    fn get_test_commands(source_dir: &Path) -> Result<Vec<String>, RezCoreError> {
-        let package_py = source_dir.join("package.py");
+    fn execute_test_definition(
+        definition: &rez_next_package::PackageTestDefinition,
+        install_path: &Path,
+        environment: &std::collections::HashMap<String, String>,
+    ) -> Result<std::process::Output, std::io::Error> {
+        let root = install_path.to_string_lossy();
+        let expand = |value: &str| {
+            value
+                .replace("{this.root}", &root)
+                .replace("{this.base}", &root)
+                .replace("{root}", &root)
+                .replace("{base}", &root)
+        };
 
-        if !package_py.exists() {
-            return Ok(Vec::new());
-        }
-
-        // Python script to call tests() and print result as JSON
-        let python_script = format!(
-            r#"
-import sys
-import json
-sys.path.insert(0, r"{}")
-try:
-    from package import tests
-    commands = tests()
-    print(json.dumps(commands))
-except ImportError:
-    print("[]")
-except Exception as e:
-    print("[]")
-"#,
-            source_dir.display()
-        );
-
-        // Execute Python script
-        let output = std::process::Command::new("python")
-            .arg("-c")
-            .arg(&python_script)
-            .output();
-
-        match output {
-            Ok(out) => {
-                if out.status.success() {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let trimmed = stdout.trim();
-                    if trimmed.starts_with('[') {
-                        // Parse JSON array of strings
-                        match serde_json::from_str::<Vec<String>>(trimmed) {
-                            Ok(commands) => Ok(commands),
-                            Err(_) => Ok(Vec::new()),
-                        }
-                    } else {
-                        Ok(Vec::new())
-                    }
-                } else {
-                    Ok(Vec::new())
-                }
+        match &definition.command {
+            TestCommand::String(command) => Self::execute_test_command_with_environment(
+                &expand(command),
+                install_path,
+                environment,
+            ),
+            TestCommand::List(arguments) if !arguments.is_empty() => {
+                let arguments: Vec<_> = arguments.iter().map(|argument| expand(argument)).collect();
+                std::process::Command::new(&arguments[0])
+                    .args(&arguments[1..])
+                    .current_dir(install_path)
+                    .env_clear()
+                    .envs(environment)
+                    .output()
             }
-            Err(_) => Ok(Vec::new()),
+            TestCommand::List(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "package test command cannot be empty",
+            )),
         }
     }
 
-    /// Execute a single test command (cross-platform)
-    fn execute_test_command(
+    fn execute_test_command_with_environment(
         cmd: &str,
         install_path: &Path,
+        environment: &std::collections::HashMap<String, String>,
     ) -> Result<std::process::Output, std::io::Error> {
-        // Detect platform and use appropriate shell
         #[cfg(windows)]
         {
             std::process::Command::new("cmd")
                 .arg("/c")
                 .arg(cmd)
                 .current_dir(install_path)
+                .env_clear()
+                .envs(environment)
                 .output()
         }
         #[cfg(not(windows))]
@@ -931,6 +937,8 @@ except Exception as e:
                 .arg("-c")
                 .arg(cmd)
                 .current_dir(install_path)
+                .env_clear()
+                .envs(environment)
                 .output()
         }
     }
@@ -1006,6 +1014,44 @@ version = "{}"
         assert!(pkg.is_ok());
         assert_eq!(result.package_name, "test_pkg");
         assert_eq!(result.version, "1.0.0");
+    }
+
+    #[test]
+    fn test_run_tests_uses_declared_package_test_definitions() {
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package_file = source_dir.path().join("package.py");
+        std::fs::write(&package_file, "name = 'release_test'\nversion = '1.0.0'\n").unwrap();
+
+        let mut package = Package::new("release_test".to_string());
+        package.version = Some(rez_next_version::Version::parse("1.0.0").unwrap());
+        package.filepath = Some(package_file.to_string_lossy().into_owned());
+        package.tests.insert(
+            "pre-release".to_string(),
+            rez_next_package::PackageTestDefinition {
+                command: TestCommand::List(vec![
+                    "python".to_string(),
+                    "-c".to_string(),
+                    "import os,sys; sys.exit(0 if os.environ.get('RELEASE_TEST_ROOT') else 7)"
+                        .to_string(),
+                ]),
+                requires: Vec::new(),
+                run_on: vec!["pre_release".to_string()],
+                on_variants: None,
+            },
+        );
+
+        let manager = ReleaseManager::new(ReleaseMode::Local, true, false);
+        let mut result = ReleaseResult::default();
+        manager
+            .run_tests(&package, install_dir.path(), &mut result)
+            .unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "package test failed: {:?}",
+            result.errors
+        );
     }
 
     #[test]
@@ -1124,87 +1170,6 @@ version = "1.0.0"
         // Verify warning was added
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("No VCS detected"));
-    }
-
-    // ── Tests for run_tests() functionality ─────────────────────────────
-
-    #[test]
-    fn test_get_test_commands_with_tests_function() {
-        // Create a temp directory with package.py that has tests() function
-        let temp_dir = TempDir::new().unwrap();
-        let pkg_file = temp_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-
-def tests():
-    return ["echo 'test1'", "echo 'test2'"]
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return the two test commands
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0], "echo 'test1'");
-        assert_eq!(commands[1], "echo 'test2'");
-    }
-
-    #[test]
-    fn test_get_test_commands_without_tests_function() {
-        // Create a temp directory with package.py that does NOT have tests() function
-        let temp_dir = TempDir::new().unwrap();
-        let pkg_file = temp_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return empty vec (no tests() function)
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn test_get_test_commands_no_package_py() {
-        // Create an empty temp directory (no package.py)
-        let temp_dir = TempDir::new().unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return empty vec (no package.py)
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn test_execute_test_command_success() {
-        // Execute a simple command that succeeds
-        #[cfg(windows)]
-        let cmd = "echo test_passed";
-        #[cfg(not(windows))]
-        let cmd = "echo test_passed";
-
-        let result = ReleaseManager::execute_test_command(cmd, std::path::Path::new("."));
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.status.success());
-    }
-
-    #[test]
-    fn test_execute_test_command_failure() {
-        // Execute a command that fails
-        #[cfg(windows)]
-        let cmd = "exit 1";
-        #[cfg(not(windows))]
-        let cmd = "false";
-
-        let result = ReleaseManager::execute_test_command(cmd, std::path::Path::new("."));
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(!output.status.success());
     }
 
     /// A VCS whose tags can be forced to exist, so `create_vcs_tag` can be
