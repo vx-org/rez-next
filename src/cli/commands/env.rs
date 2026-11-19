@@ -423,6 +423,28 @@ fn context_environment(
     environment
         .vars
         .insert("REZ_USED_PACKAGES_NAMES".to_string(), resolved);
+    let implicit_packages = context
+        .implicit_packages
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !implicit_packages.is_empty() {
+        environment
+            .vars
+            .insert("REZ_USED_IMPLICIT_PACKAGES".to_string(), implicit_packages);
+    }
+    let ephemeral_resolve = context
+        .resolved_ephemerals
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !ephemeral_resolve.is_empty() {
+        environment
+            .vars
+            .insert("REZ_USED_EPH_RESOLVE".to_string(), ephemeral_resolve);
+    }
     if let Some(path) = rxt_path {
         environment.vars.insert(
             "REZ_RXT_FILE".to_string(),
