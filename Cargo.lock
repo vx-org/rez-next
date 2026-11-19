@@ -3013,6 +3013,7 @@ dependencies = [
  "rez-next-package",
  "rez-next-release-hook",
  "rez-next-repository",
+ "rez-next-rex",
  "rez-next-solver",
  "rez-next-version",
  "rstest",
