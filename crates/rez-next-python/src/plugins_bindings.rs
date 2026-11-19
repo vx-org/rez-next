@@ -171,6 +171,7 @@ impl PyRezPluginManager {
             ("cmd", "Windows CMD shell"),
             ("powershell", "Windows PowerShell"),
             ("pwsh", "PowerShell Core (cross-platform)"),
+            ("gitbash", "Git Bash shell"),
             ("csh", "C shell"),
             ("tcsh", "TENEX C shell"),
         ];

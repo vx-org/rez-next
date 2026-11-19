@@ -217,13 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_activation_script_unknown_shell_falls_to_bash() {
+    fn test_build_activation_script_supports_c_shell() {
         let pkgs = vec!["python-3.9".to_string()];
         let script = build_activation_script(&pkgs, "tcsh");
         assert!(script.contains("REZ_RESOLVE"), "script: {script}");
         assert!(
-            script.contains("export"),
-            "bash branch must use export: {script}"
+            script.contains("setenv REZ_RESOLVE"),
+            "tcsh branch must use setenv: {script}"
         );
     }
 

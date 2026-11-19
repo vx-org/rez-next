@@ -320,7 +320,7 @@ fn test_rex_environment_env_var_crud() {
 }
 
 #[test]
-fn test_rex_zsh_identical_to_bash() {
+fn test_rex_zsh_shares_bash_script_body() {
     let mut env = RexEnvironment::new();
     env.vars
         .insert("PKG_ROOT".to_string(), "/opt/pkg".to_string());
@@ -329,7 +329,13 @@ fn test_rex_zsh_identical_to_bash() {
 
     let bash = generate_shell_script(&env, &ShellType::Bash);
     let zsh = generate_shell_script(&env, &ShellType::Zsh);
-    assert_eq!(bash, zsh, "Zsh script should be identical to bash script");
+    assert!(bash.starts_with("#!/bin/bash\n"));
+    assert!(zsh.starts_with("#!/bin/zsh\n"));
+    assert_eq!(
+        bash.split_once('\n').unwrap().1,
+        zsh.split_once('\n').unwrap().1,
+        "Zsh and Bash should share the same script body"
+    );
 }
 
 #[test]

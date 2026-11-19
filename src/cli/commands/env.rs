@@ -9,7 +9,7 @@ use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext, Shell
 use rez_next_package::{PackageRequirement, Requirement};
 use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_rex::{RexEnvironment, ShellType as RexShellType, generate_shell_script};
+use rez_next_rex::{RexEnvironment, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -218,17 +218,8 @@ fn resolve_environment(
         ..Default::default()
     };
 
-    // Set shell type based on args
-    if let Some(shell) = &args.shell {
-        config.shell_type = match shell.as_str() {
-            "bash" => ShellType::Bash,
-            "zsh" => ShellType::Zsh,
-            "fish" => ShellType::Fish,
-            "cmd" => ShellType::Cmd,
-            "powershell" | "pwsh" => ShellType::PowerShell,
-            _ => ShellType::Bash,
-        };
-    }
+    let rez_config = RezCoreConfig::load();
+    config.shell_type = resolve_shell_type(args.shell.as_deref(), &rez_config.default_shell)?;
 
     if args.build {
         config
@@ -237,7 +228,6 @@ fn resolve_environment(
     }
 
     // Setup repository manager from config or args
-    let rez_config = RezCoreConfig::load();
     config.parent_variables = rez_config.parent_variables.clone();
     config.all_parent_variables = rez_config.all_parent_variables;
     let implicit_packages =
@@ -521,43 +511,45 @@ fn print_environment(context: &ResolvedContext, args: &EnvArgs) -> RezCoreResult
     Ok(())
 }
 
+fn resolve_shell_type(explicit: Option<&str>, configured: &str) -> RezCoreResult<ShellType> {
+    let requested = explicit
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| (!configured.trim().is_empty()).then_some(configured));
+
+    requested
+        .map(|value| {
+            value.parse().map_err(|error: String| {
+                RezCoreError::ExecutionError(format!("Unsupported shell '{value}': {error}"))
+            })
+        })
+        .unwrap_or_else(|| Ok(ShellType::detect()))
+}
+
+fn activation_filename(shell_type: &ShellType) -> String {
+    if matches!(shell_type, ShellType::Zsh) {
+        ".zshrc".to_string()
+    } else {
+        format!("rez-env.{}", shell_type.script_extension())
+    }
+}
+
 /// Print shell activation script for the resolved environment
 fn print_shell_script(context: &ResolvedContext, args: &EnvArgs) -> RezCoreResult<()> {
     let environment = context_environment(context, None)?;
-
-    // Determine shell type
-    let shell_str =
-        args.shell
-            .as_deref()
-            .unwrap_or(if cfg!(windows) { "powershell" } else { "bash" });
-
-    let rex_shell = match shell_str {
-        "bash" | "sh" => RexShellType::Bash,
-        "zsh" => RexShellType::Zsh,
-        "fish" => RexShellType::Fish,
-        "cmd" => RexShellType::Cmd,
-        "powershell" | "pwsh" => RexShellType::PowerShell,
-        _ => RexShellType::Bash,
-    };
-
-    let script = generate_shell_script(&environment, &rex_shell);
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
+    let script = generate_shell_script(&environment, &shell_type);
     println!("{}", script);
     Ok(())
 }
 
 fn create_activation_script(
     environment: &mut RexEnvironment,
-    shell_type: &RexShellType,
+    shell_type: &ShellType,
     trailing_command: Option<&str>,
 ) -> RezCoreResult<(tempfile::TempDir, PathBuf)> {
     let directory = tempfile::tempdir().map_err(RezCoreError::Io)?;
-    let filename = match shell_type {
-        RexShellType::Bash => "rez-env.sh",
-        RexShellType::Zsh => ".zshrc",
-        RexShellType::Fish => "rez-env.fish",
-        RexShellType::Cmd => "rez-env.cmd",
-        RexShellType::PowerShell => "rez-env.ps1",
-    };
+    let filename = activation_filename(shell_type);
     let path = directory.path().join(filename);
     environment.vars.insert(
         "REZ_CONTEXT_FILE".to_string(),
@@ -565,11 +557,7 @@ fn create_activation_script(
     );
     let mut script = generate_shell_script(environment, shell_type);
     if let Some(command) = trailing_command {
-        script.push_str(if matches!(shell_type, RexShellType::Cmd) {
-            "\r\n"
-        } else {
-            "\n"
-        });
+        script.push_str(if shell_type.is_cmd() { "\r\n" } else { "\n" });
         script.push_str(command);
     }
     std::fs::write(&path, script).map_err(RezCoreError::Io)?;
@@ -624,27 +612,18 @@ fn execute_shell_command_in_environment(
         );
     }
 
-    let shell = args
-        .shell
-        .as_deref()
-        .unwrap_or(if cfg!(windows) { "cmd" } else { "bash" });
-    let shell_type = shell
-        .parse::<RexShellType>()
-        .map_err(RezCoreError::ExecutionError)?;
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
     let (activation_directory, activation_script) =
         create_activation_script(&mut environment, &shell_type, Some(command))?;
 
-    let mut cmd = Command::new(shell);
-    match shell_type {
-        RexShellType::Cmd => {
-            cmd.args(["/D", "/S", "/C"]).arg(&activation_script);
-        }
-        RexShellType::PowerShell => {
-            cmd.args(["-NoProfile", "-File"]).arg(&activation_script);
-        }
-        _ => {
-            cmd.arg(&activation_script);
-        }
+    let mut cmd = Command::new(shell_type.executable());
+    if shell_type.is_cmd() {
+        cmd.args(["/D", "/S", "/C"]).arg(&activation_script);
+    } else if shell_type.is_power_shell() {
+        cmd.args(["-NoProfile", "-File"]).arg(&activation_script);
+    } else {
+        cmd.arg(&activation_script);
     }
 
     cmd.envs(&environment.vars);
@@ -728,40 +707,33 @@ fn spawn_shell_in_context(
         print_context_summary(context, "You are now in a rez-configured environment.");
     }
 
-    // Determine shell executable
-    let shell_exe = if cfg!(target_os = "windows") {
-        args.shell.as_deref().unwrap_or("cmd")
-    } else {
-        args.shell.as_deref().unwrap_or("bash")
-    };
-    let shell_type = shell_exe
-        .parse::<RexShellType>()
-        .map_err(RezCoreError::ExecutionError)?;
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
     let (activation_directory, activation_script) =
         create_activation_script(&mut environment, &shell_type, None)?;
 
     // Create shell command
-    let mut cmd = Command::new(shell_exe);
+    let mut cmd = Command::new(shell_type.executable());
 
-    match shell_type {
-        RexShellType::Cmd => {
-            cmd.args(["/D", "/K"]).arg(&activation_script);
-        }
-        RexShellType::PowerShell => {
-            cmd.args(["-NoExit", "-File"]).arg(&activation_script);
-        }
-        RexShellType::Bash => {
-            cmd.arg("--rcfile").arg(&activation_script).arg("-i");
-        }
-        RexShellType::Zsh => {
-            cmd.arg("-i");
-            cmd.env("ZDOTDIR", activation_directory.path());
-        }
-        RexShellType::Fish => {
-            cmd.arg("-C")
-                .arg(format!("source '{}'", activation_script.display()))
-                .arg("-i");
-        }
+    if shell_type.is_cmd() {
+        cmd.args(["/D", "/K"]).arg(&activation_script);
+    } else if shell_type.is_power_shell() {
+        cmd.args(["-NoExit", "-File"]).arg(&activation_script);
+    } else if matches!(shell_type, ShellType::Bash | ShellType::GitBash) {
+        cmd.arg("--rcfile").arg(&activation_script).arg("-i");
+    } else if matches!(shell_type, ShellType::Zsh) {
+        cmd.arg("-i");
+        cmd.env("ZDOTDIR", activation_directory.path());
+    } else if matches!(shell_type, ShellType::Fish) {
+        cmd.arg("-C")
+            .arg(format!("source '{}'", activation_script.display()))
+            .arg("-i");
+    } else {
+        cmd.arg("-i").arg("-c").arg(format!(
+            ". \"{}\"; exec {} -i",
+            activation_script.display(),
+            shell_type.executable()
+        ));
     }
 
     cmd.envs(&environment.vars);

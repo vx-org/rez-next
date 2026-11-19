@@ -6,7 +6,7 @@
 
 use crate::shell_utils::shell_type_from_str;
 use pyo3::prelude::*;
-use rez_next_rex::{RexEnvironment, generate_shell_script};
+use rez_next_rex::{RexEnvironment, ShellType, generate_shell_script};
 use std::path::PathBuf;
 
 /// Supported activation modes matching rez's `rez source` command.
@@ -84,11 +84,7 @@ impl PySourceManager {
     #[pyo3(signature = (shell = None))]
     pub fn write_temp_activation_script(&self, shell: Option<String>) -> PyResult<String> {
         let shell_name = shell.as_deref().unwrap_or(&self.shell_type);
-        let ext = match shell_name {
-            "powershell" | "pwsh" => "ps1",
-            "cmd" => "bat",
-            _ => "sh",
-        };
+        let ext = shell_type_from_str(shell_name).script_extension();
         let tmp_path =
             std::env::temp_dir().join(format!("rez_next_activate_{}.{}", std::process::id(), ext));
         self.write_activation_script(&tmp_path.to_string_lossy(), shell)
@@ -123,29 +119,7 @@ impl PySourceManager {
 
 /// Detect the current shell based on environment variables.
 pub(crate) fn detect_current_shell() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        // PowerShell is rez-next's default Windows activation shell.
-        "powershell".to_string()
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(shell) = std::env::var("SHELL") {
-            let shell_lower = shell.to_lowercase();
-            if shell_lower.contains("zsh") {
-                return "zsh".to_string();
-            }
-            if shell_lower.contains("fish") {
-                return "fish".to_string();
-            }
-            if shell_lower.contains("pwsh") || shell_lower.contains("powershell") {
-                return "powershell".to_string();
-            }
-        }
-
-        "bash".to_string()
-    }
+    ShellType::detect().name().to_string()
 }
 
 /// Build an activation script string for the given packages and shell.
@@ -182,9 +156,13 @@ pub(crate) fn build_activation_script(packages: &[String], shell_name: &str) -> 
     let mut script = generate_shell_script(&env, &shell_type);
 
     // Add a header comment for clarity
+    let (comment, line_ending) = if shell_type.is_cmd() {
+        ("REM", "\r\n")
+    } else {
+        ("#", "\n")
+    };
     let header = format!(
-        "# rez-next activation script ({})\n# packages: {}\n",
-        shell_name,
+        "{comment} rez-next activation script ({shell_name}){line_ending}{comment} packages: {}{line_ending}",
         packages.join(", ")
     );
     script = format!("{}{}", header, script);
@@ -264,11 +242,7 @@ pub fn resolve_source_mode(
     match mode {
         SourceMode::Inline => Ok(build_activation_script(&packages, &shell_resolved)),
         SourceMode::TempFile => {
-            let ext = match shell_resolved.as_str() {
-                "powershell" | "pwsh" => "ps1",
-                "cmd" => "bat",
-                _ => "sh",
-            };
+            let ext = shell_type_from_str(&shell_resolved).script_extension();
             let tmp_path = std::env::temp_dir().join(format!(
                 "rez_next_activate_{}.{}",
                 std::process::id(),

@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod error;
+pub mod shell;
 pub mod system;
 pub mod utils;
 
@@ -17,4 +18,5 @@ pub mod utils;
 pub use config::RezCoreConfig;
 pub use error::RezCoreError;
 pub use error::RezCoreResult;
+pub use shell::ShellType;
 pub use system::SystemInfo;

@@ -17,12 +17,12 @@ pub struct PyShell {
 #[pymethods]
 impl PyShell {
     /// Create a Shell instance for the given shell type.
-    /// shell_type: "bash", "zsh", "fish", "cmd", "powershell"
+    /// shell_type is one of the built-in Rez shell plugin names.
     #[new]
     pub fn new(shell_type: &str) -> PyResult<Self> {
         let st = ShellType::parse(shell_type).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown shell type '{}'. Use: bash, zsh, fish, cmd, powershell",
+                "Unknown shell type '{}'. Use a built-in Rez shell name",
                 shell_type
             ))
         })?;
@@ -54,13 +54,7 @@ impl PyShell {
     /// Shell type name
     #[getter]
     pub fn name(&self) -> &str {
-        match self.shell_type {
-            ShellType::Bash => "bash",
-            ShellType::Zsh => "zsh",
-            ShellType::Fish => "fish",
-            ShellType::Cmd => "cmd",
-            ShellType::PowerShell => "powershell",
-        }
+        self.shell_type.name()
     }
 
     fn __repr__(&self) -> String {
@@ -80,7 +74,7 @@ pub fn create_shell_script(
 ) -> PyResult<String> {
     let st = ShellType::parse(shell_type).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown shell type '{}'. Use: bash, zsh, fish, cmd, powershell",
+            "Unknown shell type '{}'. Use a built-in Rez shell name",
             shell_type
         ))
     })?;
@@ -102,7 +96,7 @@ pub fn create_shell_script(
 /// List available shell types
 #[pyfunction]
 pub fn get_available_shells() -> Vec<&'static str> {
-    vec!["bash", "zsh", "fish", "cmd", "powershell"]
+    ShellType::builtins().iter().map(ShellType::name).collect()
 }
 
 /// Detect current shell type from environment

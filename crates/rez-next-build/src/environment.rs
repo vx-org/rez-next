@@ -425,39 +425,11 @@ impl BuildEnvironment {
 
     /// Get environment as shell script
     pub fn to_shell_script(&self, shell_type: &rez_next_context::ShellType) -> String {
-        let mut script = String::new();
-
-        match shell_type {
-            rez_next_context::ShellType::Bash | rez_next_context::ShellType::Zsh => {
-                script.push_str("#!/bin/bash\n");
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("export {}=\"{}\"\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::Fish => {
-                script.push_str("#!/usr/bin/env fish\n");
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("set -x {} \"{}\"\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::Cmd => {
-                script.push_str("@echo off\n");
-                script.push_str("REM Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("set {}={}\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::PowerShell => {
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("$env:{} = \"{}\"\n", name, value));
-                }
-            }
-        }
-
-        script
+        let environment = rez_next_rex::RexEnvironment {
+            vars: self.env_vars.clone(),
+            ..Default::default()
+        };
+        rez_next_rex::generate_shell_script(&environment, shell_type)
     }
 
     /// Normalize build path to handle various path formats
@@ -796,7 +768,7 @@ mod tests {
         let env = BuildEnvironment::new(&pkg, &base, None).unwrap();
 
         let script = env.to_shell_script(&rez_next_context::ShellType::PowerShell);
-        assert!(script.contains("$env:REZ_BUILD_ENV = \"1\""));
+        assert!(script.contains("$env:REZ_BUILD_ENV = '1'"));
     }
 
     #[test]

@@ -9,20 +9,13 @@ use rez_next_rex::ShellType;
 
 /// Convert a shell name string to the corresponding [`ShellType`].
 ///
-/// Recognises the same set of names as rez:
-/// `"bash"`, `"zsh"`, `"fish"`, `"cmd"`, `"powershell"` / `"pwsh"`.
+/// Recognises every built-in shell name exposed by rez-next.
 ///
 /// Any unrecognised value falls back to `ShellType::Bash` (POSIX default).
 /// Call sites that need the auto-detection fallback should pass
 /// [`crate::source_bindings::detect_current_shell()`] here.
 pub(crate) fn shell_type_from_str(name: &str) -> ShellType {
-    match name.to_lowercase().as_str() {
-        "zsh" => ShellType::Zsh,
-        "fish" => ShellType::Fish,
-        "cmd" => ShellType::Cmd,
-        "powershell" | "pwsh" | "ps1" => ShellType::PowerShell,
-        _ => ShellType::Bash,
-    }
+    ShellType::parse(name).unwrap_or(ShellType::Bash)
 }
 
 #[cfg(test)]
@@ -39,7 +32,7 @@ mod tests {
             shell_type_from_str("powershell"),
             ShellType::PowerShell
         ));
-        assert!(matches!(shell_type_from_str("pwsh"), ShellType::PowerShell));
+        assert!(matches!(shell_type_from_str("pwsh"), ShellType::Pwsh));
         assert!(matches!(shell_type_from_str("ps1"), ShellType::PowerShell));
     }
 
@@ -57,6 +50,6 @@ mod tests {
     fn test_shell_type_from_str_unknown_falls_back_to_bash() {
         assert!(matches!(shell_type_from_str("unknown"), ShellType::Bash));
         assert!(matches!(shell_type_from_str(""), ShellType::Bash));
-        assert!(matches!(shell_type_from_str("sh"), ShellType::Bash));
+        assert!(matches!(shell_type_from_str("sh"), ShellType::Sh));
     }
 }
