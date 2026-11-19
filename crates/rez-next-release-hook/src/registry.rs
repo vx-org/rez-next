@@ -42,7 +42,9 @@ impl ReleaseHookRegistry {
     /// Get the names of all registered hook types.
     pub fn get_hook_types(&self) -> Vec<String> {
         let hooks = self.hooks.lock().unwrap();
-        hooks.keys().cloned().collect()
+        let mut types: Vec<String> = hooks.keys().cloned().collect();
+        types.sort();
+        types
     }
 
     /// Create a new hook instance by name.
