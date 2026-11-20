@@ -567,8 +567,8 @@ import os
 import subprocess
 import sys
 
-expected = os.path.normcase(os.path.normpath(os.environ["REZ_BUILD_PATH"]))
-actual = os.path.normcase(os.path.normpath(os.getcwd()))
+expected = os.path.realpath(os.path.normcase(os.path.normpath(os.environ["REZ_BUILD_PATH"])))
+actual = os.path.realpath(os.path.normcase(os.path.normpath(os.getcwd())))
 if actual != expected:
     print(f"unexpected build cwd: {actual!r} != {expected!r}", file=sys.stderr)
     sys.exit(1)
