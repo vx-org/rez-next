@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use rez_next_common::RezCoreError;
+use rez_next_common::{RezCoreError, windows_process_environment};
 use rez_next_context::{ContextConfig, ContextStatus, EnvironmentManager, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement, VersionConstraint};
 use rez_next_repository::RepositoryManager;
@@ -566,6 +566,15 @@ impl ResolvedEnvironment {
     pub fn command<S: AsRef<OsStr>>(&self, program: S) -> Command {
         let mut command = Command::new(program);
         command.env_clear().envs(&self.environment);
+        for (name, value) in windows_process_environment() {
+            if !self
+                .environment
+                .keys()
+                .any(|existing| existing.eq_ignore_ascii_case(&name))
+            {
+                command.env(name, value);
+            }
+        }
         command
     }
 

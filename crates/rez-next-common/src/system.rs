@@ -42,6 +42,34 @@ impl SystemInfo {
     }
 }
 
+/// Return host variables required to start native Windows child processes.
+///
+/// These variables are deliberately supplied only when a caller builds an
+/// explicit child environment. They are not part of a resolved Rez
+/// environment and must not weaken environment isolation.
+#[must_use]
+#[cfg(target_os = "windows")]
+pub fn windows_process_environment() -> Vec<(String, String)> {
+    let host_environment: Vec<_> = std::env::vars().collect();
+    ["SystemRoot", "WINDIR"]
+        .into_iter()
+        .filter_map(|required_name| {
+            host_environment
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(required_name))
+                .cloned()
+        })
+        .collect()
+}
+
+/// Return no host bootstrap variables on platforms without Windows process
+/// startup requirements.
+#[must_use]
+#[cfg(not(target_os = "windows"))]
+pub fn windows_process_environment() -> Vec<(String, String)> {
+    Vec::new()
+}
+
 fn detect_platform() -> String {
     match std::env::consts::OS {
         "macos" => "osx".to_string(),

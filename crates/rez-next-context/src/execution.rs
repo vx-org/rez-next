@@ -1,7 +1,7 @@
 //! Context execution and command spawning
 
 use crate::{CommandResult, ResolvedContext, ShellExecutor, ShellType};
-use rez_next_common::RezCoreError;
+use rez_next_common::{RezCoreError, windows_process_environment};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -137,6 +137,16 @@ impl ContextExecutor {
             cmd.env_clear();
             for (key, value) in &self.context.environment_vars {
                 cmd.env(key, value);
+            }
+            for (key, value) in windows_process_environment() {
+                if !self
+                    .context
+                    .environment_vars
+                    .keys()
+                    .any(|existing| existing.eq_ignore_ascii_case(&key))
+                {
+                    cmd.env(key, value);
+                }
             }
         }
 
