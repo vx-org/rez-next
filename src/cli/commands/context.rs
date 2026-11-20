@@ -57,7 +57,13 @@ pub struct ContextArgs {
     pub write_graph: Option<PathBuf>,
 
     /// Prune the graph down to PKG
-    #[arg(long = "pp", long = "prune-package")]
+    #[arg(
+        long = "pp",
+        long = "prune-package",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub prune_pkg: Option<String>,
 
     /// Interpret the context and print the resulting code

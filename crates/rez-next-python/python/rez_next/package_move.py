@@ -21,6 +21,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from rez_next.exceptions import PackageMoveError
+from rez_next.package_copy import _resolve_src_paths
 
 if TYPE_CHECKING:
     pass
@@ -67,6 +68,7 @@ def move_package(
     keep_timestamp: bool = False,
     force: bool = False,
     verbose: bool = False,
+    package_repos: list[Any] | None = None,
 ) -> Any:
     """Move a package to another repository.
 
@@ -88,9 +90,6 @@ def move_package(
     Raises:
         PackageMoveError: If the move operation fails.
     """
-    if keep_timestamp:
-        raise PackageMoveError("keep_timestamp is not supported in rez-next")
-
     pkg_name = _resolve_package_name(package)
     pkg_version = _resolve_package_version(package)
     dest_path = _resolve_dest_path(dest_repository)
@@ -110,15 +109,16 @@ def move_package(
             print(f"Warning: overwriting existing package at {dest_pkg_path}")
 
     try:
-        from rez_next._native.packages_ import move_package as _native_move
+        from rez_next._native.packages_ import move_package_with_options as _native_move
 
         result_path = _native_move(
             pkg_name=pkg_name,
             dest_path=dest_path,
             version=pkg_version,
-            src_paths=None,
+            src_paths=_resolve_src_paths(package_repos),
             force=force,
             keep_source=keep_source,
+            keep_timestamp=keep_timestamp,
         )
     except Exception as e:
         raise PackageMoveError(f"Failed to move {pkg_name}: {e}") from e

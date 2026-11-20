@@ -6,12 +6,11 @@ import os
 import tempfile
 
 import pytest
-
 from rez_next.release_vcs import (
     ReleaseVCS,
     ReleaseVCSError,
-    get_release_vcs_types,
     create_release_vcs,
+    get_release_vcs_types,
 )
 
 
@@ -106,6 +105,42 @@ class TestFactoryFunctions:
         """create_release_vcs should raise when no VCS found."""
         with pytest.raises(ReleaseVCSError):
             create_release_vcs("/nonexistent_path")
+
+
+class TestBuiltinReleaseVCS:
+    """Test the native VCS implementations exposed through the registry."""
+
+    @pytest.mark.parametrize(
+        ("vcs_name", "marker"),
+        [("git", ".git"), ("hg", ".hg"), ("svn", ".svn")],
+    )
+    def test_builtin_vcs_is_registered_and_can_be_created(self, vcs_name, marker):
+        """Each native VCS should be discoverable and constructible."""
+        assert vcs_name in get_release_vcs_types()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = os.path.join(tmpdir, "repo")
+            package_root = os.path.join(repo_root, "packages", "demo")
+            os.makedirs(package_root)
+            os.makedirs(os.path.join(repo_root, marker))
+
+            vcs = create_release_vcs(package_root, vcs_name=vcs_name)
+
+            assert vcs.name() == vcs_name
+            assert vcs.vcs_root == os.path.abspath(repo_root)
+
+    def test_auto_detection_selects_nearest_native_repository(self):
+        """Auto-detection should select the closest registered repository."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = os.path.join(tmpdir, "repo")
+            package_root = os.path.join(repo_root, "packages", "demo")
+            os.makedirs(package_root)
+            os.makedirs(os.path.join(repo_root, ".hg"))
+
+            vcs = create_release_vcs(package_root)
+
+            assert vcs.name() == "hg"
+            assert vcs.vcs_root == os.path.abspath(repo_root)
 
 
 class TestFindVCSRoot:

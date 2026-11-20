@@ -19,22 +19,18 @@ fn package_with_tools(root: &Path) -> Package {
         b"tool metadata must not add this path",
     )
     .unwrap();
-    Package {
-        name: "runtime".to_string(),
-        tools: vec!["runtime".to_string()],
-        filepath: Some(root.join("package.py").to_string_lossy().into_owned()),
-        ..Default::default()
-    }
+    let mut package = Package::new("runtime".to_string());
+    package.tools = vec!["runtime".to_string()];
+    package.filepath = Some(root.join("package.py").to_string_lossy().into_owned());
+    package
 }
 
 fn manager(strategy: PathStrategy, parent: HashMap<String, String>) -> EnvironmentManager {
-    EnvironmentManager::with_base_environment(
-        ContextConfig {
-            path_strategy: strategy,
-            ..Default::default()
-        },
-        parent,
-    )
+    let config = ContextConfig {
+        path_strategy: strategy,
+        ..ContextConfig::default()
+    };
+    EnvironmentManager::with_base_environment(config, parent)
 }
 
 fn paths(environment: &HashMap<String, String>) -> Vec<PathBuf> {
@@ -46,7 +42,7 @@ fn paths(environment: &HashMap<String, String>) -> Vec<PathBuf> {
 async fn test_generate_environment_canonical_root_paths_remain_accessible() {
     let temporary = tempfile::tempdir().unwrap();
     let directory = temporary.path().join("canonical root's");
-    fs::create_dir_all(directory.join("payload/bin")).unwrap();
+    fs::create_dir_all(directory.join("payload").join("bin")).unwrap();
     let root = directory.canonicalize().unwrap();
     let mut package = package_with_tools(&root);
     package.commands = Some(
@@ -63,7 +59,7 @@ async fn test_generate_environment_canonical_root_paths_remain_accessible() {
         entries[0]
             .canonicalize()
             .expect("canonical package PATH must remain usable"),
-        root.join("payload/bin").canonicalize().unwrap()
+        root.join("payload").join("bin").canonicalize().unwrap()
     );
     assert_eq!(
         Path::new(&environment["PAYLOAD_HOME"])
@@ -91,7 +87,10 @@ async fn test_generate_environment_explicit_payload_path_is_authoritative(
         .await
         .unwrap();
 
-    assert_eq!(paths(&environment), [temporary.path().join("payload/bin")]);
+    assert_eq!(
+        paths(&environment),
+        [temporary.path().join("payload").join("bin")]
+    );
 }
 
 #[rstest]
@@ -119,7 +118,7 @@ async fn test_generate_environment_explicit_append_preserves_parent_order(
 
     assert_eq!(
         paths(&environment),
-        [parent_bin, temporary.path().join("payload/bin")]
+        [parent_bin, temporary.path().join("payload").join("bin")]
     );
 }
 

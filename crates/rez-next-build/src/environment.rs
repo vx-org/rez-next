@@ -1,7 +1,7 @@
 //! Build environment management
 
-use crate::{BuildEvent, BuildEventKind, BuildStep};
-use rez_next_common::{RezCoreError, utils::get_thread_count};
+use crate::{BuildEvent, BuildEventKind, BuildStep, BuildType};
+use rez_next_common::{RezCoreConfig, RezCoreError, SystemInfo, utils::get_thread_count};
 use rez_next_context::ResolvedContext;
 use rez_next_package::{Package, PackageInstallLayout, PackageRequirement};
 use std::collections::HashMap;
@@ -48,6 +48,23 @@ impl BuildEnvironment {
         context: Option<&ResolvedContext>,
         install_path: Option<&PathBuf>,
     ) -> Result<Self, RezCoreError> {
+        Self::with_install_path_and_type(
+            package,
+            base_build_dir,
+            context,
+            install_path,
+            BuildType::Local,
+        )
+    }
+
+    /// Create a build environment with an explicit Rez build type.
+    pub fn with_install_path_and_type(
+        package: &Package,
+        base_build_dir: &PathBuf,
+        context: Option<&ResolvedContext>,
+        install_path: Option<&PathBuf>,
+        build_type: BuildType,
+    ) -> Result<Self, RezCoreError> {
         // Normalize the base build directory to handle various path formats
         let normalized_base = Self::normalize_build_path(base_build_dir)?;
         let package_relative_path = PackageInstallLayout::package_base_relative_path(package)?;
@@ -70,8 +87,7 @@ impl BuildEnvironment {
         env_vars.insert("REZ_BUILD_ENV".to_string(), "1".to_string());
 
         // REZ_BUILD_TYPE: build type (local or central)
-        // Default to "local" for now; can be configured via BuildConfig later
-        env_vars.insert("REZ_BUILD_TYPE".to_string(), "local".to_string());
+        env_vars.insert("REZ_BUILD_TYPE".to_string(), build_type.name().to_string());
 
         // REZ_BUILD_INSTALL: whether to install (1 or 0)
         // Default to "0"; set to "1" when install_path is provided
@@ -84,12 +100,7 @@ impl BuildEnvironment {
             .as_ref()
             .map(|version| version.as_str().to_string())
             .unwrap_or_else(|| DEFAULT_BUILD_VERSION.to_string());
-        env_vars.insert("REZ_BUILD_PACKAGE_NAME".to_string(), package.name.clone());
         env_vars.insert("REZ_BUILD_PROJECT_NAME".to_string(), package.name.clone());
-        env_vars.insert(
-            "REZ_BUILD_PACKAGE_VERSION".to_string(),
-            package_version.clone(),
-        );
         env_vars.insert("REZ_BUILD_PROJECT_VERSION".to_string(), package_version);
 
         env_vars.insert(
@@ -111,7 +122,7 @@ impl BuildEnvironment {
         );
         env_vars.insert(
             "REZ_BUILD_THREAD_COUNT".to_string(),
-            get_thread_count(None).to_string(),
+            get_thread_count(RezCoreConfig::load().thread_count).to_string(),
         );
 
         // Add variant-related environment variables (matching original Rez)
@@ -128,6 +139,8 @@ impl BuildEnvironment {
                 env_vars.insert(key.clone(), value.clone());
             }
         }
+
+        Self::set_target_environment(&mut env_vars, &[]);
 
         Ok(Self {
             package: package.clone(),
@@ -222,6 +235,7 @@ impl BuildEnvironment {
             variant_requires.join(" "),
         );
         Self::set_build_requirements(&mut self.env_vars, &self.package, variant_requires);
+        Self::set_target_environment(&mut self.env_vars, variant_requires);
     }
 
     /// Set the variant subpath for the build environment.
@@ -332,6 +346,39 @@ impl BuildEnvironment {
         );
     }
 
+    fn set_target_environment(env_vars: &mut HashMap<String, String>, variant_requires: &[String]) {
+        let system = SystemInfo::detect();
+        let mut platform = system.platform;
+        let mut arch = canonical_architecture(&system.arch);
+        let mut os = system.os;
+
+        for requirement in variant_requires {
+            let Ok(parsed) = PackageRequirement::parse(requirement) else {
+                continue;
+            };
+            let Some(value) = parsed.version_spec().map(strip_requirement_operator) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+
+            match parsed.name() {
+                "platform" => platform = value.to_string(),
+                "arch" => arch = canonical_architecture(value),
+                "os" => os = value.to_string(),
+                _ => {}
+            }
+        }
+
+        env_vars.insert(
+            "REZ_BUILD_TARGET_PLATFORM".to_string(),
+            format!("{platform}-{arch}"),
+        );
+        env_vars.insert("REZ_BUILD_TARGET_ARCH".to_string(), arch);
+        env_vars.insert("REZ_BUILD_TARGET_OS".to_string(), os);
+    }
+
     /// Get the variant install path (for hash variants)
     pub fn get_variant_install_path(&self, variant_hash: Option<&str>) -> PathBuf {
         match variant_hash {
@@ -378,39 +425,12 @@ impl BuildEnvironment {
 
     /// Get environment as shell script
     pub fn to_shell_script(&self, shell_type: &rez_next_context::ShellType) -> String {
-        let mut script = String::new();
-
-        match shell_type {
-            rez_next_context::ShellType::Bash | rez_next_context::ShellType::Zsh => {
-                script.push_str("#!/bin/bash\n");
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("export {}=\"{}\"\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::Fish => {
-                script.push_str("#!/usr/bin/env fish\n");
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("set -x {} \"{}\"\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::Cmd => {
-                script.push_str("@echo off\n");
-                script.push_str("REM Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("set {}={}\n", name, value));
-                }
-            }
-            rez_next_context::ShellType::PowerShell => {
-                script.push_str("# Build environment setup\n\n");
-                for (name, value) in &self.env_vars {
-                    script.push_str(&format!("$env:{} = \"{}\"\n", name, value));
-                }
-            }
-        }
-
-        script
+        let environment = rez_next_rex::RexEnvironment {
+            vars: self.env_vars.clone(),
+            ..Default::default()
+        };
+        let shell_type: rez_next_common::ShellType = shell_type.clone().into();
+        rez_next_rex::generate_shell_script(&environment, &shell_type)
     }
 
     /// Normalize build path to handle various path formats
@@ -494,6 +514,27 @@ impl BuildEnvironment {
     }
 }
 
+fn strip_requirement_operator(value: &str) -> &str {
+    value
+        .strip_prefix(">=")
+        .or_else(|| value.strip_prefix("<="))
+        .or_else(|| value.strip_prefix("=="))
+        .or_else(|| value.strip_prefix("!="))
+        .or_else(|| value.strip_prefix('>'))
+        .or_else(|| value.strip_prefix('<'))
+        .unwrap_or(value)
+        .trim()
+}
+
+fn canonical_architecture(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "amd64" | "x64" | "x86-64" | "x86_64" => "x86_64".to_string(),
+        "aarch64" | "arm64" | "arm_64" | "armv8" => "arm_64".to_string(),
+        "i386" | "i686" => "x86".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +561,44 @@ mod tests {
     }
 
     #[test]
+    fn test_target_env_vars_follow_host_and_selected_variant() {
+        let pkg = make_test_package("test-pkg", "1.0.0");
+        let base = PathBuf::from("/tmp/build");
+        let mut env = BuildEnvironment::new(&pkg, &base, None).unwrap();
+        let host = SystemInfo::detect();
+
+        let vars = env.get_env_vars();
+        assert_eq!(vars.get("REZ_BUILD_TARGET_ARCH"), Some(&host.arch));
+        assert_eq!(vars.get("REZ_BUILD_TARGET_OS"), Some(&host.os));
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_PLATFORM"),
+            Some(&format!("{}-{}", host.platform, host.arch))
+        );
+
+        env.set_variant_env(
+            2,
+            &[
+                "platform-windows".to_string(),
+                "arch-amd64".to_string(),
+                "os-windows-10".to_string(),
+            ],
+        );
+        let vars = env.get_env_vars();
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_PLATFORM"),
+            Some(&"windows-x86_64".to_string())
+        );
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_ARCH"),
+            Some(&"x86_64".to_string())
+        );
+        assert_eq!(
+            vars.get("REZ_BUILD_TARGET_OS"),
+            Some(&"windows-10".to_string())
+        );
+    }
+
+    #[test]
     fn test_install_flag_env_var() {
         // When install_path is provided, REZ_BUILD_INSTALL should be "1"
         let pkg = make_test_package("test-pkg", "1.0.0");
@@ -538,14 +617,8 @@ mod tests {
         let env = BuildEnvironment::new(&pkg, &base, None).unwrap();
 
         let vars = env.get_env_vars();
-        assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_NAME"),
-            Some(&"my-package".to_string())
-        );
-        assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_VERSION"),
-            Some(&"2.3.4".to_string())
-        );
+        assert!(!vars.contains_key("REZ_BUILD_PACKAGE_NAME"));
+        assert!(!vars.contains_key("REZ_BUILD_PACKAGE_VERSION"));
         assert_eq!(
             vars.get("REZ_BUILD_PROJECT_NAME"),
             Some(&"my-package".to_string())
@@ -553,6 +626,25 @@ mod tests {
         assert_eq!(
             vars.get("REZ_BUILD_PROJECT_VERSION"),
             Some(&"2.3.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_type_is_exposed_in_environment() {
+        let pkg = make_test_package("my-package", "2.3.4");
+        let base = PathBuf::from("/workspace/build");
+        let env = BuildEnvironment::with_install_path_and_type(
+            &pkg,
+            &base,
+            None,
+            None,
+            BuildType::Central,
+        )
+        .unwrap();
+
+        assert_eq!(
+            env.get_env_vars().get("REZ_BUILD_TYPE"),
+            Some(&"central".to_string())
         );
     }
 
@@ -677,7 +769,7 @@ mod tests {
         let env = BuildEnvironment::new(&pkg, &base, None).unwrap();
 
         let script = env.to_shell_script(&rez_next_context::ShellType::PowerShell);
-        assert!(script.contains("$env:REZ_BUILD_ENV = \"1\""));
+        assert!(script.contains("$env:REZ_BUILD_ENV = '1'"));
     }
 
     #[test]

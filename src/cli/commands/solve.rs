@@ -3,8 +3,6 @@
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_package::Requirement;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::dependency_resolver::DetailedResolutionResult;
 use rez_next_solver::{ConflictStrategy, DependencyResolver, SolverConfig};
@@ -14,7 +12,12 @@ use std::sync::Arc;
 #[derive(Args, Clone)]
 pub struct SolveArgs {
     /// Package requirements to resolve
-    #[arg(value_name = "REQUIREMENTS")]
+    #[arg(
+        value_name = "REQUIREMENTS",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub requirements: Vec<String>,
 
     /// Repository paths to search for packages
@@ -67,13 +70,11 @@ async fn solve_async(args: SolveArgs) -> RezCoreResult<()> {
         // Use default test repositories
         add_default_repositories(&mut repo_manager).await?;
     } else {
-        for repo_path in &args.repository {
-            let repo = FilesystemPackageRepository::with_name(
-                repo_path,
-                format!("repo_{}", repo_path.display()),
-            );
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repo)));
-        }
+        repo_manager = RepositoryManager::from_package_paths(
+            args.repository
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )?;
     }
 
     println!("Using {} repositories", repo_manager.repository_count());
@@ -122,25 +123,15 @@ fn parse_requirements(requirement_strs: &[String]) -> RezCoreResult<Vec<Requirem
 /// Add default repositories from rez config
 async fn add_default_repositories(repo_manager: &mut RepositoryManager) -> RezCoreResult<()> {
     let config = RezCoreConfig::load();
-
-    for (i, path_str) in config.packages_path.iter().enumerate() {
-        let expanded = if path_str.starts_with("~/") || path_str == "~" {
-            if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-                path_str.replacen("~", &home, 1)
-            } else {
-                path_str.clone()
+    *repo_manager =
+        RepositoryManager::from_package_paths(config.packages_path.iter().map(|path| {
+            if (path.starts_with("~/") || path == "~")
+                && let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+            {
+                return path.replacen("~", &home, 1);
             }
-        } else {
-            path_str.clone()
-        };
-
-        let path = PathBuf::from(&expanded);
-        if path.exists() {
-            let repo = FilesystemPackageRepository::with_name(&path, format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repo)));
-        }
-    }
-
+            path.clone()
+        }))?;
     Ok(())
 }
 

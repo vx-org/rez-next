@@ -241,11 +241,7 @@ impl HttpFetcher {
         None
     }
 
-    async fn extract_archive(
-        &self,
-        archive_path: &PathBuf,
-        extract_dir: &PathBuf,
-    ) -> RezCoreResult<()> {
+    async fn extract_archive(&self, archive_path: &Path, extract_dir: &Path) -> RezCoreResult<()> {
         tokio::fs::create_dir_all(extract_dir).await.map_err(|e| {
             RezCoreError::BuildError(format!("Failed to create extract directory: {}", e))
         })?;
@@ -258,6 +254,7 @@ impl HttpFetcher {
         match extension {
             "zip" => self.extract_zip(archive_path, extract_dir).await,
             "gz" | "tgz" => self.extract_tar_gz(archive_path, extract_dir).await,
+            "zst" | "tzst" => self.extract_tar_zstd(archive_path, extract_dir).await,
             "tar" => self.extract_tar(archive_path, extract_dir).await,
             _ => {
                 // If not a known archive format, just copy the file
@@ -270,11 +267,7 @@ impl HttpFetcher {
         }
     }
 
-    async fn extract_zip(
-        &self,
-        archive_path: &PathBuf,
-        extract_dir: &PathBuf,
-    ) -> RezCoreResult<()> {
+    async fn extract_zip(&self, archive_path: &Path, extract_dir: &Path) -> RezCoreResult<()> {
         use tokio::process::Command;
 
         // Use system unzip command for simplicity
@@ -298,11 +291,7 @@ impl HttpFetcher {
         Ok(())
     }
 
-    async fn extract_tar_gz(
-        &self,
-        archive_path: &PathBuf,
-        extract_dir: &PathBuf,
-    ) -> RezCoreResult<()> {
+    async fn extract_tar_gz(&self, archive_path: &Path, extract_dir: &Path) -> RezCoreResult<()> {
         use tokio::process::Command;
 
         let output = Command::new("tar")
@@ -325,11 +314,28 @@ impl HttpFetcher {
         Ok(())
     }
 
-    async fn extract_tar(
-        &self,
-        archive_path: &PathBuf,
-        extract_dir: &PathBuf,
-    ) -> RezCoreResult<()> {
+    async fn extract_tar_zstd(&self, archive_path: &Path, extract_dir: &Path) -> RezCoreResult<()> {
+        let archive_path = archive_path.to_path_buf();
+        let extract_dir = extract_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(&archive_path).map_err(|error| {
+                RezCoreError::BuildError(format!("Failed to open tar.zst archive: {error}"))
+            })?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                RezCoreError::BuildError(format!("Failed to read tar.zst archive: {error}"))
+            })?;
+            let mut archive = tar::Archive::new(decoder);
+            archive.unpack(&extract_dir).map_err(|error| {
+                RezCoreError::BuildError(format!("Failed to unpack tar.zst archive: {error}"))
+            })
+        })
+        .await
+        .map_err(|error| {
+            RezCoreError::BuildError(format!("Tar.zst extraction task failed: {error}"))
+        })?
+    }
+
+    async fn extract_tar(&self, archive_path: &Path, extract_dir: &Path) -> RezCoreResult<()> {
         use tokio::process::Command;
 
         let output = Command::new("tar")
@@ -567,5 +573,38 @@ impl SourceManager {
 impl Default for SourceManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpFetcher;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn extract_archive_supports_tar_zstd_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("source.tar.zst");
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path("payload/data.txt").unwrap();
+        header.set_size(5);
+        header.set_cksum();
+        tar.append(&header, &b"hello"[..]).unwrap();
+        let tar_bytes = tar.into_inner().unwrap();
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut encoder = zstd::stream::write::Encoder::new(file, 0).unwrap();
+        encoder.write_all(&tar_bytes).unwrap();
+        encoder.finish().unwrap();
+
+        let extract_dir = temp.path().join("extract");
+        HttpFetcher
+            .extract_archive(&archive_path, &extract_dir)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(extract_dir.join("payload/data.txt")).unwrap(),
+            b"hello"
+        );
     }
 }

@@ -247,7 +247,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15-intel
           - target: aarch64-pc-windows-msvc
             os: windows-2022
     steps:
@@ -361,7 +361,7 @@ jobs:
 
   python-binding-tests:
     name: Python Binding Tests (maturin + pytest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Do not cancel the other matrix legs when one fails; each version's
       # result should stand on its own so a single failure is not hidden behind

@@ -11,6 +11,8 @@ Usage:
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 from conftest import write_package_py
@@ -94,6 +96,13 @@ class TestResolvedContextMethods:
             assert isinstance(k, str), f"key {k!r} is not str"
             assert isinstance(v, str), f"value for {k!r} is not str"
 
+    def test_get_environ_accepts_a_selective_parent_environment(self):
+        ctx = rez.ResolvedContext([])
+        env = ctx.get_environ({"PARENT_ONLY": "must-not-leak"})
+
+        assert isinstance(env, dict)
+        assert "PARENT_ONLY" not in env
+
     def test_get_resolved_package_not_found_returns_none(self):
         ctx = rez.ResolvedContext([])
         result = ctx.get_resolved_package("nonexistent_xyz_999")
@@ -103,6 +112,56 @@ class TestResolvedContextMethods:
         ctx = rez.ResolvedContext([])
         tools = ctx.get_tools()
         assert isinstance(tools, dict)
+
+    def test_requested_packages_returns_package_requirements(self):
+        ctx = rez.ResolvedContext([])
+
+        assert ctx.requested_packages() == []
+
+    def test_requested_packages_can_include_configured_implicits(self, monkeypatch):
+        from rez_next.config import config
+
+        monkeypatch.setattr(
+            config,
+            "implicit_packages",
+            ["~platform==test-platform", "~arch==test-arch"],
+        )
+
+        ctx = rez.ResolvedContext([], add_implicit_packages=True)
+
+        assert ctx.requested_packages() == []
+        assert [str(request) for request in ctx.requested_packages(True)] == [
+            "~platform==test-platform",
+            "~arch==test-arch",
+        ]
+
+    def test_context_can_disable_configured_implicits(self, monkeypatch):
+        from rez_next.config import config
+
+        monkeypatch.setattr(config, "implicit_packages", ["~platform==test-platform"])
+
+        ctx = rez.ResolvedContext([], add_implicit_packages=False)
+
+        assert ctx.requested_packages(True) == []
+
+    def test_ephemeral_requests_resolve_without_repository_packages(self, tmp_path):
+        ctx = rez.ResolvedContext(
+            [".feature>=1", "!.feature==2"],
+            paths=[str(tmp_path)],
+            add_implicit_packages=False,
+        )
+
+        assert ctx.resolved_packages == []
+        assert len(ctx.resolved_ephemerals) == 1
+        assert ctx.resolved_ephemerals[0].name == ".feature"
+
+    def test_official_context_helper_surface_is_loaded_at_top_level(self):
+        ctx = rez.ResolvedContext([])
+
+        assert ctx.status.name == "solved"
+        assert ctx.resolved_ephemerals == []
+        assert ctx.has_graph is False
+        assert ctx.get_resolve_diff(rez.ResolvedContext([])) == {}
 
     def test_to_dict_returns_dict(self):
         ctx = rez.ResolvedContext([])
@@ -132,6 +191,13 @@ class TestResolvedContextMethods:
         ctx = rez.ResolvedContext([])
         script = ctx.to_shell_script()
         assert isinstance(script, str)
+
+    def test_get_shell_code_accepts_parent_environment(self):
+        ctx = rez.ResolvedContext([])
+        script = ctx.get_shell_code("powershell", {"PARENT_ONLY": "must-not-leak"})
+
+        assert isinstance(script, str)
+        assert "PARENT_ONLY" not in script
 
     def test_get_resolved_packages_info_returns_list(self):
         ctx = rez.ResolvedContext([])
@@ -229,6 +295,80 @@ class TestResolvedContextWithRealRepo:
         ctx = rez.ResolvedContext(["python"], paths=[str(tmp_path)])
         env = ctx.get_environ()
         assert isinstance(env, dict)
+
+    def test_get_environ_uses_actual_unpacked_package_root(self, tmp_path):
+        pkg_dir = tmp_path / "vx-cache" / "unpacked" / "python" / "3.11.0"
+        write_package_py(
+            pkg_dir,
+            "python",
+            "3.11.0",
+            commands="env.setenv('PYTHON_ROOT', '{root}')",
+        )
+
+        ctx = rez.ResolvedContext(["python"], paths=[str(tmp_path / "vx-cache" / "unpacked")])
+        env = ctx.get_environ()
+
+        assert env["PYTHON_ROOT"] == str(pkg_dir)
+
+    def test_get_resolve_diff_matches_official_rez_shape(self, tmp_path):
+        for version in ("1.0.0", "2.0.0"):
+            write_package_py(tmp_path / "tool" / version, "tool", version)
+
+        old_context = rez.ResolvedContext(["tool-1.0.0"], paths=[str(tmp_path)])
+        new_context = rez.ResolvedContext(["tool-2.0.0"], paths=[str(tmp_path)])
+
+        assert old_context.package_paths == [str(tmp_path)]
+        diff = old_context.get_resolve_diff(new_context)
+
+        assert set(diff) == {"newer_packages"}
+        assert [package.version_str for package in diff["newer_packages"]["tool"]] == [
+            "1.0.0",
+            "2.0.0",
+        ]
+
+    def test_apply_updates_os_environ_with_parent_environment(self, tmp_path, monkeypatch):
+        pkg_dir = tmp_path / "tool" / "1.0.0"
+        write_package_py(
+            pkg_dir,
+            "tool",
+            "1.0.0",
+            commands="env.setenv('REZ_NEXT_APPLIED', 'yes')",
+        )
+        monkeypatch.delenv("REZ_NEXT_APPLIED", raising=False)
+        monkeypatch.delenv("PARENT_ONLY", raising=False)
+        ctx = rez.ResolvedContext(["tool"], paths=[str(tmp_path)])
+
+        result = ctx.apply({"PARENT_ONLY": "must-not-leak"})
+
+        assert result is None
+        assert os.environ["REZ_NEXT_APPLIED"] == "yes"
+        assert "PARENT_ONLY" not in os.environ
+
+    def test_get_environ_honors_runtime_parent_variables_config(self, tmp_path, monkeypatch):
+        from rez_next.config import config
+
+        pkg_dir = tmp_path / "tool" / "1.0.0"
+        child_python_path = pkg_dir / "python"
+        parent_python_path = tmp_path / "parent-python"
+        child_python_path.mkdir(parents=True)
+        parent_python_path.mkdir()
+        write_package_py(
+            pkg_dir,
+            "tool",
+            "1.0.0",
+            commands="env.prepend_path('PYTHONPATH', '{root}/python')",
+        )
+        monkeypatch.setattr(config, "parent_variables", ["PYTHONPATH"])
+        monkeypatch.setattr(config, "all_parent_variables", False)
+        ctx = rez.ResolvedContext(["tool"], paths=[str(tmp_path)])
+
+        environment = ctx.get_environ({"PYTHONPATH": str(parent_python_path)})
+        entries = [os.path.normpath(path) for path in environment["PYTHONPATH"].split(os.pathsep)]
+
+        assert entries == [
+            os.path.normpath(str(child_python_path)),
+            os.path.normpath(str(parent_python_path)),
+        ]
 
 
 # ── RepositoryManager attributes ─────────────────────────────────────────────
@@ -482,7 +622,54 @@ class TestContextRepositoryIntegration:
 
         ctx = rez.ResolvedContext(["python"], paths=[str(tmp_path)])
         tools = ctx.get_tools()
-        assert isinstance(tools, dict)
+        package, package_tools = tools["python"]
+        assert package.name == "python"
+        assert package_tools == ["python", "python3"]
+
+    def test_tool_variant_and_conflict_helpers_match_rez_shape(self, tmp_path):
+        for name in ("first", "second"):
+            package_dir = tmp_path / name / "1.0.0"
+            package_dir.mkdir(parents=True)
+            (package_dir / "package.py").write_text(
+                f'name = "{name}"\nversion = "1.0.0"\ntools = ["shared"]\n'
+            )
+
+        ctx = rez.ResolvedContext(["first", "second"], paths=[str(tmp_path)])
+
+        assert {package.name for package in ctx.get_tool_variants("shared")} == {
+            "first",
+            "second",
+        }
+        assert {
+            package.name for package in ctx.get_conflicting_tools()["shared"]
+        } == {"first", "second"}
+
+    def test_execute_command_returns_popen_with_env_args_and_cwd(self, tmp_path):
+        package_dir = tmp_path / "tool" / "1.0.0"
+        package_dir.mkdir(parents=True)
+        (package_dir / "package.py").write_text(
+            'name = "tool"\nversion = "1.0.0"\n'
+            'commands = "env.setenv(\'CTX_TOKEN\', \'from-rez\')"\n'
+        )
+        ctx = rez.ResolvedContext(["tool"], paths=[str(tmp_path)])
+
+        process = ctx.execute_command(
+            [
+                sys.executable,
+                "-c",
+                "import os; print(os.environ['PARENT_TOKEN']); "
+                "print(os.environ['CTX_TOKEN']); print(os.getcwd())",
+            ],
+            parent_environ={"PARENT_TOKEN": "from-parent"},
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+
+        assert isinstance(process, subprocess.Popen)
+        stdout, _ = process.communicate(timeout=10)
+        assert process.returncode == 0
+        assert stdout.splitlines() == ["from-parent", "from-rez", str(tmp_path)]
 
     def test_top_level_resolve_packages_fn(self, tmp_path):
         """Top-level resolve_packages() mirrors ResolvedContext."""

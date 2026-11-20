@@ -2,9 +2,21 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 from rez_next.package_copy import copy_package, PackageCopyError
+
+
+def _write_package(root, name="tool", version="1.0.0"):
+    package_dir = root / name / version
+    package_dir.mkdir(parents=True)
+    (package_dir / "package.py").write_text(
+        f"name = '{name}'\nversion = '{version}'\n",
+        encoding="utf-8",
+    )
+    (package_dir / "payload.txt").write_text("payload", encoding="utf-8")
+    return package_dir
 
 
 class TestPackageCopyImport:
@@ -45,21 +57,29 @@ class TestCopyPackageDefault:
             assert "copied" in result
             assert "skipped" in result
 
-    def test_shallow_raises(self):
-        """Shallow copy raises PackageCopyError (not yet supported)."""
+    def test_skip_payload_is_supported(self):
+        """Metadata-only copies use the repository installer contract."""
         with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
             dest = os.path.join(tmpdir, "dest")
-            os.makedirs(dest)
-            with pytest.raises(PackageCopyError, match="not yet supported"):
-                copy_package("some_pkg", dest, shallow=True)
+            _write_package(Path(source))
+            copy_package("tool", dest, skip_payload=True, package_repos=[source])
+            assert os.path.isfile(os.path.join(dest, "tool", "1.0.0", "package.py"))
+            assert not os.path.exists(os.path.join(dest, "tool", "1.0.0", "payload.txt"))
 
-    def test_overrides_raises(self):
-        """Custom overrides raises PackageCopyError (not yet supported)."""
+    def test_overrides_are_supported(self):
+        """Custom metadata overrides are applied by the repository installer."""
         with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
             dest = os.path.join(tmpdir, "dest")
-            os.makedirs(dest)
-            with pytest.raises(PackageCopyError, match="not yet supported"):
-                copy_package("some_pkg", dest, overrides={"name": "other"})
+            _write_package(Path(source))
+            copy_package(
+                "tool",
+                dest,
+                overrides={"name": "other"},
+                package_repos=[source],
+            )
+            assert os.path.isfile(os.path.join(dest, "other", "1.0.0", "package.py"))
 
 
 class TestCopyPackageWithOptions:
@@ -99,14 +119,16 @@ class TestCopyPackageWithOptions:
                 pass  # Expected to fail since package doesn't exist
 
     def test_copy_with_dry_run(self):
-        """dry_run returns empty result without error."""
+        """dry_run returns a result without changing the destination."""
         with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
             dest = os.path.join(tmpdir, "dest")
-            os.makedirs(dest)
-            result = copy_package("nonexistent_pkg_dry", dest, dry_run=True)
+            _write_package(Path(source))
+            result = copy_package("tool", dest, dry_run=True, package_repos=[source])
             assert isinstance(result, dict)
             assert "copied" in result
             assert "skipped" in result
+            assert not os.path.exists(dest)
 
 
 class TestCopyPackageResolveHelpers:

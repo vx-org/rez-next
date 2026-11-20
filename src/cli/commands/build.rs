@@ -18,13 +18,11 @@ use ratatui::{
 };
 use rez_next_build::{
     BuildConfig, BuildEvent, BuildEventKind, BuildManager, BuildOptions, BuildRequest, BuildStatus,
-    BuildStep,
+    BuildStep, BuildType,
 };
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext};
 use rez_next_package::{Package, PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::{HashMap, HashSet};
@@ -56,7 +54,7 @@ pub struct BuildArgs {
     #[arg(long = "fail-graph")]
     pub fail_graph: bool,
 
-    /// Request build scripts (currently unsupported; never runs a build)
+    /// Request generated build environment scripts
     #[arg(short = 's', long = "scripts")]
     pub scripts: bool,
 
@@ -156,9 +154,31 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
             "Generating build environment scripts (--scripts) is not yet supported".to_string(),
         ));
     }
+    if args.process != "local" {
+        return Err(RezCoreError::BuildError(format!(
+            "Build process '{}' is not supported by rez-next",
+            args.process
+        )));
+    }
+    if args
+        .child_build_args
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(RezCoreError::BuildError(
+            "--child-build-args is not supported because rez-next has no child build process"
+                .to_string(),
+        ));
+    }
+    if args.fail_graph {
+        return Err(RezCoreError::BuildError(
+            "--fail-graph is not supported because rez-next has no build-graph renderer"
+                .to_string(),
+        ));
+    }
 
     // Determine source directory first
-    let (source_dir, package) = if let Some(ref source_url) = args.source {
+    let (source_dir, mut package) = if let Some(ref source_url) = args.source {
         // Network or remote source
         fetch_and_load_remote_source(source_url, &args)?
     } else {
@@ -167,6 +187,18 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
         let package = load_current_package(&working_dir)?;
         (working_dir, package)
     };
+
+    if let Some(build_system) = args.build_system.as_deref() {
+        if build_system.trim().is_empty() {
+            return Err(RezCoreError::BuildError(
+                "--build-system requires a non-empty value".to_string(),
+            ));
+        }
+        package.build_system = Some(build_system.to_string());
+        if build_system != "custom" {
+            package.build_command = None;
+        }
+    }
 
     // Handle view-pre option
     if args.view_pre {
@@ -177,7 +209,7 @@ pub fn execute(args: BuildArgs) -> RezCoreResult<()> {
 
     // Create build options
     let build_options = BuildOptions {
-        force_rebuild: args.force || args.clean,
+        force_rebuild: args.force,
         skip_tests: args.skip_tests,
         release_mode: args.release,
         build_args: parse_build_args(&args.build_args),
@@ -402,16 +434,13 @@ pub(super) fn resolve_build_context(
         );
     }
 
-    let mut repo_manager = RepositoryManager::new();
     let config = RezCoreConfig::load();
-    for (index, search_path) in config.packages_path.iter().enumerate() {
-        let path = expand_home_path(search_path);
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path, format!("build_repo_{index}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let repo_paths = config
+        .packages_path
+        .iter()
+        .map(|path| expand_home_path(path).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let repo_manager = RepositoryManager::from_package_paths(repo_paths)?;
 
     let requirements = requirement_strings
         .iter()
@@ -446,7 +475,7 @@ pub(super) fn resolve_build_context(
             ..SolverConfig::default()
         },
     );
-    let resolution = rt.block_on(resolver.resolve(requirements))?;
+    let resolution = rt.block_on(resolver.resolve_build(requirements))?;
 
     let mut context = ResolvedContext::from_requirements(context_requirements);
     context.resolved_packages = resolution
@@ -456,10 +485,11 @@ pub(super) fn resolve_build_context(
         .collect::<Result<Vec<_>, _>>()?;
     context.status = rez_next_context::ContextStatus::Resolved;
 
-    let env_manager = EnvironmentManager::new(ContextConfig {
+    let context_config = ContextConfig {
         inherit_parent_env: false,
-        ..Default::default()
-    });
+        ..ContextConfig::default()
+    };
+    let env_manager = EnvironmentManager::new(context_config);
     context.environment_vars =
         rt.block_on(env_manager.generate_environment(&context.resolved_packages))?;
 
@@ -615,6 +645,12 @@ fn execute_build(
     let (event_sender, event_receiver) = mpsc::unbounded_channel();
     let build_config = BuildConfig {
         event_sender: Some(event_sender),
+        clean_before_build: args.clean,
+        build_type: if args.release {
+            BuildType::Central
+        } else {
+            BuildType::Local
+        },
         ..Default::default()
     };
     let mut build_manager = BuildManager::with_config(build_config);

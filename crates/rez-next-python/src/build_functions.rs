@@ -147,7 +147,7 @@ pub fn get_buildsys_types() -> PyResult<Vec<String>> {
     Ok(types.iter().map(|&s| s.to_string()).collect())
 }
 
-/// Get all available build process types (local, central).
+/// Get all available build process types (local, remote).
 /// Equivalent to `rez.build_.get_build_process_types()`
 #[pyfunction]
 pub fn get_build_process_types() -> PyResult<Vec<String>> {

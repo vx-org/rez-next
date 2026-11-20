@@ -8,9 +8,11 @@
 //! - [`find_close_matches`]  — substring-based fuzzy name matching
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::cli::utils::expand_home_path;
+use rez_next_bind::{BuiltinBinder, builtin_binders};
 use rez_next_common::error::RezCoreResult;
 
 /// Bind module information
@@ -18,7 +20,7 @@ use rez_next_common::error::RezCoreResult;
 pub struct BindModule {
     /// Module name
     pub name: String,
-    /// Module file path (or `builtin://name` for built-ins)
+    /// Module file path, or a stable built-in descriptor marker.
     pub path: PathBuf,
     /// Optional human-readable description
     pub description: Option<String>,
@@ -28,42 +30,97 @@ pub struct BindModule {
 
 /// Return all known built-in bind modules.
 pub fn get_bind_modules() -> RezCoreResult<HashMap<String, BindModule>> {
-    let builtin = [
-        ("platform", "System platform package"),
-        ("arch", "System architecture package"),
-        ("os", "Operating system package"),
-        ("python", "Python interpreter"),
-        ("rez", "Rez package manager"),
-        ("setuptools", "Python setuptools"),
-        ("pip", "Python pip"),
-        ("cmake", "CMake build system"),
-        ("git", "Git version control"),
-        ("gcc", "GNU Compiler Collection"),
-        ("clang", "Clang compiler"),
-    ];
-
-    let all_platforms = vec![
-        "windows".to_string(),
-        "linux".to_string(),
-        "darwin".to_string(),
-    ];
-
-    let modules = builtin
+    let mut modules = builtin_binders()
         .iter()
-        .map(|(name, desc)| {
+        .map(builtin_module)
+        .chain([
+            ("platform", "System platform package"),
+            ("arch", "System architecture package"),
+            ("os", "Operating system package"),
+            ("rez", "Rez package manager"),
+            ("setuptools", "Python setuptools"),
+        ])
+        .map(|(name, description)| {
             (
                 name.to_string(),
                 BindModule {
                     name: name.to_string(),
-                    path: PathBuf::from(format!("builtin://{}", name)),
-                    description: Some(desc.to_string()),
-                    platforms: all_platforms.clone(),
+                    path: PathBuf::from("<built-in>"),
+                    description: Some(description.to_string()),
+                    platforms: all_platforms(),
                 },
             )
         })
-        .collect();
+        .collect::<HashMap<_, _>>();
+
+    for module in discover_bind_modules(&configured_bind_module_paths()) {
+        modules.entry(module.name.clone()).or_insert(module);
+    }
 
     Ok(modules)
+}
+
+fn builtin_module(binder: &BuiltinBinder) -> (&str, &str) {
+    (binder.name, binder.description)
+}
+
+fn all_platforms() -> Vec<String> {
+    vec![
+        "windows".to_string(),
+        "linux".to_string(),
+        "darwin".to_string(),
+    ]
+}
+
+fn configured_bind_module_paths() -> Vec<PathBuf> {
+    let config = rez_next_common::config::RezCoreConfig::load();
+    config
+        .get_field("bind_module_path")
+        .and_then(|value| value.as_array().cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(expand_home_path))
+        .collect()
+}
+
+fn discover_bind_modules(paths: &[PathBuf]) -> Vec<BindModule> {
+    let mut modules = Vec::new();
+
+    for path in paths {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            continue;
+        };
+
+        let mut files = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        files.sort();
+        for file in files {
+            if !is_bind_module_file(&file) {
+                continue;
+            }
+
+            let Some(name) = file.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+
+            modules.push(BindModule {
+                name: name.to_string(),
+                path: file,
+                description: None,
+                platforms: all_platforms(),
+            });
+        }
+    }
+
+    modules
+}
+
+fn is_bind_module_file(path: &Path) -> bool {
+    path.is_file()
+        && path.extension().and_then(|extension| extension.to_str()) == Some("py")
+        && path.file_stem().and_then(|stem| stem.to_str()) != Some("__init__")
 }
 
 /// Find close matches for `name` among the known modules using substring containment.

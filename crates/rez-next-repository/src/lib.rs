@@ -23,8 +23,13 @@ pub mod simple_repository;
 pub use cache::*;
 pub use filesystem::*;
 pub use high_performance_scanner::*;
-pub use package_repository::{FilesystemPackageRepository, PackageRepository};
-pub use package_search::{ResourceSearchResult, get_plugins, get_reverse_dependency_tree};
+pub use package_repository::filesystem::{InstallPackageVariantsRequest, install_package_variants};
+pub use package_repository::{
+    FilesystemPackageRepository, InstallVariantOptions, PackageRepository,
+};
+pub use package_search::{
+    ResourceSearchResult, get_plugin_packages, get_plugins, get_reverse_dependency_tree,
+};
 pub use repository::{
     PackageSearchCriteria, Repository, RepositoryMetadata, RepositoryStats, RepositoryType,
     deduplicate_packages,
@@ -62,7 +67,12 @@ pub fn package_repo_stats(paths: Vec<String>) -> RepositoryStats {
             for entry in entries.flatten() {
                 let entry_path = entry.path();
                 if entry_path.is_dir() {
-                    let has_package_file = |dir: &std::path::Path| dir.join("package.py").exists();
+                    let has_package_file = |dir: &std::path::Path| {
+                        REZ_PACKAGE_FILENAMES
+                            .iter()
+                            .map(|name| dir.join(name))
+                            .any(|candidate| candidate.is_file())
+                    };
 
                     if has_package_file(&entry_path) {
                         combined_stats.package_count += 1;

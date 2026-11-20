@@ -13,6 +13,7 @@ The script reads:
 
 And produces:
   - metrics/benchmarking/RESULTS.md  (auto-generated, do NOT edit by hand)
+  - metrics/benchmarking/history.json  (optional versioned benchmark timeseries)
   - metrics/benchmarking/artifacts/<date>-<sha>/summary.json
 """
 
@@ -87,6 +88,57 @@ def load_bench_results(json_files: list[Path]) -> dict[str, dict]:
 
 def load_baseline(path: Path) -> dict:
     return json.loads(path.read_text())
+
+
+def update_history(history_path: Path, record: dict) -> None:
+    """Persist one benchmark run, replacing an existing run for the commit."""
+    if history_path.exists():
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+    else:
+        history = {"schema_version": 1, "runs": []}
+
+    if history.get("schema_version") != 1 or not isinstance(history.get("runs"), list):
+        raise ValueError(f"Unsupported benchmark history format: {history_path}")
+
+    runs = [run for run in history["runs"] if run.get("commit") != record["commit"]]
+    runs.append(record)
+    runs.sort(key=lambda run: (run.get("timestamp", ""), run.get("commit", "")))
+    history["runs"] = runs
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(json.dumps(history, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def history_record(
+    *,
+    results: dict[str, dict],
+    regressions: list[str],
+    sha: str,
+    timestamp: str,
+    platform_name: str,
+    cpu: str,
+    python_version: str,
+) -> dict:
+    """Build the stable, compact representation used by the history file."""
+    return {
+        "schema_version": 1,
+        "timestamp": timestamp,
+        "commit": sha,
+        "platform": platform_name,
+        "cpu": cpu,
+        "python": python_version,
+        "regressions": sorted(set(regressions)),
+        "benchmarks": {
+            name: {
+                "mean_ns": result["mean_ns"],
+                "low_ns": result["low_ns"],
+                "high_ns": result["high_ns"],
+                "change_pct": result.get("change_pct"),
+                "regression": result.get("regression", False),
+                "improved": result.get("improved", False),
+            }
+            for name, result in sorted(results.items())
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +257,7 @@ MEMORY_TABLE = """\
 # Main
 # ---------------------------------------------------------------------------
 
-def generate(bench_jsons: list[Path], output: Path) -> dict:
+def generate(bench_jsons: list[Path], output: Path, history_path: Path | None = None) -> dict:
     baseline_path = DATA_DIR / "rez_baseline.json"
     if not baseline_path.exists():
         sys.exit(f"Baseline not found: {baseline_path}")
@@ -300,6 +352,21 @@ See [`docs/performance.md`](../../docs/performance.md) for full methodology.
     }
     (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"[OK] Artifact: {artifact_dir / 'summary.json'}")
+
+    if history_path is not None:
+        update_history(
+            history_path,
+            history_record(
+                results=results,
+                regressions=regressions,
+                sha=sha,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                platform_name=os_info,
+                cpu=cpu,
+                python_version=py_ver,
+            ),
+        )
+        print(f"[OK] History: {history_path}")
     return summary
 
 
@@ -318,6 +385,11 @@ def main() -> None:
         default="metrics/benchmarking/RESULTS.md",
         help="Output Markdown file (default: metrics/benchmarking/RESULTS.md)",
     )
+    parser.add_argument(
+        "--history",
+        type=Path,
+        help="Optional versioned JSON timeseries to update",
+    )
     args = parser.parse_args()
 
     bench_jsons = [Path(p) for p in args.bench_jsons]
@@ -325,7 +397,7 @@ def main() -> None:
         if not p.exists():
             sys.exit(f"File not found: {p}")
 
-    generate(bench_jsons, Path(args.out))
+    generate(bench_jsons, Path(args.out), args.history)
 
 
 if __name__ == "__main__":

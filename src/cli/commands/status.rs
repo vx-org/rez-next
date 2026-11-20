@@ -2,11 +2,10 @@
 //!
 //! Implements the `rez status` command for displaying package and repository status.
 
-use crate::cli::utils::{expand_home_path, expand_home_str};
+use crate::cli::utils::expand_home_str;
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +14,12 @@ use std::path::PathBuf;
 #[derive(Args, Clone, Debug)]
 pub struct StatusArgs {
     /// Show status for specific package
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: Option<String>,
 
     /// Repository paths to check
@@ -113,40 +117,18 @@ async fn execute_status_async(args: &StatusArgs) -> RezCoreResult<()> {
 
 /// Setup repository manager
 async fn setup_repositories(args: &StatusArgs) -> RezCoreResult<RepositoryManager> {
-    let mut repo_manager = RepositoryManager::new();
-
-    let paths: Vec<PathBuf> = if args.paths.is_empty() {
+    let paths: Vec<String> = if args.paths.is_empty() {
         // Use configured packages_path from rez config
         let config = RezCoreConfig::load();
-        config
-            .packages_path
-            .iter()
-            .map(|p| {
-                let expanded = if p.starts_with("~/") || p == "~" {
-                    if let Ok(home) =
-                        std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
-                    {
-                        p.replacen("~", &home, 1)
-                    } else {
-                        p.clone()
-                    }
-                } else {
-                    p.clone()
-                };
-                PathBuf::from(expanded)
-            })
-            .collect()
+        config.packages_path.clone()
     } else {
-        args.paths.clone()
+        args.paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
     };
 
-    for (i, path) in paths.iter().enumerate() {
-        let repo_name = format!("repo_{i}");
-        let repository = FilesystemPackageRepository::with_name(path.clone(), repo_name);
-        repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-    }
-
-    Ok(repo_manager)
+    RepositoryManager::from_package_paths(paths)
 }
 
 /// Show status for a specific package
@@ -209,12 +191,10 @@ async fn show_repository_status(
 
     let paths = if args.paths.is_empty() {
         let config = RezCoreConfig::load();
-        let mut all_paths: Vec<PathBuf> = config
-            .packages_path
-            .iter()
-            .map(|p| expand_home_path(p))
-            .collect();
-        all_paths.push(PathBuf::from(expand_home_str(&config.local_packages_path)));
+        let mut all_paths = resolve_filesystem_paths(config.packages_path.clone())?;
+        all_paths.extend(resolve_filesystem_paths([config
+            .local_packages_path
+            .clone()])?);
         all_paths
     } else {
         args.paths.clone()
@@ -350,19 +330,7 @@ async fn show_general_status(
 
     // Repository information from config
     let paths = if args.paths.is_empty() {
-        config
-            .packages_path
-            .iter()
-            .map(|p| {
-                if (p.starts_with("~/") || p == "~")
-                    && let Ok(home) =
-                        std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
-                {
-                    return PathBuf::from(p.replacen("~", &home, 1));
-                }
-                PathBuf::from(p)
-            })
-            .collect::<Vec<_>>()
+        resolve_filesystem_paths(config.packages_path.clone())?
     } else {
         args.paths.clone()
     };

@@ -4,7 +4,7 @@
 //! reuses rez-next's repository manager, strict dependency solver, materialized
 //! packages and environment manager.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -17,7 +17,7 @@ use rez_next_context::{ContextConfig, ContextStatus, EnvironmentManager, Resolve
 use rez_next_package::{PackageRequirement, Requirement, VersionConstraint};
 use rez_next_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
-use rez_next_version::Version;
+use rez_next_version::{Version, VersionRange};
 
 mod installation_plan;
 mod repository;
@@ -89,6 +89,95 @@ pub enum RezRuntimeError {
 pub struct RuntimeTarget {
     platform: String,
     architecture: String,
+}
+
+#[derive(Default)]
+struct EphemeralRanges {
+    positive: Option<VersionRange>,
+    excluded: Vec<VersionRange>,
+}
+
+struct ResolvedEphemeral {
+    name: String,
+    range: VersionRange,
+}
+
+impl ResolvedEphemeral {
+    fn as_package_requirement(&self) -> PackageRequirement {
+        let version_spec = if self.range.is_any() {
+            None
+        } else {
+            Some(self.range.as_str().to_string())
+        };
+        PackageRequirement {
+            name: self.name.clone(),
+            version_spec,
+            weak: false,
+            conflict: false,
+        }
+    }
+}
+
+fn resolve_ephemeral_requirements(
+    requirements: Vec<Requirement>,
+) -> Result<(Vec<Requirement>, Vec<ResolvedEphemeral>), RezRuntimeError> {
+    let mut regular = Vec::new();
+    let mut grouped: BTreeMap<String, EphemeralRanges> = BTreeMap::new();
+
+    for requirement in requirements {
+        if !requirement.name.starts_with('.') {
+            regular.push(requirement);
+            continue;
+        }
+
+        let range = match &requirement.version_constraint {
+            None | Some(VersionConstraint::Any) => VersionRange::any(),
+            Some(VersionConstraint::Prefix(version)) => VersionRange::parse(version.as_str())
+                .map_err(|error| {
+                    RezRuntimeError::Resolve(RezCoreError::RequirementParse(format!(
+                        "Invalid ephemeral request '{}': {error}",
+                        requirement
+                    )))
+                })?,
+            Some(constraint) => VersionRange::parse(&constraint.to_string()).map_err(|error| {
+                RezRuntimeError::Resolve(RezCoreError::RequirementParse(format!(
+                    "Invalid ephemeral request '{}': {error}",
+                    requirement
+                )))
+            })?,
+        };
+        let ranges = grouped.entry(requirement.name.clone()).or_default();
+        if requirement.conflict {
+            ranges.excluded.push(range);
+        } else {
+            ranges.positive = Some(match ranges.positive.take() {
+                Some(current) => current.intersect(&range).ok_or_else(|| {
+                    RezRuntimeError::Resolve(RezCoreError::Solver(format!(
+                        "Ephemeral request '{}' has incompatible ranges",
+                        requirement.name
+                    )))
+                })?,
+                None => range,
+            });
+        }
+    }
+
+    let mut resolved = Vec::new();
+    for (name, ranges) in grouped {
+        let Some(mut range) = ranges.positive else {
+            continue;
+        };
+        for excluded in ranges.excluded {
+            range = range.subtract(&excluded).ok_or_else(|| {
+                RezRuntimeError::Resolve(RezCoreError::Solver(format!(
+                    "Ephemeral request '{name}' is fully excluded"
+                )))
+            })?;
+        }
+        resolved.push(ResolvedEphemeral { name, range });
+    }
+
+    Ok((regular, resolved))
 }
 
 impl RuntimeTarget {
@@ -231,14 +320,21 @@ impl RezRuntime {
             .into_iter()
             .map(|requirement| requirement.as_ref().trim().to_string())
             .collect();
-        let requested = requirement_texts
-            .iter()
-            .map(|requirement| Self::parse_requirement(requirement))
-            .collect::<Result<Vec<_>, _>>()?;
         let requested_solver_requirements = requirement_texts
             .iter()
             .map(|requirement| Self::parse_solver_requirement(requirement))
             .collect::<Result<Vec<_>, _>>()?;
+        let requested = requirement_texts
+            .iter()
+            .zip(&requested_solver_requirements)
+            .map(|(text, requirement)| {
+                if requirement.name.starts_with('.') {
+                    Ok(Self::package_requirement_from_solver(requirement))
+                } else {
+                    Self::parse_requirement(text)
+                }
+            })
+            .collect::<Result<Vec<_>, RezRuntimeError>>()?;
         let mut package_requirements = Vec::new();
         let mut solver_requirements = Vec::new();
         if let Some(target) = &self.target {
@@ -279,6 +375,8 @@ impl RezRuntime {
         }
         package_requirements.extend(requested);
         solver_requirements.extend(requested_solver_requirements);
+        let (solver_requirements, resolved_ephemerals) =
+            resolve_ephemeral_requirements(solver_requirements)?;
 
         let mut repositories = RepositoryManager::new();
         for (index, path) in self.package_paths.iter().enumerate() {
@@ -289,7 +387,7 @@ impl RezRuntime {
             ));
         }
         for requirement in &package_requirements {
-            if requirement.conflict || requirement.weak {
+            if requirement.conflict || requirement.weak || requirement.name.starts_with('.') {
                 continue;
             }
             if repositories
@@ -305,18 +403,25 @@ impl RezRuntime {
         }
         let resolution =
             DependencyResolver::new(Arc::new(repositories), self.solver_config.clone())
-                .resolve(solver_requirements)
+                .resolve_with_ephemerals(solver_requirements)
                 .await
                 .map_err(RezRuntimeError::Resolve)?;
 
         let mut context = ResolvedContext::from_requirements(package_requirements);
         context.config = self.context_config.clone();
         context.resolved_packages = resolution
+            .result
             .resolved_packages
             .iter()
             .map(|package| package.try_materialized_package())
             .collect::<Result<Vec<_>, _>>()
             .map_err(RezRuntimeError::Resolve)?;
+        context.set_resolved_ephemerals(
+            resolved_ephemerals
+                .iter()
+                .map(ResolvedEphemeral::as_package_requirement)
+                .collect(),
+        );
         context.status = ContextStatus::Resolved;
         if let Some(target) = &self.target {
             for (family, expected) in [
@@ -395,6 +500,19 @@ impl RezRuntime {
         })
     }
 
+    fn package_requirement_from_solver(requirement: &Requirement) -> PackageRequirement {
+        PackageRequirement {
+            name: requirement.name.clone(),
+            version_spec: requirement
+                .version_constraint
+                .as_ref()
+                .map(ToString::to_string)
+                .filter(|spec| !spec.is_empty()),
+            weak: requirement.weak,
+            conflict: requirement.conflict,
+        }
+    }
+
     fn parse_solver_requirement(requirement: &str) -> Result<Requirement, RezRuntimeError> {
         let parsed: Requirement =
             requirement
@@ -403,8 +521,9 @@ impl RezRuntime {
                     requirement: requirement.to_string(),
                     source: RezCoreError::RequirementParse(message),
                 })?;
+        let is_ephemeral = parsed.name.starts_with('.');
         if parsed.name.is_empty()
-            || parsed.name.starts_with('.')
+            || (is_ephemeral && parsed.name.len() == 1)
             || !parsed
                 .name
                 .bytes()

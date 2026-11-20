@@ -6,7 +6,7 @@
 //! - `utility`: Utility functions (get_completions, package_schema, dump_package_data, etc.)
 //! - `uri`: URI functions (get_package_from_uri, get_variant_from_uri, etc.) - in parent `package_uri_functions.rs`
 
-use std::path::PathBuf;
+use pyo3::prelude::*;
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────────
 pub(crate) mod management;
@@ -14,7 +14,10 @@ pub(crate) mod query;
 pub(crate) mod utility;
 
 // ── Re-exports for lib.rs ───────────────────────────────────────────────────────
-pub use management::{copy_package, create_package, move_package, remove_package};
+pub use management::{
+    copy_package, copy_package_with_options, create_package, move_package,
+    move_package_with_options, remove_package,
+};
 pub use query::{
     get_latest_package, get_latest_package_from_string, get_package, get_package_family_names,
     get_package_from_string, iter_package_families, iter_packages, resolve_packages, walk_packages,
@@ -40,34 +43,24 @@ pub(crate) fn expand_home(p: &str) -> String {
 /// Build a `RepositoryManager` from the provided or configured package paths.
 pub(crate) fn make_repo_manager(
     paths: Option<Vec<String>>,
-) -> rez_next_repository::simple_repository::RepositoryManager {
+) -> PyResult<rez_next_repository::simple_repository::RepositoryManager> {
     use rez_next_common::config::RezCoreConfig;
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
 
     let config = RezCoreConfig::load();
-    let mut repo_manager = RepositoryManager::new();
 
-    let pkg_paths: Vec<PathBuf> = paths
-        .map(|p| p.into_iter().map(PathBuf::from).collect())
+    let pkg_paths: Vec<String> = paths
+        .map(|p| p.into_iter().map(|p| expand_home(&p)).collect())
         .unwrap_or_else(|| {
             config
                 .packages_path
                 .iter()
-                .map(|p| PathBuf::from(expand_home(p)))
+                .map(|p| expand_home(p))
                 .collect()
         });
 
-    for (i, path) in pkg_paths.iter().enumerate() {
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
-
-    repo_manager
+    RepositoryManager::from_package_paths(pkg_paths)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Recursively copy a directory tree (used by tests and legacy paths).

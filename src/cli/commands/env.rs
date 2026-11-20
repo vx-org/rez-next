@@ -4,13 +4,12 @@
 //! This command resolves package requirements and spawns a shell with the resolved environment.
 
 use clap::Args;
-use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
-use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext, ShellType};
+use rez_next_common::{RezCoreError, SystemInfo, config::RezCoreConfig, error::RezCoreResult};
+use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_rex::{RexEnvironment, ShellType as RexShellType, generate_shell_script};
+use rez_next_rex::{RexEnvironment, ShellType, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,7 +22,12 @@ use crate::cli::utils::split_package_paths;
 #[derive(Args, Clone)]
 pub struct EnvArgs {
     /// Package requests to resolve (e.g., "python-3.9" "maya-2023")
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub packages: Vec<String>,
 
     /// Command and arguments to execute (passed after '--')
@@ -93,6 +97,10 @@ pub struct EnvArgs {
     /// Exclude the configured local package repository
     #[arg(long = "no-local")]
     pub no_local: bool,
+
+    /// Do not append configured implicit package requests
+    #[arg(long = "no-implicit")]
+    pub no_implicit: bool,
 
     /// Mark the context as a build environment
     #[arg(long)]
@@ -207,20 +215,12 @@ fn resolve_environment(
     // actions then prepend, append, set, or unset values on top of it.
     let mut config = ContextConfig {
         inherit_parent_env: true,
-        ..Default::default()
+        ..ContextConfig::default()
     };
 
-    // Set shell type based on args
-    if let Some(shell) = &args.shell {
-        config.shell_type = match shell.as_str() {
-            "bash" => ShellType::Bash,
-            "zsh" => ShellType::Zsh,
-            "fish" => ShellType::Fish,
-            "cmd" => ShellType::Cmd,
-            "powershell" | "pwsh" => ShellType::PowerShell,
-            _ => ShellType::Bash,
-        };
-    }
+    let rez_config = RezCoreConfig::load();
+    config.shell_type =
+        resolve_shell_type(args.shell.as_deref(), &rez_config.default_shell)?.into();
 
     if args.build {
         config
@@ -229,37 +229,39 @@ fn resolve_environment(
     }
 
     // Setup repository manager from config or args
-    let mut repo_manager = RepositoryManager::new();
-    let rez_config = RezCoreConfig::load();
+    config.set_parent_variables(rez_config.parent_variables.clone());
+    config.set_all_parent_variables(rez_config.all_parent_variables);
+    let implicit_packages =
+        configured_implicit_requirements(&rez_config, &SystemInfo::detect(), args.no_implicit)?;
 
     // Add configured package paths as repositories
-    let mut package_paths: Vec<PathBuf> = if let Some(ref paths_str) = args.paths {
+    let configured_entries: Vec<String> = if let Some(ref paths_str) = args.paths {
         split_package_paths(paths_str)
-    } else {
-        rez_config
-            .packages_path
-            .iter()
-            .map(|path| expand_home(path))
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
             .collect()
+    } else {
+        rez_config.packages_path.clone()
     };
+    let mut package_paths = resolve_filesystem_paths(configured_entries)?;
 
     if args.no_local {
         let local_packages_path = expand_home(&rez_config.local_packages_path);
         package_paths.retain(|path| !same_path(path, &local_packages_path));
     }
 
-    for (i, path) in package_paths.iter().enumerate() {
-        if path.exists() {
-            let repo = FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repo)));
-        }
-    }
+    let repo_manager = RepositoryManager::from_package_paths(
+        package_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    )?;
 
     let repo_arc = Arc::new(repo_manager);
 
     // Convert PackageRequirement -> Requirement via string parsing
     let resolver_reqs: Vec<Requirement> = requirements
         .iter()
+        .chain(&implicit_packages)
         .map(|pr| {
             let req_str = pr.to_string();
             req_str
@@ -276,19 +278,54 @@ fn resolve_environment(
         ..SolverConfig::default()
     };
     let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), solver_config);
-    let resolution = rt.block_on(resolver.resolve(resolver_reqs))?;
+    let resolution = rt.block_on(resolver.resolve_with_ephemerals(resolver_reqs))?;
 
     // Build context from resolution result
     let mut context = ResolvedContext::from_requirements(requirements.to_vec());
+    context.set_implicit_packages(implicit_packages);
     context.config = config;
     context.resolved_packages = resolution
+        .result
         .resolved_packages
         .iter()
         .map(|package| package.try_materialized_package())
         .collect::<Result<Vec<_>, _>>()?;
+    context.set_resolved_ephemerals(
+        resolution
+            .resolved_ephemerals
+            .iter()
+            .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+            .collect(),
+    );
     context.status = rez_next_context::ContextStatus::Resolved;
 
     Ok(context)
+}
+
+fn configured_implicit_requirements(
+    config: &RezCoreConfig,
+    system: &SystemInfo,
+    disabled: bool,
+) -> RezCoreResult<Vec<PackageRequirement>> {
+    if disabled {
+        Ok(Vec::new())
+    } else {
+        config
+            .implicit_packages
+            .iter()
+            .map(|request| {
+                let expanded = request
+                    .replace("{system.platform}", &system.platform)
+                    .replace("{system.arch}", &system.arch)
+                    .replace("{system.os}", &system.os);
+                PackageRequirement::parse(&expanded).map_err(|error| {
+                    RezCoreError::ConfigError(format!(
+                        "Invalid implicit package request '{request}': {error}"
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 fn expand_home(path: &str) -> PathBuf {
@@ -377,6 +414,28 @@ fn context_environment(
     environment
         .vars
         .insert("REZ_USED_PACKAGES_NAMES".to_string(), resolved);
+    let implicit_packages = context
+        .implicit_packages()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !implicit_packages.is_empty() {
+        environment
+            .vars
+            .insert("REZ_USED_IMPLICIT_PACKAGES".to_string(), implicit_packages);
+    }
+    let ephemeral_resolve = context
+        .resolved_ephemerals()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !ephemeral_resolve.is_empty() {
+        environment
+            .vars
+            .insert("REZ_USED_EPH_RESOLVE".to_string(), ephemeral_resolve);
+    }
     if let Some(path) = rxt_path {
         environment.vars.insert(
             "REZ_RXT_FILE".to_string(),
@@ -456,43 +515,45 @@ fn print_environment(context: &ResolvedContext, args: &EnvArgs) -> RezCoreResult
     Ok(())
 }
 
+fn resolve_shell_type(explicit: Option<&str>, configured: &str) -> RezCoreResult<ShellType> {
+    let requested = explicit
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| (!configured.trim().is_empty()).then_some(configured));
+
+    requested
+        .map(|value| {
+            value.parse().map_err(|error: String| {
+                RezCoreError::ExecutionError(format!("Unsupported shell '{value}': {error}"))
+            })
+        })
+        .unwrap_or_else(|| Ok(ShellType::detect()))
+}
+
+fn activation_filename(shell_type: &ShellType) -> String {
+    if matches!(shell_type, ShellType::Zsh) {
+        ".zshrc".to_string()
+    } else {
+        format!("rez-env.{}", shell_type.script_extension())
+    }
+}
+
 /// Print shell activation script for the resolved environment
 fn print_shell_script(context: &ResolvedContext, args: &EnvArgs) -> RezCoreResult<()> {
     let environment = context_environment(context, None)?;
-
-    // Determine shell type
-    let shell_str =
-        args.shell
-            .as_deref()
-            .unwrap_or(if cfg!(windows) { "powershell" } else { "bash" });
-
-    let rex_shell = match shell_str {
-        "bash" | "sh" => RexShellType::Bash,
-        "zsh" => RexShellType::Zsh,
-        "fish" => RexShellType::Fish,
-        "cmd" => RexShellType::Cmd,
-        "powershell" | "pwsh" => RexShellType::PowerShell,
-        _ => RexShellType::Bash,
-    };
-
-    let script = generate_shell_script(&environment, &rex_shell);
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
+    let script = generate_shell_script(&environment, &shell_type);
     println!("{}", script);
     Ok(())
 }
 
 fn create_activation_script(
     environment: &mut RexEnvironment,
-    shell_type: &RexShellType,
+    shell_type: &ShellType,
     trailing_command: Option<&str>,
 ) -> RezCoreResult<(tempfile::TempDir, PathBuf)> {
     let directory = tempfile::tempdir().map_err(RezCoreError::Io)?;
-    let filename = match shell_type {
-        RexShellType::Bash => "rez-env.sh",
-        RexShellType::Zsh => ".zshrc",
-        RexShellType::Fish => "rez-env.fish",
-        RexShellType::Cmd => "rez-env.cmd",
-        RexShellType::PowerShell => "rez-env.ps1",
-    };
+    let filename = activation_filename(shell_type);
     let path = directory.path().join(filename);
     environment.vars.insert(
         "REZ_CONTEXT_FILE".to_string(),
@@ -500,11 +561,7 @@ fn create_activation_script(
     );
     let mut script = generate_shell_script(environment, shell_type);
     if let Some(command) = trailing_command {
-        script.push_str(if matches!(shell_type, RexShellType::Cmd) {
-            "\r\n"
-        } else {
-            "\n"
-        });
+        script.push_str(if shell_type.is_cmd() { "\r\n" } else { "\n" });
         script.push_str(command);
     }
     std::fs::write(&path, script).map_err(RezCoreError::Io)?;
@@ -559,27 +616,18 @@ fn execute_shell_command_in_environment(
         );
     }
 
-    let shell = args
-        .shell
-        .as_deref()
-        .unwrap_or(if cfg!(windows) { "cmd" } else { "bash" });
-    let shell_type = shell
-        .parse::<RexShellType>()
-        .map_err(RezCoreError::ExecutionError)?;
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
     let (activation_directory, activation_script) =
         create_activation_script(&mut environment, &shell_type, Some(command))?;
 
-    let mut cmd = Command::new(shell);
-    match shell_type {
-        RexShellType::Cmd => {
-            cmd.args(["/D", "/S", "/C"]).arg(&activation_script);
-        }
-        RexShellType::PowerShell => {
-            cmd.args(["-NoProfile", "-File"]).arg(&activation_script);
-        }
-        _ => {
-            cmd.arg(&activation_script);
-        }
+    let mut cmd = Command::new(shell_type.executable());
+    if shell_type.is_cmd() {
+        cmd.args(["/D", "/S", "/C"]).arg(&activation_script);
+    } else if shell_type.is_power_shell() {
+        cmd.args(["-NoProfile", "-File"]).arg(&activation_script);
+    } else {
+        cmd.arg(&activation_script);
     }
 
     cmd.envs(&environment.vars);
@@ -663,40 +711,33 @@ fn spawn_shell_in_context(
         print_context_summary(context, "You are now in a rez-configured environment.");
     }
 
-    // Determine shell executable
-    let shell_exe = if cfg!(target_os = "windows") {
-        args.shell.as_deref().unwrap_or("cmd")
-    } else {
-        args.shell.as_deref().unwrap_or("bash")
-    };
-    let shell_type = shell_exe
-        .parse::<RexShellType>()
-        .map_err(RezCoreError::ExecutionError)?;
+    let config = RezCoreConfig::load();
+    let shell_type = resolve_shell_type(args.shell.as_deref(), &config.default_shell)?;
     let (activation_directory, activation_script) =
         create_activation_script(&mut environment, &shell_type, None)?;
 
     // Create shell command
-    let mut cmd = Command::new(shell_exe);
+    let mut cmd = Command::new(shell_type.executable());
 
-    match shell_type {
-        RexShellType::Cmd => {
-            cmd.args(["/D", "/K"]).arg(&activation_script);
-        }
-        RexShellType::PowerShell => {
-            cmd.args(["-NoExit", "-File"]).arg(&activation_script);
-        }
-        RexShellType::Bash => {
-            cmd.arg("--rcfile").arg(&activation_script).arg("-i");
-        }
-        RexShellType::Zsh => {
-            cmd.arg("-i");
-            cmd.env("ZDOTDIR", activation_directory.path());
-        }
-        RexShellType::Fish => {
-            cmd.arg("-C")
-                .arg(format!("source '{}'", activation_script.display()))
-                .arg("-i");
-        }
+    if shell_type.is_cmd() {
+        cmd.args(["/D", "/K"]).arg(&activation_script);
+    } else if shell_type.is_power_shell() {
+        cmd.args(["-NoExit", "-File"]).arg(&activation_script);
+    } else if matches!(shell_type, ShellType::Bash | ShellType::GitBash) {
+        cmd.arg("--rcfile").arg(&activation_script).arg("-i");
+    } else if matches!(shell_type, ShellType::Zsh) {
+        cmd.arg("-i");
+        cmd.env("ZDOTDIR", activation_directory.path());
+    } else if matches!(shell_type, ShellType::Fish) {
+        cmd.arg("-C")
+            .arg(format!("source '{}'", activation_script.display()))
+            .arg("-i");
+    } else {
+        cmd.arg("-i").arg("-c").arg(format!(
+            ". \"{}\"; exec {} -i",
+            activation_script.display(),
+            shell_type.executable()
+        ));
     }
 
     cmd.envs(&environment.vars);
@@ -741,6 +782,7 @@ mod tests {
             format: None,
             paths: None,
             no_local: false,
+            no_implicit: false,
             build: false,
             time: None,
             verbose: 0,
@@ -767,6 +809,39 @@ mod tests {
         assert_eq!(requirements[0].name(), "python");
         assert_eq!(requirements[1].name(), "python");
         assert_eq!(requirements[2].name(), "maya");
+    }
+
+    #[test]
+    fn test_configured_implicit_requirements_expand_system_values_and_can_be_disabled() {
+        let mut config = RezCoreConfig::default();
+        config.implicit_packages = vec![
+            "~platform=={system.platform}".to_string(),
+            "~arch=={system.arch}".to_string(),
+            "~os=={system.os}".to_string(),
+        ];
+        let system = SystemInfo {
+            platform: "test-platform".to_string(),
+            arch: "test-arch".to_string(),
+            os: "test-os".to_string(),
+        };
+
+        let requirements = configured_implicit_requirements(&config, &system, false).unwrap();
+        assert_eq!(
+            requirements
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [
+                "~platform==test-platform",
+                "~arch==test-arch",
+                "~os==test-os",
+            ]
+        );
+        assert!(
+            configured_implicit_requirements(&config, &system, true)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -819,6 +894,7 @@ mod tests {
             format: None,
             paths: Some(temp.path().to_string_lossy().into_owned()),
             no_local: false,
+            no_implicit: false,
             build: false,
             time: None,
             verbose: 0,
@@ -837,6 +913,16 @@ mod tests {
     fn test_context_environment_exposes_resolve_metadata() {
         let requirements = parse_package_requirements(&["tool-1".to_string()]).unwrap();
         let mut context = ResolvedContext::from_requirements(requirements);
+        context.set_implicit_packages(
+            parse_package_requirements(&[
+                "~platform==windows".to_string(),
+                "~arch==x86_64".to_string(),
+            ])
+            .unwrap(),
+        );
+        context.set_resolved_ephemerals(
+            parse_package_requirements(&[".feature>=1".to_string()]).unwrap(),
+        );
         context.config.inherit_parent_env = false;
         let mut package = rez_next_package::Package::new("tool".to_string());
         package.version = Some(rez_next_version::Version::parse("1.2.0").unwrap());
@@ -847,6 +933,14 @@ mod tests {
         assert_eq!(
             environment.vars.get("REZ_USED_REQUEST"),
             Some(&"tool-1".to_string())
+        );
+        assert_eq!(
+            environment.vars.get("REZ_USED_IMPLICIT_PACKAGES"),
+            Some(&"~platform==windows ~arch==x86_64".to_string())
+        );
+        assert_eq!(
+            environment.vars.get("REZ_USED_EPH_RESOLVE"),
+            Some(&".feature>=1".to_string())
         );
         assert_eq!(
             environment.vars.get("REZ_USED_RESOLVE"),

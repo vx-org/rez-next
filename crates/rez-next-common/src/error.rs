@@ -50,6 +50,14 @@ pub enum RezCoreError {
     #[error("Build error: {0}")]
     BuildError(String),
 
+    /// A failure reported by a release version-control backend.
+    ///
+    /// Keeping this distinct from [`Self::BuildError`] lets release callers
+    /// apply the upstream `skip_repo_errors` policy without suppressing build
+    /// or package failures.
+    #[error("Release VCS error: {0}")]
+    ReleaseVCSError(String),
+
     #[error("Execution error: {0}")]
     ExecutionError(String),
 

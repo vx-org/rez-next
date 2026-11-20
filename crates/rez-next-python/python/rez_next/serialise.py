@@ -86,7 +86,8 @@ def load_from_file(
         filepath: Path to the file.
         format_: File format (default: ``FileFormat.py``).
         update_data_callback: Optional callback ``(format_, data) -> data``.
-        disable_memcache: If True, skip memcache (no-op in this impl).
+        disable_memcache: Accepted for Rez compatibility. rez-next has no
+            Memcached backend, so this flag has no effect.
 
     Returns:
         Parsed data: ``dict`` for ``.py`` and ``str`` for ``.txt``.
@@ -267,7 +268,11 @@ def process_python_objects(data: dict[str, Any], filepath: str | None = None) ->
 
 
 def clear_file_caches() -> None:
-    """Clear all file caches (memcache + local NFS cache)."""
+    """Clear the local file cache.
+
+    The upstream Memcached cache is not available in rez-next, so there is no
+    remote cache to clear.
+    """
     _file_cache.clear()
 
 

@@ -311,7 +311,7 @@ See [benchmark_guide.md](./benchmark_guide.md) for details.
 ## Known Limitations
 
 1. **Not all Rez APIs implemented** - Check the table above for coverage
-2. **Some advanced APIs are excluded** - Variant URI lookup, cached pure-Python resolver execution, and direct repository variant installation fail explicitly
+2. **Some advanced APIs are excluded** - Cached pure-Python resolver execution remains outside the native compatibility surface
 3. **Pre-1.0 project** - API may change
 4. **Python 3.9+ required** - For abi3-py39 support
 

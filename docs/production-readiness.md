@@ -23,6 +23,11 @@ internal Python modules.
 - Checksum-verified self-update: release assets are installed only after an
   exact SHA-256 entry is found and verified.
 
+The rez-next extension key `build_script_names` controls the filename probe
+order for packages that use filename-based custom build detection. Its default
+is `build.sh`, `build.bat`, `build.py`, then `build`. Upstream rez has no
+equivalent setting because its custom build contract is `build_command`.
+
 ## Explicit exclusions
 
 Unsupported operations fail with an error instead of reporting success or a
@@ -30,14 +35,10 @@ repository miss:
 
 - Rez internal implementation namespaces are not mirrored.
 - In-process Python CLI dispatch is not supported; invoke `rez` or `rez-next`.
-- Variant lookup by URI and direct filesystem `install_variant` are not yet
-  supported.
 - The pure-Python `Resolver` does not provide a solve cache until safe
   repository invalidation is implemented.
 - CLI build script generation (`--scripts`) is not yet supported. The command
   fails before loading sources, executing a builder, or installing files.
-- CLI release currently supports Git. Mercurial and SVN are available through
-  the lower-level VCS library but are not part of the CLI release contract.
 - Advanced copy options such as variant selection, destination renaming,
   timestamp preservation, and dry-run are rejected until implemented.
 

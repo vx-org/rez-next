@@ -710,6 +710,59 @@ mod tests {
     }
 
     #[test]
+    fn test_later_dependency_can_reselect_variant_of_same_package_version() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_package(tmp.path(), "python", "2.7.18", &[]);
+        write_package(tmp.path(), "python", "3.11.9", &[]);
+        write_package(tmp.path(), "application", "1.0.0", &["python-3"]);
+
+        let bridge_dir = tmp.path().join("bridge").join("1.0.0");
+        std::fs::create_dir_all(&bridge_dir).unwrap();
+        std::fs::write(
+            bridge_dir.join("package.py"),
+            "name = 'bridge'\nversion = '1.0.0'\nvariants = [['python-2'], ['python-3']]\n",
+        )
+        .unwrap();
+
+        let mut manager = RepositoryManager::new();
+        manager.add_repository(Box::new(SimpleRepository::new(
+            tmp.path(),
+            "test".to_string(),
+        )));
+        let mut resolver = DependencyResolver::new(
+            Arc::new(manager),
+            SolverConfig {
+                strict_mode: true,
+                ..SolverConfig::default()
+            },
+        );
+
+        let result = rt
+            .block_on(resolver.resolve(vec![
+                Requirement::new("bridge".to_string()),
+                Requirement::new("application".to_string()),
+            ]))
+            .expect("the bridge variant should follow the later Python constraint");
+
+        let bridge = result
+            .resolved_packages
+            .iter()
+            .find(|resolved| resolved.package.name == "bridge")
+            .unwrap();
+        let python = result
+            .resolved_packages
+            .iter()
+            .find(|resolved| resolved.package.name == "python")
+            .unwrap();
+        assert_eq!(bridge.variant_index, Some(1));
+        assert_eq!(
+            python.package.version.as_ref().unwrap().to_string(),
+            "3.11.9"
+        );
+    }
+
+    #[test]
     fn test_missing_weak_requirement_does_not_fail_strict_resolve() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let mut resolver = DependencyResolver::new(
@@ -861,5 +914,151 @@ mod tests {
                 .to_string(),
             "1.0.0"
         );
+    }
+
+    #[test]
+    fn test_nested_python_family_variants_converge_without_stale_failures() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_package(tmp.path(), "python", "2.7.14", &[]);
+        write_package(tmp.path(), "python", "3.11.9", &[]);
+        write_package(tmp.path(), "embedded", "1.0.0", &[]);
+        write_package(tmp.path(), "configparser", "3.5.0", &[]);
+        write_package(tmp.path(), "database", "0.19.0", &[]);
+        write_package(tmp.path(), "database", "0.29.0", &[]);
+        write_package(tmp.path(), "url_client", "1.26.14", &["python-2.7..4"]);
+
+        let write_variant_package =
+            |name: &str, version: &str, requires: &[&str], variants: &[&[&str]]| {
+                let package_dir = tmp.path().join(name).join(version);
+                std::fs::create_dir_all(&package_dir).unwrap();
+                let mut content = format!("name = '{name}'\nversion = '{version}'\n");
+                if !requires.is_empty() {
+                    content.push_str("requires = [\n");
+                    for requirement in requires {
+                        content.push_str(&format!("    '{requirement}',\n"));
+                    }
+                    content.push_str("]\n");
+                }
+                content.push_str("variants = [\n");
+                for variant in variants {
+                    let requirements = variant
+                        .iter()
+                        .map(|requirement| format!("'{requirement}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    content.push_str(&format!("    [{requirements}],\n"));
+                }
+                content.push_str("]\n");
+                std::fs::write(package_dir.join("package.py"), content).unwrap();
+            };
+
+        write_variant_package("compat_map", "1.0.3", &[], &[&["python-3"], &["python-2"]]);
+        write_variant_package(
+            "environment",
+            "21.1.0",
+            &["python-2.7..3.12"],
+            &[&["python-2.7", "configparser-3.5"], &["python-3"]],
+        );
+        write_variant_package(
+            "helper",
+            "0.4.2",
+            &["python-2.7..4", "environment-21.1..25", "compat_map-1.0"],
+            &[
+                &["python-2", "database-0.19"],
+                &["python-3", "database-0.23..0.30"],
+            ],
+        );
+        write_package(
+            tmp.path(),
+            "application",
+            "4.5.5",
+            &["~python-3.11", "embedded-1"],
+        );
+        write_package(
+            tmp.path(),
+            "launcher",
+            "0.5.9",
+            &[
+                "python-2.7..4",
+                "helper-0",
+                "environment-21.1..25",
+                "compat_map-1.0",
+                "url_client-1",
+            ],
+        );
+
+        let mut manager = RepositoryManager::new();
+        manager.add_repository(Box::new(SimpleRepository::new(
+            tmp.path(),
+            "test".to_string(),
+        )));
+        let mut resolver = DependencyResolver::new(
+            Arc::new(manager),
+            SolverConfig {
+                strict_mode: true,
+                ..SolverConfig::default()
+            },
+        );
+
+        let result = rt
+            .block_on(resolver.resolve(vec![
+                "application-4.5.5".parse().unwrap(),
+                "launcher-0".parse().unwrap(),
+            ]))
+            .expect("compatible Python 3 variants should converge");
+
+        assert!(result.failed_requirements.is_empty());
+        let python = result
+            .resolved_packages
+            .iter()
+            .find(|resolved| resolved.package.name == "python")
+            .unwrap();
+        assert_eq!(
+            python.package.version.as_ref().unwrap().to_string(),
+            "3.11.9"
+        );
+        let expected_variants = [("compat_map", 0), ("environment", 1), ("helper", 1)];
+        for (package_name, expected_variant) in expected_variants {
+            let resolved = result
+                .resolved_packages
+                .iter()
+                .find(|resolved| resolved.package.name == package_name)
+                .unwrap();
+            assert_eq!(
+                resolved.variant_index,
+                Some(expected_variant),
+                "{package_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strict_failure_reports_each_unsatisfied_requirement_once() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_package(tmp.path(), "application", "1.0.0", &["shared_missing-1"]);
+        write_package(tmp.path(), "plugin", "1.0.0", &["shared_missing-1"]);
+
+        let mut manager = RepositoryManager::new();
+        manager.add_repository(Box::new(SimpleRepository::new(
+            tmp.path(),
+            "test".to_string(),
+        )));
+        let mut resolver = DependencyResolver::new(
+            Arc::new(manager),
+            SolverConfig {
+                strict_mode: true,
+                ..SolverConfig::default()
+            },
+        );
+
+        let error = rt
+            .block_on(resolver.resolve(vec![
+                Requirement::new("application".to_string()),
+                Requirement::new("plugin".to_string()),
+            ]))
+            .expect_err("the shared dependency is unavailable");
+        assert_eq!(error.to_string().matches("shared_missing-1").count(), 1);
     }
 }

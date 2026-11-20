@@ -4,9 +4,10 @@ import pytest
 from rez_next.release_hook import (
     ReleaseHook,
     ReleaseHookEvent,
-    get_release_hook_types,
     create_release_hook,
     create_release_hooks,
+    get_release_hook_types,
+    run_hooks,
 )
 
 
@@ -90,3 +91,61 @@ class TestFactoryFunctions:
     def test_create_release_hooks_graceful_fallback(self):
         hooks = create_release_hooks(["nonexistent"], "/tmp")
         assert hooks == []
+
+    def test_run_hooks_dispatches_configured_event(self, monkeypatch):
+        calls = []
+
+        class Hook(ReleaseHook):
+            @classmethod
+            def name(cls):
+                return "test"
+
+            def pre_release(self, **kwargs):
+                calls.append(kwargs)
+
+        from rez_next import config as config_module
+
+        monkeypatch.setattr(
+            config_module,
+            "get",
+            lambda key, default=None: ["test"] if key == "release_hooks" else default,
+        )
+        monkeypatch.setattr(
+            "rez_next.release_hook.create_release_hooks",
+            lambda names, source_path: [Hook(source_path)],
+        )
+
+        run_hooks(
+            ReleaseHookEvent.pre_release,
+            source_path="/tmp/source",
+            user="tester",
+        )
+
+        assert calls == [{"user": "tester"}]
+
+    def test_run_hooks_preserves_cancellation(self, monkeypatch):
+        from rez_next.exceptions import ReleaseHookCancellingError
+
+        class Hook(ReleaseHook):
+            @classmethod
+            def name(cls):
+                return "test"
+
+            def pre_release(self, **kwargs):
+                raise ReleaseHookCancellingError("cancelled")
+
+        monkeypatch.setattr(
+            "rez_next.release_hook.create_release_hooks",
+            lambda names, source_path: [Hook(source_path)],
+        )
+
+        from rez_next import config as config_module
+
+        monkeypatch.setattr(
+            config_module,
+            "get",
+            lambda key, default=None: ["test"] if key == "release_hooks" else default,
+        )
+
+        with pytest.raises(ReleaseHookCancellingError, match="cancelled"):
+            run_hooks(ReleaseHookEvent.pre_release, source_path="/tmp/source")

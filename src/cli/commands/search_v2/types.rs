@@ -10,7 +10,12 @@ use std::sync::Arc;
 #[derive(Args, Clone)]
 pub struct SearchArgs {
     /// Search query (package name, description, or pattern)
-    #[arg(value_name = "QUERY")]
+    #[arg(
+        value_name = "QUERY",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub query: String,
 
     /// Repository paths to search

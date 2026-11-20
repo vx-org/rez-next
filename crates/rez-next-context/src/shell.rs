@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command as AsyncCommand;
 
-/// Supported shell types
+/// Supported shell types retained at the context crate's historical API path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ShellType {
     /// Bash shell
@@ -23,100 +23,147 @@ pub enum ShellType {
 }
 
 impl ShellType {
-    /// Get the shell executable name
-    pub fn executable(&self) -> &'static str {
+    /// Get the shell executable name.
+    pub const fn executable(&self) -> &'static str {
         match self {
-            ShellType::Bash => "bash",
-            ShellType::Zsh => "zsh",
-            ShellType::Fish => "fish",
-            ShellType::Cmd => "cmd",
-            ShellType::PowerShell => "powershell",
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+            Self::Fish => "fish",
+            Self::Cmd => "cmd",
+            Self::PowerShell => "powershell",
         }
     }
 
-    /// Resolve the shell against the parent process environment before a
-    /// command replaces PATH with a Rez context. The returned absolute path
-    /// keeps the shell launchable even when the resolved context contains only
-    /// package-provided tools.
-    fn executable_path(&self) -> PathBuf {
-        if self == &ShellType::Cmd
-            && let Some(comspec) = std::env::var_os("COMSPEC")
+    /// Get the shell script extension.
+    pub const fn script_extension(&self) -> &'static str {
+        match self {
+            Self::Bash | Self::Zsh => "sh",
+            Self::Fish => "fish",
+            Self::Cmd => "bat",
+            Self::PowerShell => "ps1",
+        }
+    }
+
+    /// Get the shell command flag.
+    pub const fn command_flag(&self) -> &'static str {
+        match self {
+            Self::Bash | Self::Zsh | Self::Fish => "-c",
+            Self::Cmd => "/c",
+            Self::PowerShell => "-Command",
+        }
+    }
+
+    /// Detect the shell from the parent process environment.
+    pub fn detect() -> Self {
+        if let Ok(shell) = std::env::var("SHELL") {
+            if shell.contains("zsh") {
+                return Self::Zsh;
+            }
+            if shell.contains("fish") {
+                return Self::Fish;
+            }
+            if shell.contains("bash") {
+                return Self::Bash;
+            }
+        }
+        if cfg!(windows) { Self::Cmd } else { Self::Bash }
+    }
+
+    /// Parse a shell name or executable alias.
+    pub fn parse(value: &str) -> Option<Self> {
+        let executable = value.rsplit(['/', '\\']).next().unwrap_or(value);
+        let executable = executable.strip_suffix(".exe").unwrap_or(executable);
+        match executable.to_ascii_lowercase().as_str() {
+            "bash" => Some(Self::Bash),
+            "zsh" => Some(Self::Zsh),
+            "fish" => Some(Self::Fish),
+            "cmd" => Some(Self::Cmd),
+            "powershell" | "pwsh" | "ps1" => Some(Self::PowerShell),
+            "sh" => Some(Self::Bash),
+            _ => None,
+        }
+    }
+
+    pub const fn is_cmd(&self) -> bool {
+        matches!(self, Self::Cmd)
+    }
+
+    pub const fn is_power_shell(&self) -> bool {
+        matches!(self, Self::PowerShell)
+    }
+}
+
+impl From<ShellType> for rez_next_common::ShellType {
+    fn from(shell: ShellType) -> Self {
+        match shell {
+            ShellType::Bash => Self::Bash,
+            ShellType::Zsh => Self::Zsh,
+            ShellType::Fish => Self::Fish,
+            ShellType::Cmd => Self::Cmd,
+            ShellType::PowerShell => Self::PowerShell,
+        }
+    }
+}
+
+impl From<rez_next_common::ShellType> for ShellType {
+    fn from(shell: rez_next_common::ShellType) -> Self {
+        match shell {
+            rez_next_common::ShellType::Zsh => Self::Zsh,
+            rez_next_common::ShellType::Fish => Self::Fish,
+            rez_next_common::ShellType::Cmd => Self::Cmd,
+            rez_next_common::ShellType::PowerShell | rez_next_common::ShellType::Pwsh => {
+                Self::PowerShell
+            }
+            rez_next_common::ShellType::Sh
+            | rez_next_common::ShellType::Bash
+            | rez_next_common::ShellType::Csh
+            | rez_next_common::ShellType::Tcsh
+            | rez_next_common::ShellType::GitBash => Self::Bash,
+        }
+    }
+}
+
+/// Resolve the shell against the parent process before a context replaces PATH.
+fn executable_path(shell_type: &ShellType) -> PathBuf {
+    if shell_type.is_cmd()
+        && let Some(comspec) = std::env::var_os("COMSPEC")
+    {
+        let path = PathBuf::from(comspec);
+        if path.is_file() {
+            return path;
+        }
+    }
+
+    if let Some(shell) = std::env::var_os("SHELL") {
+        let path = PathBuf::from(shell);
+        if path.is_file()
+            && path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(ShellType::parse)
+                .is_some_and(|detected| detected == *shell_type)
         {
-            let path = PathBuf::from(comspec);
-            if path.is_file() {
-                return path;
-            }
+            return path;
         }
+    }
 
-        if let Some(shell) = std::env::var_os("SHELL") {
-            let path = PathBuf::from(shell);
-            if path.is_file()
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name == self.executable())
-            {
-                return path;
-            }
-        }
-
-        let extensions: &[&str] = if cfg!(windows) {
-            &["", ".exe", ".cmd", ".bat"]
-        } else {
-            &[""]
-        };
-        if let Some(search_path) = std::env::var_os("PATH") {
-            for directory in std::env::split_paths(&search_path) {
-                for extension in extensions {
-                    let candidate = directory.join(format!("{}{}", self.executable(), extension));
-                    if candidate.is_file() {
-                        return candidate;
-                    }
+    let extensions: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    if let Some(search_path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&search_path) {
+            for extension in extensions {
+                let candidate = directory.join(format!("{}{}", shell_type.executable(), extension));
+                if candidate.is_file() {
+                    return candidate;
                 }
             }
         }
-
-        PathBuf::from(self.executable())
     }
 
-    /// Get the shell script extension
-    pub fn script_extension(&self) -> &'static str {
-        match self {
-            ShellType::Bash | ShellType::Zsh => "sh",
-            ShellType::Fish => "fish",
-            ShellType::Cmd => "bat",
-            ShellType::PowerShell => "ps1",
-        }
-    }
-
-    /// Get the shell command flag for executing scripts
-    pub fn command_flag(&self) -> &'static str {
-        match self {
-            ShellType::Bash | ShellType::Zsh => "-c",
-            ShellType::Fish => "-c",
-            ShellType::Cmd => "/c",
-            ShellType::PowerShell => "-Command",
-        }
-    }
-
-    /// Detect the current shell from environment
-    pub fn detect() -> Self {
-        if let Ok(shell) = std::env::var("SHELL") {
-            if shell.contains("bash") {
-                return ShellType::Bash;
-            } else if shell.contains("zsh") {
-                return ShellType::Zsh;
-            } else if shell.contains("fish") {
-                return ShellType::Fish;
-            }
-        }
-
-        if cfg!(windows) {
-            ShellType::Cmd
-        } else {
-            ShellType::Bash // Default to bash on Unix-like systems
-        }
-    }
+    PathBuf::from(shell_type.executable())
 }
 
 /// Shell command execution result
@@ -210,8 +257,8 @@ impl ShellExecutor {
     pub async fn execute(&self, command: &str) -> Result<CommandResult, RezCoreError> {
         let start_time = std::time::Instant::now();
 
-        let mut cmd = AsyncCommand::new(self.shell_type.executable_path());
-        let command_file = if self.shell_type == ShellType::Cmd {
+        let mut cmd = AsyncCommand::new(executable_path(&self.shell_type));
+        let command_file = if self.shell_type.is_cmd() {
             let path = std::env::temp_dir().join(format!("rez-next-{}.cmd", uuid::Uuid::new_v4()));
             std::fs::write(&path, format!("@echo off\r\n{command}\r\n")).map_err(|error| {
                 RezCoreError::ExecutionError(format!(
@@ -267,7 +314,7 @@ impl ShellExecutor {
 
     /// Execute a command in the background and return the process ID
     pub async fn execute_background(&self, command: &str) -> Result<u32, RezCoreError> {
-        let mut cmd = AsyncCommand::new(self.shell_type.executable_path());
+        let mut cmd = AsyncCommand::new(executable_path(&self.shell_type));
         cmd.arg(self.shell_type.command_flag())
             .arg(command)
             .stdout(Stdio::null())
@@ -322,21 +369,14 @@ impl ShellExecutor {
 
         let start_time = std::time::Instant::now();
 
-        let mut cmd = AsyncCommand::new(self.shell_type.executable_path());
+        let mut cmd = AsyncCommand::new(executable_path(&self.shell_type));
 
-        match self.shell_type {
-            ShellType::Bash | ShellType::Zsh => {
-                cmd.arg(script_path);
-            }
-            ShellType::Fish => {
-                cmd.arg(script_path);
-            }
-            ShellType::Cmd => {
-                cmd.arg("/c").arg(script_path);
-            }
-            ShellType::PowerShell => {
-                cmd.arg("-File").arg(script_path);
-            }
+        if self.shell_type.is_cmd() {
+            cmd.arg("/c").arg(script_path);
+        } else if self.shell_type.is_power_shell() {
+            cmd.arg("-File").arg(script_path);
+        } else {
+            cmd.arg(script_path);
         }
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -371,16 +411,16 @@ impl ShellExecutor {
 
     /// Start an interactive shell session
     pub async fn start_interactive_shell(&self) -> Result<(), RezCoreError> {
-        let mut cmd = AsyncCommand::new(self.shell_type.executable_path());
+        let mut cmd = AsyncCommand::new(executable_path(&self.shell_type));
 
         // Set interactive flags
-        match self.shell_type {
-            ShellType::Bash => cmd.arg("-i"),
-            ShellType::Zsh => cmd.arg("-i"),
-            ShellType::Fish => cmd.arg("-i"),
-            ShellType::Cmd => &mut cmd, // No special flag needed
-            ShellType::PowerShell => cmd.arg("-NoExit"),
-        };
+        if self.shell_type.is_cmd() {
+            // CMD has no interactive flag.
+        } else if self.shell_type.is_power_shell() {
+            cmd.arg("-NoExit");
+        } else {
+            cmd.arg("-i");
+        }
 
         // Set working directory
         if let Some(ref wd) = self.working_directory {
@@ -419,13 +459,12 @@ impl ShellExecutor {
 
     /// Check if a command exists in the current environment
     pub async fn command_exists(&self, command: &str) -> bool {
-        let check_command = match self.shell_type {
-            ShellType::Bash | ShellType::Zsh => format!("command -v {}", command),
-            ShellType::Fish => format!("command -v {}", command),
-            ShellType::Cmd => format!("where {}", command),
-            ShellType::PowerShell => {
-                format!("Get-Command {} -ErrorAction SilentlyContinue", command)
-            }
+        let check_command = if self.shell_type.is_cmd() {
+            format!("where {}", command)
+        } else if self.shell_type.is_power_shell() {
+            format!("Get-Command {} -ErrorAction SilentlyContinue", command)
+        } else {
+            format!("command -v {}", command)
         };
 
         match self.execute(&check_command).await {

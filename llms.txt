@@ -2,7 +2,7 @@
 
 > **AI-first compact reference.** For full API details, see [llms-full.txt](./llms-full.txt). For human guides, see [docs/](./docs/).
 
-## Project: rez-next v0.3.12 <!-- x-release-please-version -->
+## Project: rez-next v0.3.13 <!-- x-release-please-version -->
 
 High-performance Rust rewrite of [Rez](https://github.com/AcademySoftwareFoundation/rez) with Python bindings (PyO3). Import as `import rez_next as rez` for most workflows.
 
@@ -88,6 +88,16 @@ if !result.success { /* rejected: read result.errors */ }
 
 Full contract: `docs/release-sdk.md` (human) / `llms-full.txt` →
 Rust API → rez-next-build → Release SDK.
+Stable IDE and shell completion interfaces:
+
+```bash
+rez-next completions packages --prefix pyth --json
+rez-next completions versions --package python --json
+rez-next completions shell --shell bash
+```
+
+See `docs/completion-api.md` for the versioned JSON schema and installation
+contract.
 
 ## Architecture Map (20 crates)
 
@@ -205,6 +215,10 @@ crates/
 2. Only crate-root `pub use` re-exports are contract; `pub mod` leaves are not
 3. Run `vx just semver-check` before PR (gate: `cargo-semver-checks`)
 
+### Discover rez-next from IDEs and toolchains
+→ Run `rez-next info --json` and consume its stable installation/configuration
+schema. Legacy Rez and Python are optional. See `docs/installation-discovery.md`.
+
 ### Debug solver issues
 → `crates/rez-next-solver/` (A* with backtracking), `RUST_LOG=debug`
 
@@ -213,6 +227,10 @@ crates/
 
 ### Check API coverage
 → See `docs/python-integration.md`
+
+### Integrate an IDE or shell completer
+→ See `docs/completion-api.md`; use the `completions` command rather than
+parsing human-readable `search` output.
 
 ## Important Files
 

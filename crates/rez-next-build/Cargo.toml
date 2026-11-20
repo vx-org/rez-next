@@ -1,6 +1,6 @@
 [package]
 name = "rez-next-build"
-version = "0.3.12" # x-release-please-version
+version = "0.3.13" # x-release-please-version
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -11,10 +11,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-rez-next-common = { version = "0.3.12", path = "../rez-next-common" } # x-release-please-version
-rez-next-version = { version = "0.3.12", path = "../rez-next-version" } # x-release-please-version
-rez-next-package = { version = "0.3.12", path = "../rez-next-package" } # x-release-please-version
-rez-next-context = { version = "0.3.12", path = "../rez-next-context" } # x-release-please-version
+rez-next-common = { version = "0.3.13", path = "../rez-next-common" } # x-release-please-version
+rez-next-version = { version = "0.3.13", path = "../rez-next-version" } # x-release-please-version
+rez-next-package = { version = "0.3.13", path = "../rez-next-package" } # x-release-please-version
+rez-next-context = { version = "0.3.13", path = "../rez-next-context" } # x-release-please-version
+rez-next-rex = { version = "0.3.13", path = "../rez-next-rex" } # x-release-please-version
+rez-next-release-hook = { version = "0.3.13", path = "../rez-next-release-hook" } # x-release-please-version
+rez-next-repository = { version = "0.3.13", path = "../rez-next-repository" } # x-release-please-version
+rez-next-solver = { version = "0.3.13", path = "../rez-next-solver" } # x-release-please-version
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -28,15 +33,17 @@ async-trait = "0.1"
 sha2 = "0.11"
 hex = "0.4"
 flate2 = "1.1"
+zstd = "0.14"
 tar = "0.4"
 zip = "9.0"
+sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress", "util"] }
 
 [features]
 git = ["dep:git2"]
 default = ["git"]
 
 [dependencies.git2]
-version = "0.20"
+version = "0.21"
 optional = true
 features = ["vendored-libgit2", "vendored-openssl"]
 

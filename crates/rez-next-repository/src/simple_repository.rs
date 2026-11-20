@@ -1,6 +1,9 @@
 //! Simple file-based repository implementation
 
 use crate::REZ_PACKAGE_FILENAMES;
+use crate::package_repository::bridge::AsyncRepositoryAdapter;
+use crate::package_repository::filesystem::FilesystemPackageRepository;
+use crate::package_repository::spec::resolve_filesystem_paths;
 use async_trait::async_trait;
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageSerializer};
@@ -227,6 +230,28 @@ impl RepositoryManager {
         Self {
             repositories: Vec::new(),
         }
+    }
+
+    /// Build a manager from Rez `packages_path` entries.
+    ///
+    /// Entries may be bare filesystem paths or explicit
+    /// `filesystem@location` specifications. Unknown repository types and
+    /// known types without an implementation fail during construction so a
+    /// configuration mistake cannot degrade into an empty search path.
+    pub fn from_package_paths<I, S>(entries: I) -> Result<Self, RezCoreError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut manager = Self::new();
+        for (index, path) in resolve_filesystem_paths(entries)?.into_iter().enumerate() {
+            if path.exists() {
+                let repository =
+                    FilesystemPackageRepository::with_name(path, format!("repo_{index}"));
+                manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
+            }
+        }
+        Ok(manager)
     }
 
     /// Add a repository

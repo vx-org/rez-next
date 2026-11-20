@@ -3,10 +3,40 @@
 use rez_next_version::Version;
 
 use super::requirement::PackageRequirement;
-use super::types::Package;
+use super::types::{Package, TestCommand, TestVariantFilter};
 
 fn ver(s: &str) -> Version {
     Version::parse(s).unwrap()
+}
+
+#[test]
+fn test_test_command_expands_all_package_root_tokens() {
+    let command = TestCommand::String("{root} {base} {this.root} {this.base}".to_string());
+    let expanded = command.expanded_for_root(std::path::Path::new("/packages/demo"));
+
+    assert_eq!(
+        expanded,
+        TestCommand::String(
+            "/packages/demo /packages/demo /packages/demo /packages/demo".to_string()
+        )
+    );
+}
+
+#[test]
+fn test_test_command_expands_argv_and_preserves_extra_arguments() {
+    let command = TestCommand::List(vec!["python".to_string(), "{root}/tests".to_string()]);
+    let expanded = command
+        .expanded_for_root(std::path::Path::new("/packages/demo"))
+        .with_extra_args(&["value with spaces".to_string()]);
+
+    assert_eq!(
+        expanded,
+        TestCommand::List(vec![
+            "python".to_string(),
+            "/packages/demo/tests".to_string(),
+            "value with spaces".to_string(),
+        ])
+    );
 }
 
 #[test]
@@ -110,6 +140,16 @@ fn test_conflict_takes_priority_over_weak() {
     let req = PackageRequirement::parse("!python").unwrap();
     assert!(req.conflict);
     assert!(!req.weak);
+}
+
+#[test]
+fn test_variant_filter_matches_positive_and_conflict_requirements() {
+    let filter = TestVariantFilter::Requires(vec!["python-3.11".to_string(), "!maya".to_string()]);
+    assert!(filter.matches_variant_requires(&["python-3.11".to_string()]));
+    assert!(
+        !filter.matches_variant_requires(&["python-3.11".to_string(), "maya-2024".to_string(),])
+    );
+    assert!(!filter.matches_variant_requires(&["python-3.10".to_string()]));
 }
 
 #[test]

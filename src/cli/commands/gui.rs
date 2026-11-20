@@ -4,6 +4,7 @@
 //! since we don't have a Qt/PySide dependency.
 
 use rez_next_common::config::RezCoreConfig;
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use std::path::PathBuf;
 
 /// Arguments for the gui command
@@ -37,8 +38,10 @@ pub async fn execute(args: &GuiArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Generating rez status report...");
 
     let mut all_packages: Vec<PkgInfo> = Vec::new();
-    let mut all_paths = config.packages_path.clone();
-    all_paths.push(config.local_packages_path.clone());
+    let mut all_paths = resolve_filesystem_paths(config.packages_path.clone())?;
+    all_paths.extend(resolve_filesystem_paths([config
+        .local_packages_path
+        .clone()])?);
 
     for repo_path in &all_paths {
         let path = std::path::Path::new(repo_path);
@@ -74,7 +77,7 @@ pub async fn execute(args: &GuiArgs) -> Result<(), Box<dyn std::error::Error>> {
                         let description = read_description(&ver_path);
 
                         all_packages.push(PkgInfo {
-                            repo: repo_path.clone(),
+                            repo: repo_path.to_string_lossy().into_owned(),
                             name: family_name.clone(),
                             version: ver_name,
                             description,

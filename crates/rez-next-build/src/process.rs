@@ -6,8 +6,13 @@ use crate::{
 };
 use rez_next_common::RezCoreError;
 use rez_next_context::{ContextConfig, EnvironmentManager, ShellExecutor, ShellType};
+use rez_next_package::serialization::{PackageFormat, PackageSerializer};
+use rez_next_package::{Package, TestCommand, TestVariantFilter};
+use rez_next_rex::{RexEnvironment, RexExecutor};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
@@ -139,7 +144,7 @@ impl BuildProcess {
         // Start build in background
         let build_id = self.build_id.clone();
         let request = self.request.clone();
-        let environment = self.environment.clone();
+        let mut environment = self.environment.clone();
         let config = self.config.clone();
         let status = self.status.clone();
         let output = self.output.clone();
@@ -150,7 +155,7 @@ impl BuildProcess {
             let result = Self::run_build_steps(
                 &build_id,
                 &request,
-                &environment,
+                &mut environment,
                 &config,
                 output.clone(),
                 errors.clone(),
@@ -260,12 +265,16 @@ impl BuildProcess {
     async fn run_build_steps(
         build_id: &str,
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         config: &BuildConfig,
         output: Arc<Mutex<String>>,
         errors: Arc<Mutex<String>>,
         child_process: Arc<Mutex<Option<Child>>>,
     ) -> Result<(), RezCoreError> {
+        if config.clean_before_build || request.options.force_rebuild {
+            environment.clean().await?;
+        }
+
         let event_sender = config.event_sender.clone();
         emit_build_event(
             event_sender.as_ref(),
@@ -393,7 +402,7 @@ impl BuildProcess {
     async fn execute_build_step(
         step: &BuildStep,
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         config: &BuildConfig,
         child_process: Arc<Mutex<Option<Child>>>,
     ) -> Result<BuildStepResult, RezCoreError> {
@@ -473,9 +482,10 @@ impl BuildProcess {
     /// Execute configure step
     async fn execute_configure_step(
         request: &BuildRequest,
-        environment: &BuildEnvironment,
+        environment: &mut BuildEnvironment,
         _config: &BuildConfig,
     ) -> Result<(bool, String, String), RezCoreError> {
+        apply_pre_build_commands(request, environment)?;
         // Detect and configure build system
         let build_system = BuildSystem::detect_with_package(&request.source_dir, &request.package)?;
         let configure_result = build_system.configure(request, environment).await?;
@@ -553,28 +563,100 @@ impl BuildProcess {
         ))
     }
 
+    async fn install_package_definition(
+        request: &BuildRequest,
+        environment: &BuildEnvironment,
+    ) -> Result<Option<PathBuf>, RezCoreError> {
+        let Some((source, destination)) = Self::package_definition_paths(request, environment)
+        else {
+            return Ok(None);
+        };
+        if source == destination {
+            return Ok(None);
+        }
+
+        let timestamp = package_timestamp(&request.package);
+        if source
+            .extension()
+            .is_some_and(|extension| extension == "py")
+        {
+            let content = tokio::fs::read_to_string(&source).await.map_err(|error| {
+                RezCoreError::BuildError(format!(
+                    "Failed to read package definition {}: {}",
+                    source.display(),
+                    error
+                ))
+            })?;
+            let content = if request.package.timestamp.is_some() {
+                content
+            } else {
+                format!(
+                    "{content}\n\n# Package metadata written by rez-next\ntimestamp = {timestamp}\n"
+                )
+            };
+            tokio::fs::write(&destination, content)
+                .await
+                .map_err(|error| {
+                    RezCoreError::BuildError(format!(
+                        "Failed to install package definition {}: {}",
+                        destination.display(),
+                        error
+                    ))
+                })?;
+        } else {
+            let mut package = request.package.clone();
+            package.timestamp = Some(timestamp);
+            PackageSerializer::save_to_file(&package, &destination, PackageFormat::Yaml).map_err(
+                |error| {
+                    RezCoreError::BuildError(format!(
+                        "Failed to install package definition {}: {}",
+                        destination.display(),
+                        error
+                    ))
+                },
+            )?;
+        }
+        Ok(Some(destination))
+    }
+
+    fn package_definition_paths(
+        request: &BuildRequest,
+        environment: &BuildEnvironment,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let source = request
+            .package
+            .filepath
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                ["package.py", "package.yaml", "package.yml"]
+                    .iter()
+                    .map(|name| request.source_dir.join(name))
+                    .find(|path| path.is_file())
+            })?;
+        let file_name = source.file_name()?.to_owned();
+        Some((source, environment.get_install_dir().join(file_name)))
+    }
+
     async fn execute_package_test_step(
         request: &BuildRequest,
         environment: &BuildEnvironment,
     ) -> Result<(bool, String, String), RezCoreError> {
+        let install_dir = environment.get_install_dir();
+        let definition_destination = Self::package_definition_paths(request, environment)
+            .map(|(_, destination)| destination);
         if request.package.tests.is_empty() {
-            return Ok((true, "No package tests defined".to_string(), String::new()));
+            let output = match Self::install_package_definition(request, environment).await? {
+                Some(definition) => format!(
+                    "No package tests defined\nInstalled package definition: {}",
+                    definition.display()
+                ),
+                None => "No package tests defined".to_string(),
+            };
+            return Ok((true, output, String::new()));
         }
 
-        let install_dir = environment.get_install_dir();
-        let mut package = request.package.clone();
-        package.filepath = Some(
-            install_dir
-                .join("package.py")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        if let Some(pre_test_commands) = package.pre_test_commands.take() {
-            package.post_commands = Some(match package.post_commands.take() {
-                Some(post_commands) => format!("{post_commands}\n{pre_test_commands}"),
-                None => pre_test_commands,
-            });
-        }
         let mut base_environment = std::collections::HashMap::new();
         for (name, value) in std::env::vars().chain(environment.get_env_vars().clone()) {
             let name = if cfg!(windows) {
@@ -584,30 +666,93 @@ impl BuildProcess {
             };
             base_environment.insert(name, value);
         }
-        let manager = EnvironmentManager::with_base_environment(
-            ContextConfig {
-                inherit_parent_env: false,
-                ..ContextConfig::default()
-            },
-            base_environment,
-        );
-        let test_environment = manager.generate_environment(&[package]).await?;
-        let executor = ShellExecutor::with_shell(ShellType::detect())
-            .with_environment(test_environment)
-            .with_working_directory(request.source_dir.clone());
-
+        let context_config = ContextConfig {
+            inherit_parent_env: false,
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::with_base_environment(context_config, base_environment);
         let mut tests: Vec<_> = request.package.tests.iter().collect();
         tests.sort_by_key(|(name, _)| *name);
         let mut output = String::new();
-        for (name, command) in tests {
-            let root = install_dir.to_string_lossy();
-            let command = command
-                .replace("{this.root}", &root)
-                .replace("{this.base}", &root)
-                .replace("{root}", &root)
-                .replace("{base}", &root);
-            output.push_str(&format!("Running package test '{name}': {command}\n"));
-            let result = executor.execute(&command).await?;
+        for (name, definition) in tests {
+            if !package_test_is_selected(request, definition) {
+                output.push_str(&format!("Skipping package test '{name}'\n"));
+                continue;
+            }
+
+            let mut package = request.package.clone();
+            package.filepath = definition_destination
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            if let Some(pre_test_commands) = package.pre_test_commands.take() {
+                package.post_commands = Some(match package.post_commands.take() {
+                    Some(post_commands) => format!("{post_commands}\n{pre_test_commands}"),
+                    None => pre_test_commands,
+                });
+            }
+            package.requires.extend(definition.requires.iter().cloned());
+            let test_environment = match manager.generate_environment(&[package]).await {
+                Ok(environment) => environment,
+                Err(error) => {
+                    let rollback_error = Self::rollback_install_dir(install_dir).await;
+                    return Ok((
+                        false,
+                        output,
+                        append_rollback_error(error.to_string(), rollback_error),
+                    ));
+                }
+            };
+            let executor = ShellExecutor::with_shell(ShellType::detect())
+                .with_environment(test_environment.clone())
+                .with_working_directory(request.source_dir.clone());
+            let command = definition.command.expanded_for_root(install_dir);
+            let result = match command {
+                TestCommand::String(command) => {
+                    output.push_str(&format!("Running package test '{name}': {command}\n"));
+                    executor.execute(&command).await
+                }
+                TestCommand::List(arguments) => {
+                    let Some(program) = arguments.first() else {
+                        let errors = format!("Package test '{name}' has an empty argv command");
+                        let rollback_error = Self::rollback_install_dir(install_dir).await;
+                        return Ok((false, output, append_rollback_error(errors, rollback_error)));
+                    };
+                    output.push_str(&format!(
+                        "Running package test '{name}': {}\n",
+                        arguments.join(" ")
+                    ));
+                    let started_at = Instant::now();
+                    let result = tokio::process::Command::new(program)
+                        .args(&arguments[1..])
+                        .current_dir(&request.source_dir)
+                        .env_clear()
+                        .envs(&test_environment)
+                        .output()
+                        .await
+                        .map_err(|error| {
+                            RezCoreError::ExecutionError(format!(
+                                "Failed to execute package test '{name}': {error}"
+                            ))
+                        });
+                    result.map(|result| rez_next_context::CommandResult {
+                        exit_code: result.status.code().unwrap_or(-1),
+                        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+                        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+                        execution_time_ms: started_at.elapsed().as_millis() as u64,
+                    })
+                }
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let rollback_error = Self::rollback_install_dir(install_dir).await;
+                    return Ok((
+                        false,
+                        output,
+                        append_rollback_error(error.to_string(), rollback_error),
+                    ));
+                }
+            };
             output.push_str(&result.stdout);
             if !result.is_success() {
                 let errors = if result.stderr.trim().is_empty() {
@@ -618,11 +763,39 @@ impl BuildProcess {
                 } else {
                     result.stderr
                 };
-                return Ok((false, output, errors));
+                let rollback_error = Self::rollback_install_dir(install_dir).await;
+                return Ok((false, output, append_rollback_error(errors, rollback_error)));
             }
         }
 
-        Ok((true, output, String::new()))
+        match Self::install_package_definition(request, environment).await {
+            Ok(Some(definition)) => {
+                output.push_str(&format!(
+                    "Installed package definition: {}\n",
+                    definition.display()
+                ));
+                Ok((true, output, String::new()))
+            }
+            Ok(None) => Ok((true, output, String::new())),
+            Err(error) => {
+                let rollback_error = Self::rollback_install_dir(install_dir).await;
+                Ok((
+                    false,
+                    output,
+                    append_rollback_error(error.to_string(), rollback_error),
+                ))
+            }
+        }
+    }
+
+    async fn rollback_install_dir(install_dir: &std::path::Path) -> Option<String> {
+        if !install_dir.exists() {
+            return None;
+        }
+        tokio::fs::remove_dir_all(install_dir)
+            .await
+            .err()
+            .map(|error| format!("Failed to roll back installed payload: {error}"))
     }
 
     /// Execute cleanup step
@@ -642,6 +815,121 @@ impl BuildProcess {
         }
 
         Ok((true, "Cleanup completed".to_string(), String::new()))
+    }
+}
+
+fn apply_pre_build_commands(
+    request: &BuildRequest,
+    environment: &mut BuildEnvironment,
+) -> Result<(), RezCoreError> {
+    let Some(commands) = request
+        .package
+        .pre_build_commands
+        .as_deref()
+        .filter(|commands| !commands.trim().is_empty())
+    else {
+        return Ok(());
+    };
+
+    let root = request.source_dir.to_string_lossy();
+    let build_path = environment.get_build_dir().to_string_lossy();
+    let install_path = environment.get_install_dir().to_string_lossy();
+    let build_type = environment
+        .get_env_vars()
+        .get("REZ_BUILD_TYPE")
+        .map(String::as_str)
+        .unwrap_or("local");
+    let install = environment
+        .get_env_vars()
+        .get("REZ_BUILD_INSTALL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+
+    let mut executor = RexExecutor::new();
+    executor.set_context_var("this.root", root.as_ref());
+    executor.set_context_var("this.name", &request.package.name);
+    if let Some(version) = request.package.version.as_ref() {
+        executor.set_context_var("this.version", version.as_str());
+    }
+    executor.set_context_var("build.type", build_type);
+    executor.set_context_var("build.install", install.to_string());
+    executor.set_context_var("build.path", build_path.as_ref());
+    executor.set_context_var("build.install_path", install_path.as_ref());
+    executor.execute_commands(
+        commands,
+        &request.package.name,
+        Some(root.as_ref()),
+        request
+            .package
+            .version
+            .as_ref()
+            .map(|version| version.as_str()),
+    )?;
+
+    let mut resolved = RexEnvironment::new();
+    resolved.vars = environment.get_env_vars().clone();
+    resolved.apply(executor.get_actions());
+
+    let existing_keys = environment
+        .get_env_vars()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in existing_keys {
+        if !resolved.vars.contains_key(&key) {
+            environment.remove_env_var(&key);
+        }
+    }
+    for (key, value) in resolved.vars {
+        environment.add_env_var(key, value);
+    }
+    Ok(())
+}
+
+fn package_timestamp(package: &Package) -> i64 {
+    package.timestamp.unwrap_or_else(|| {
+        std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs() as i64)
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn package_test_is_selected(
+    request: &BuildRequest,
+    definition: &rez_next_package::PackageTestDefinition,
+) -> bool {
+    let run_on = if request.options.release_mode {
+        "pre_release"
+    } else {
+        "default"
+    };
+    if !definition.run_on.iter().any(|tag| tag == run_on) {
+        return false;
+    }
+
+    match definition.on_variants.as_ref() {
+        Some(TestVariantFilter::Enabled(true)) => true,
+        Some(filter @ TestVariantFilter::Requires(_)) => {
+            filter.matches_variant_requires(request.variant_requires.as_deref().unwrap_or_default())
+        }
+        Some(TestVariantFilter::Enabled(false)) | None => {
+            request.package.variants.len() <= 1
+                || request.variant_index.is_none_or(|index| index == 0)
+        }
+    }
+}
+
+fn append_rollback_error(errors: String, rollback_error: Option<String>) -> String {
+    match rollback_error {
+        Some(rollback_error) => format!("{errors}\n{rollback_error}"),
+        None => errors,
     }
 }
 
@@ -691,4 +979,41 @@ fn emit_build_event(
         duration_ms,
         timestamp_ms,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildEnvironment, BuildRequest, apply_pre_build_commands};
+    use rez_next_package::Package;
+    use tempfile::tempdir;
+
+    #[test]
+    fn pre_build_commands_update_the_build_environment() {
+        let temp = tempdir().unwrap();
+        let mut package = Package::new("pre-build-package".to_string());
+        package.pre_build_commands = Some(
+            "env.setenv('PRE_BUILD_ROOT', '{this.root}')\n\
+             env.setenv('PRE_BUILD_PATH', '{build.path}')\n\
+             env.setenv('PRE_BUILD_TYPE', '{build.type}')"
+                .replace("             ", ""),
+        );
+        let request = BuildRequest::new(package, None, temp.path().to_path_buf());
+        let mut environment =
+            BuildEnvironment::new(&request.package, &temp.path().join("build"), None).unwrap();
+
+        apply_pre_build_commands(&request, &mut environment).unwrap();
+
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_ROOT"),
+            Some(&temp.path().to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_PATH"),
+            Some(&environment.get_build_dir().to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            environment.get_env_vars().get("PRE_BUILD_TYPE"),
+            Some(&"local".to_string())
+        );
+    }
 }

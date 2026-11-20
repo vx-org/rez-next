@@ -63,7 +63,7 @@ fn test_shell_type_from_str() {
     assert_eq!(ShellType::parse("bash"), Some(ShellType::Bash));
     assert_eq!(ShellType::parse("zsh"), Some(ShellType::Zsh));
     assert_eq!(ShellType::parse("powershell"), Some(ShellType::PowerShell));
-    assert_eq!(ShellType::parse("pwsh"), Some(ShellType::PowerShell));
+    assert_eq!(ShellType::parse("pwsh"), Some(ShellType::Pwsh));
     assert_eq!(ShellType::parse("fish"), Some(ShellType::Fish));
     assert_eq!(ShellType::parse("cmd"), Some(ShellType::Cmd));
     assert_eq!(ShellType::parse("unknown"), None);
@@ -177,9 +177,12 @@ fn test_zsh_same_as_bash() {
     let env = make_full_env();
     let bash_script = generate_shell_script(&env, &ShellType::Bash);
     let zsh_script = generate_shell_script(&env, &ShellType::Zsh);
+    assert!(bash_script.starts_with("#!/bin/bash\n"));
+    assert!(zsh_script.starts_with("#!/bin/zsh\n"));
     assert_eq!(
-        bash_script, zsh_script,
-        "Zsh and Bash should produce identical scripts"
+        bash_script.split_once('\n').unwrap().1,
+        zsh_script.split_once('\n').unwrap().1,
+        "Zsh and Bash should share the same script body"
     );
 }
 
@@ -313,7 +316,7 @@ fn test_shell_from_str_all_variants() {
         ("fish", ShellType::Fish),
         ("cmd", ShellType::Cmd),
         ("powershell", ShellType::PowerShell),
-        ("pwsh", ShellType::PowerShell),
+        ("pwsh", ShellType::Pwsh),
     ];
     for (s, expected) in &cases {
         let got = ShellType::parse(s);

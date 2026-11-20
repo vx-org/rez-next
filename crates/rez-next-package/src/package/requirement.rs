@@ -22,7 +22,15 @@ pub struct PackageRequirement {
 impl std::fmt::Display for PackageRequirement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let base = if let Some(ref version) = self.version_spec {
-            format!("{}-{}", self.name, version)
+            let separator = if ["==", ">=", "<=", ">", "<", "~=", "!="]
+                .iter()
+                .any(|operator| version.starts_with(operator))
+            {
+                ""
+            } else {
+                "-"
+            };
+            format!("{}{separator}{}", self.name, version)
         } else {
             self.name.clone()
         };

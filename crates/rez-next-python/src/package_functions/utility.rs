@@ -5,7 +5,43 @@
 //! package_release_keys, get_last_release_time, test_function.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PySet};
+use pyo3::types::{PyAny, PyDict, PyList, PyModule, PySet};
+use rez_next_package::{PackageTestDefinition, TestCommand, TestVariantFilter};
+
+fn package_test_to_python<'py>(
+    py: Python<'py>,
+    definition: &PackageTestDefinition,
+) -> PyResult<Bound<'py, PyAny>> {
+    let simple = definition.requires.is_empty()
+        && definition.run_on == ["default".to_string()]
+        && definition.on_variants.is_none();
+    if simple {
+        return match &definition.command {
+            TestCommand::String(command) => Ok(command.clone().into_pyobject(py)?.into_any()),
+            TestCommand::List(arguments) => Ok(PyList::new(py, arguments)?.into_any()),
+        };
+    }
+
+    let value = PyDict::new(py);
+    match &definition.command {
+        TestCommand::String(command) => value.set_item("command", command)?,
+        TestCommand::List(arguments) => value.set_item("command", PyList::new(py, arguments)?)?,
+    }
+    value.set_item("requires", PyList::new(py, &definition.requires)?)?;
+    value.set_item("run_on", PyList::new(py, &definition.run_on)?)?;
+    if let Some(filter) = &definition.on_variants {
+        match filter {
+            TestVariantFilter::Enabled(enabled) => value.set_item("on_variants", enabled)?,
+            TestVariantFilter::Requires(requirements) => {
+                let filter = PyDict::new(py);
+                filter.set_item("type", "requires")?;
+                filter.set_item("value", PyList::new(py, requirements)?)?;
+                value.set_item("on_variants", filter)?;
+            }
+        }
+    }
+    Ok(value.into_any())
+}
 
 use crate::package_bindings::PyPackage;
 use crate::runtime::get_runtime;
@@ -125,11 +161,20 @@ pub fn dump_package_data<'py>(
         dict.set_item("format_version", fv)?;
     }
 
+    let json_module = PyModule::import(py, "json")?;
+    for key in pkg.arbitrary_keys() {
+        if let Some(value) = pkg.arbitrary_value(&key) {
+            let json = serde_json::to_string(&value)
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+            dict.set_item(&key, json_module.getattr("loads")?.call1((json,))?)?;
+        }
+    }
+
     // Add tests dict
     if !pkg.tests.is_empty() {
         let tests_dict = PyDict::new(py);
         for (k, v) in &pkg.tests {
-            tests_dict.set_item(k.clone(), v.clone())?;
+            tests_dict.set_item(k.clone(), package_test_to_python(py, v)?)?;
         }
         dict.set_item("tests", tests_dict)?;
     }
@@ -195,7 +240,7 @@ pub fn get_developer_package(path: &str, _paths: Option<Vec<String>>) -> PyResul
 #[pyo3(signature = (prefix, paths=None))]
 pub fn get_completions(prefix: &str, paths: Option<Vec<String>>) -> PyResult<Vec<String>> {
     let rt = get_runtime();
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     // Get all family names
     let family_names = rt
@@ -356,7 +401,7 @@ pub fn get_last_release_time<'py>(
     paths: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
     let rt = get_runtime();
-    let repo_manager = make_repo_manager(paths);
+    let repo_manager = make_repo_manager(paths)?;
 
     let packages = rt
         .block_on(repo_manager.find_packages(name))

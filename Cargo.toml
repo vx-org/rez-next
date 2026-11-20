@@ -50,6 +50,7 @@ thiserror = "2.0"
 rand = "0.10"
 tracing = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = { version = "4.6.9", features = ["unstable-dynamic"] }
 
 # Dev dependencies
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -57,7 +58,7 @@ tempfile = "3.20"
 
 [package]
 name = "rez-next"
-version = "0.3.12" # x-release-please-version
+version = "0.3.13" # x-release-please-version
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -91,23 +92,25 @@ path = "src/bin/rez.rs"
 
 [dependencies]
 # Workspace crates
-rez-next-common = { version = "0.3.12", path = "crates/rez-next-common", default-features = false } # x-release-please-version
-rez-next-version = { version = "0.3.12", path = "crates/rez-next-version", default-features = false } # x-release-please-version
-rez-next-package = { version = "0.3.12", path = "crates/rez-next-package", default-features = false } # x-release-please-version
-rez-next-solver = { version = "0.3.12", path = "crates/rez-next-solver", default-features = false } # x-release-please-version
-rez-next-repository = { version = "0.3.12", path = "crates/rez-next-repository", default-features = false } # x-release-please-version
-rez-next-context = { version = "0.3.12", path = "crates/rez-next-context", default-features = false } # x-release-please-version
-rez-next-runtime = { version = "0.3.12", path = "crates/rez-next-runtime" } # x-release-please-version
-rez-next-build = { version = "0.3.12", path = "crates/rez-next-build" } # x-release-please-version
-rez-next-cache = { version = "0.3.12", path = "crates/rez-next-cache" } # x-release-please-version
-rez-next-suites = { version = "0.3.12", path = "crates/rez-next-suites" } # x-release-please-version
-rez-next-rex = { version = "0.3.12", path = "crates/rez-next-rex" } # x-release-please-version
-rez-next-config = { version = "0.3.12", path = "crates/rez-next-config" } # x-release-please-version
+rez-next-common = { version = "0.3.13", path = "crates/rez-next-common", default-features = false } # x-release-please-version
+rez-next-version = { version = "0.3.13", path = "crates/rez-next-version", default-features = false } # x-release-please-version
+rez-next-package = { version = "0.3.13", path = "crates/rez-next-package", default-features = false } # x-release-please-version
+rez-next-solver = { version = "0.3.13", path = "crates/rez-next-solver", default-features = false } # x-release-please-version
+rez-next-repository = { version = "0.3.13", path = "crates/rez-next-repository", default-features = false } # x-release-please-version
+rez-next-context = { version = "0.3.13", path = "crates/rez-next-context", default-features = false } # x-release-please-version
+rez-next-runtime = { version = "0.3.13", path = "crates/rez-next-runtime" } # x-release-please-version
+rez-next-build = { version = "0.3.13", path = "crates/rez-next-build" } # x-release-please-version
+rez-next-cache = { version = "0.3.13", path = "crates/rez-next-cache" } # x-release-please-version
+rez-next-suites = { version = "0.3.13", path = "crates/rez-next-suites" } # x-release-please-version
+rez-next-rex = { version = "0.3.13", path = "crates/rez-next-rex" } # x-release-please-version
+rez-next-config = { version = "0.3.13", path = "crates/rez-next-config" } # x-release-please-version
+rez-next-bind = { version = "0.3.13", path = "crates/rez-next-bind" } # x-release-please-version
 
 
 
 # CLI dependencies
 clap.workspace = true
+clap_complete.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -132,13 +135,12 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
-rez-next-package = { version = "0.3.12", path = "crates/rez-next-package", default-features = false } # x-release-please-version
-rez-next-rex = { version = "0.3.12", path = "crates/rez-next-rex" } # x-release-please-version
-rez-next-version = { version = "0.3.12", path = "crates/rez-next-version", default-features = false } # x-release-please-version
-rez-next-suites = { version = "0.3.12", path = "crates/rez-next-suites" } # x-release-please-version
-rez-next-common = { version = "0.3.12", path = "crates/rez-next-common", default-features = false } # x-release-please-version
-rez-next-bind = { version = "0.3.12", path = "crates/rez-next-bind" } # x-release-please-version
-rez-next-search = { version = "0.3.12", path = "crates/rez-next-search" } # x-release-please-version
+rez-next-package = { version = "0.3.13", path = "crates/rez-next-package", default-features = false } # x-release-please-version
+rez-next-rex = { version = "0.3.13", path = "crates/rez-next-rex" } # x-release-please-version
+rez-next-version = { version = "0.3.13", path = "crates/rez-next-version", default-features = false } # x-release-please-version
+rez-next-suites = { version = "0.3.13", path = "crates/rez-next-suites" } # x-release-please-version
+rez-next-common = { version = "0.3.13", path = "crates/rez-next-common", default-features = false } # x-release-please-version
+rez-next-search = { version = "0.3.13", path = "crates/rez-next-search" } # x-release-please-version
 
 
 
@@ -180,6 +182,10 @@ harness = false
 
 [[bench]]
 name = "cache_operations_benchmark"
+harness = false
+
+[[bench]]
+name = "heuristic_benchmark"
 harness = false
 
 [[bench]]

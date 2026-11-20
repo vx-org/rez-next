@@ -86,7 +86,7 @@ class TestBuildFunctions:
     def test_get_build_process_types(self):
         types = build_.get_build_process_types()
         assert "local" in types
-        assert "central" in types
+        assert "remote" in types
         assert len(types) == 2
 
     def test_create_build_system_valid(self):

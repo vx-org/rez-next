@@ -106,13 +106,13 @@ fn test_is_package_file_package_py() {
 #[test]
 fn test_is_package_file_package_yaml() {
     let scanner = make_scanner_no_background();
-    assert!(!scanner.is_package_file(Path::new("/some/repo/package.yaml")));
+    assert!(scanner.is_package_file(Path::new("/some/repo/package.yaml")));
 }
 
 #[test]
 fn test_is_package_file_package_yml() {
     let scanner = make_scanner_no_background();
-    assert!(!scanner.is_package_file(Path::new("/some/repo/package.yml")));
+    assert!(scanner.is_package_file(Path::new("/some/repo/package.yml")));
 }
 
 #[test]
@@ -399,6 +399,51 @@ mod test_async {
             Some("1.0.0")
         );
         assert!(result.files_examined >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_scan_repository_finds_package_yaml() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("yamlpkg").join("1.0.0");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.yaml"),
+            "name: yamlpkg\nversion: '1.0.0'\nplugin_for: ['maya']\n",
+        )
+        .unwrap();
+
+        let scanner = make_scanner_no_bg_no_cache();
+        let result = scanner.scan_repository(tmp.path()).await.unwrap();
+
+        assert!(result.errors.is_empty());
+        assert_eq!(result.packages.len(), 1);
+        assert_eq!(result.packages[0].package.name, "yamlpkg");
+        assert_eq!(result.packages[0].package.plugin_for, vec!["maya"]);
+    }
+
+    #[tokio::test]
+    async fn test_scan_repository_prefers_package_py_when_yaml_is_also_present() {
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("dual").join("1.0.0");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.py"),
+            "name = 'dual'\nversion = '1.0.0'\ndescription = 'python'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("package.yaml"),
+            "name: dual\nversion: '1.0.0'\ndescription: yaml\n",
+        )
+        .unwrap();
+
+        let scanner = make_scanner_no_bg_no_cache();
+        let result = scanner.scan_repository(tmp.path()).await.unwrap();
+        assert_eq!(result.packages.len(), 1);
+        assert_eq!(
+            result.packages[0].package.description.as_deref(),
+            Some("python")
+        );
     }
 
     #[tokio::test]

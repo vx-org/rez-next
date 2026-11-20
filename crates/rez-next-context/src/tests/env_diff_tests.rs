@@ -298,8 +298,8 @@ mod env_diff_behavior_tests {
         env.insert("FISH_VAR".to_string(), "fish_value".to_string());
         let script = mgr.generate_shell_script(&env).unwrap();
         assert!(
-            script.contains("set -x"),
-            "Fish script should use set -x: {}",
+            script.contains("set -gx"),
+            "Fish script should export variables with set -gx: {}",
             &script[..script.len().min(100)]
         );
         assert!(script.contains("FISH_VAR"));

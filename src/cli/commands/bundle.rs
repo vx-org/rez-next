@@ -8,8 +8,6 @@ use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, ResolvedContext};
 use rez_next_package::PackageRequirement;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_rex::{RexEnvironment, ShellType, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
@@ -24,7 +22,12 @@ use crate::cli::utils::split_package_paths;
 #[derive(Args, Clone)]
 pub struct BundleArgs {
     /// Package requests to bundle (e.g., "python-3.9" "maya-2023")
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub packages: Vec<String>,
 
     /// Output directory for the bundle
@@ -180,7 +183,7 @@ pub fn execute(mut args: BundleArgs) -> RezCoreResult<()> {
 
     // Setup search paths for finding package files
     let rez_config = RezCoreConfig::load();
-    let search_paths: Vec<PathBuf> = get_search_paths(&args, &rez_config);
+    let search_paths: Vec<PathBuf> = get_search_paths(&args, &rez_config)?;
 
     // Build metadata and copy packages
     let mut package_infos = Vec::new();
@@ -289,16 +292,12 @@ fn resolve_context(
     let _config = ContextConfig::default();
     let rez_config = RezCoreConfig::load();
 
-    let search_paths = get_search_paths(args, &rez_config);
-    let mut repo_manager = RepositoryManager::new();
-
-    for (i, path) in search_paths.iter().enumerate() {
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
+    let search_paths = get_search_paths(args, &rez_config)?;
+    let repo_manager = RepositoryManager::from_package_paths(
+        search_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    )?;
 
     let repo_arc = Arc::new(repo_manager);
 
@@ -329,24 +328,16 @@ fn resolve_context(
 }
 
 /// Get package search paths from args or config
-fn get_search_paths(args: &BundleArgs, config: &RezCoreConfig) -> Vec<PathBuf> {
-    if let Some(ref paths_str) = args.paths {
+fn get_search_paths(args: &BundleArgs, config: &RezCoreConfig) -> RezCoreResult<Vec<PathBuf>> {
+    let entries = if let Some(ref paths_str) = args.paths {
         split_package_paths(paths_str)
-    } else {
-        config
-            .packages_path
-            .iter()
-            .map(|p| {
-                if (p.starts_with("~/") || p == "~")
-                    && let Ok(home) =
-                        std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
-                {
-                    return PathBuf::from(p.replacen("~", &home, 1));
-                }
-                PathBuf::from(p)
-            })
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
             .collect()
-    }
+    } else {
+        config.packages_path.clone()
+    };
+    rez_next_repository::package_repository::spec::resolve_filesystem_paths(entries)
 }
 
 /// Find a package directory in search paths

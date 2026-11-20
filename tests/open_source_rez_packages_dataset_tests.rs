@@ -177,10 +177,11 @@ async fn vx_build_context(temp_dir: &TempDir) -> ResolvedContext {
     context.resolved_packages = vec![python, rez_builder];
     context.status = ContextStatus::Resolved;
 
-    let manager = EnvironmentManager::new(ContextConfig {
+    let context_config = ContextConfig {
         inherit_parent_env: false,
-        ..Default::default()
-    });
+        ..ContextConfig::default()
+    };
+    let manager = EnvironmentManager::new(context_config);
     context.environment_vars = manager
         .generate_environment(&context.resolved_packages)
         .await
@@ -198,10 +199,11 @@ async fn python_build_context(temp_dir: &TempDir) -> ResolvedContext {
     context.resolved_packages = vec![python];
     context.status = ContextStatus::Resolved;
 
-    let manager = EnvironmentManager::new(ContextConfig {
+    let context_config = ContextConfig {
         inherit_parent_env: false,
-        ..Default::default()
-    });
+        ..ContextConfig::default()
+    };
+    let manager = EnvironmentManager::new(context_config);
     context.environment_vars = manager
         .generate_environment(&context.resolved_packages)
         .await
@@ -294,10 +296,11 @@ fn parses_real_open_source_rez_package_fixture() {
 fn real_open_source_rez_package_uses_actual_root_in_environment() {
     let source = aces_container_source();
     let package = Package::from_path(&source).unwrap();
-    let manager = EnvironmentManager::new(ContextConfig {
+    let context_config = ContextConfig {
         inherit_parent_env: false,
-        ..Default::default()
-    });
+        ..ContextConfig::default()
+    };
+    let manager = EnvironmentManager::new(context_config);
 
     let env = tokio::runtime::Runtime::new()
         .unwrap()
@@ -491,12 +494,18 @@ fn vx_style_package_exposes_tests_field() {
     assert_eq!(package.build_requires, vec!["python-3+"]);
     assert_eq!(package.private_build_requires, vec!["rez_builder-0"]);
     assert_eq!(
-        package.tests.get("artifact").map(String::as_str),
-        Some("python tests/check_artifact.py")
+        package
+            .tests
+            .get("artifact")
+            .map(|test| test.command.as_string()),
+        Some("python tests/check_artifact.py".to_string())
     );
     assert_eq!(
-        package.tests.get("zipfile").map(String::as_str),
-        Some("python tests/check_zipfile.py")
+        package
+            .tests
+            .get("zipfile")
+            .map(|test| test.command.as_string()),
+        Some("python tests/check_zipfile.py".to_string())
     );
 }
 

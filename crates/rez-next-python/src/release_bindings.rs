@@ -8,11 +8,14 @@
 //! 5. Update VCS tags
 
 use crate::runtime::get_runtime;
+use pyo3::call::PyCallArgs;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rez_next_build::vcs::{ReleaseVCS, VCSMetadata, VCSRevision};
+use rez_next_common::RezCoreError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // ============================================================================
 /// VCS Metadata for release
@@ -270,6 +273,310 @@ impl PyReleaseVCS {
     }
 }
 
+/// Adapt a Python release VCS object to the native release workflow.
+///
+/// `BuildProcessHelper` accepts user-provided Python VCS implementations. The
+/// native release manager remains the workflow owner while this adapter keeps
+/// those implementations on the same validation, build, install, and tagging
+/// path as the built-in VCS providers.
+struct PythonReleaseVCS {
+    inner: Py<PyAny>,
+    type_name: String,
+}
+
+impl PythonReleaseVCS {
+    fn new(inner: Py<PyAny>) -> Result<Self, RezCoreError> {
+        let type_name = Python::attach(|py| {
+            let object = inner.bind(py);
+            let name = object
+                .getattr("name")
+                .map_err(|error| python_vcs_error("name", error))?;
+            let name = if name.is_callable() {
+                name.call0()
+                    .map_err(|error| python_vcs_error("name", error))?
+            } else {
+                name
+            };
+            python_value_to_string("name", &name)
+        })?;
+
+        Ok(Self { inner, type_name })
+    }
+
+    fn has_method(&self, method: &str) -> Result<bool, RezCoreError> {
+        Python::attach(|py| {
+            self.inner
+                .bind(py)
+                .hasattr(method)
+                .map_err(|error| python_vcs_error(method, error))
+        })
+    }
+
+    fn call0(&self, method: &str) -> Result<Py<PyAny>, RezCoreError> {
+        Python::attach(|py| {
+            self.inner
+                .bind(py)
+                .call_method0(method)
+                .map(|value| value.unbind())
+                .map_err(|error| python_vcs_error(method, error))
+        })
+    }
+
+    fn call1<T>(&self, method: &str, args: T) -> Result<Py<PyAny>, RezCoreError>
+    where
+        T: for<'py> PyCallArgs<'py>,
+    {
+        Python::attach(|py| {
+            self.inner
+                .bind(py)
+                .call_method1(method, args)
+                .map(|value| value.unbind())
+                .map_err(|error| python_vcs_error(method, error))
+        })
+    }
+
+    fn string_result(&self, method: &str) -> Result<String, RezCoreError> {
+        let value = self.call0(method)?;
+        Python::attach(|py| python_value_to_string(method, value.bind(py)))
+    }
+
+    fn optional_string_attribute(
+        &self,
+        value: &Py<PyAny>,
+        attribute: &str,
+    ) -> Result<Option<String>, RezCoreError> {
+        Python::attach(|py| {
+            let value = value.bind(py);
+            let Ok(attribute_value) = value.getattr(attribute) else {
+                return Ok(None);
+            };
+            if attribute_value.is_none() {
+                return Ok(None);
+            }
+            python_value_to_string(attribute, &attribute_value).map(Some)
+        })
+    }
+
+    fn metadata(&self) -> Result<VCSMetadata, RezCoreError> {
+        let metadata_value = if self.has_method("get_metadata")? {
+            Some(self.call0("get_metadata")?)
+        } else {
+            None
+        };
+
+        let field = |name: &str| {
+            metadata_value.as_ref().map_or(Ok(None), |value| {
+                self.optional_string_attribute(value, name)
+            })
+        };
+        let commit_hash = match field("commit_hash")? {
+            Some(value) => value,
+            None => self.get_latest_commit()?,
+        };
+        let branch = field("branch")?.or_else(|| {
+            self.get_current_branch()
+                .ok()
+                .filter(|value| !value.is_empty())
+        });
+
+        let timestamp = if let Some(value) = metadata_value.as_ref() {
+            Python::attach(|py| {
+                let value = value.bind(py);
+                let Ok(timestamp) = value.getattr("timestamp") else {
+                    return Ok(None);
+                };
+                if timestamp.is_none() {
+                    return Ok(None);
+                }
+                timestamp
+                    .extract::<i64>()
+                    .map(Some)
+                    .map_err(|error| python_vcs_error("timestamp", error))
+            })?
+        } else {
+            None
+        };
+
+        Ok(VCSMetadata {
+            vcs_type: field("vcs_type")?.unwrap_or_else(|| self.type_name.clone()),
+            repository_url: field("repository_url")?,
+            branch,
+            tracking_branch: field("tracking_branch")?,
+            fetch_url: field("fetch_url")?,
+            push_url: field("push_url")?,
+            commit_hash,
+            commit_message: field("commit_message")?,
+            author_name: field("author_name")?,
+            author_email: field("author_email")?,
+            timestamp,
+            ..Default::default()
+        })
+    }
+}
+
+impl ReleaseVCS for PythonReleaseVCS {
+    fn get_type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    fn get_repo_root(&self) -> Result<PathBuf, RezCoreError> {
+        if self.has_method("get_repo_root")? {
+            return Ok(PathBuf::from(self.string_result("get_repo_root")?));
+        }
+        Python::attach(|py| {
+            let object = self.inner.bind(py);
+            let root = object
+                .getattr("vcs_root")
+                .map_err(|error| python_vcs_error("vcs_root", error))?;
+            Ok(PathBuf::from(python_value_to_string("vcs_root", &root)?))
+        })
+    }
+
+    fn is_clean(&self) -> Result<bool, RezCoreError> {
+        if self.has_method("is_clean")? {
+            let value = self.call0("is_clean")?;
+            return Python::attach(|py| {
+                value
+                    .bind(py)
+                    .extract::<bool>()
+                    .map_err(|error| python_vcs_error("is_clean", error))
+            });
+        }
+        Ok(true)
+    }
+
+    fn get_current_branch(&self) -> Result<String, RezCoreError> {
+        if !self.has_method("get_current_branch")? {
+            return Ok(String::new());
+        }
+        let value = self.call0("get_current_branch")?;
+        Python::attach(|py| {
+            if value.bind(py).is_none() {
+                Ok(String::new())
+            } else {
+                python_value_to_string("get_current_branch", value.bind(py))
+            }
+        })
+    }
+
+    fn get_latest_commit(&self) -> Result<String, RezCoreError> {
+        if self.has_method("get_latest_commit")? {
+            return self.string_result("get_latest_commit");
+        }
+        self.string_result("get_current_revision")
+    }
+
+    fn tag_exists(&self, tag: &str) -> Result<bool, RezCoreError> {
+        let value = self.call1("tag_exists", (tag,))?;
+        Python::attach(|py| {
+            value
+                .bind(py)
+                .extract::<bool>()
+                .map_err(|error| python_vcs_error("tag_exists", error))
+        })
+    }
+
+    fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError> {
+        let method = if self.has_method("create_tag")? {
+            "create_tag"
+        } else {
+            "create_release_tag"
+        };
+        self.call1(method, (tag, message))?;
+        Ok(())
+    }
+
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
+    fn get_changelog(
+        &self,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
+    ) -> Result<String, RezCoreError> {
+        let value = Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("previous_revision", previous_revision)
+                .map_err(|error| python_vcs_error("get_changelog", error))?;
+            kwargs
+                .set_item("max_revisions", max_revisions)
+                .map_err(|error| python_vcs_error("get_changelog", error))?;
+            self.inner
+                .bind(py)
+                .call_method("get_changelog", (), Some(&kwargs))
+                .map(|value| value.unbind())
+                .map_err(|error| python_vcs_error("get_changelog", error))
+        })?;
+        Python::attach(|py| python_value_to_string("get_changelog", value.bind(py)))
+    }
+
+    fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError> {
+        self.metadata()
+    }
+
+    fn validate_repo_state(&self) -> Result<(), RezCoreError> {
+        let method = if self.has_method("validate_repo_state")? {
+            "validate_repo_state"
+        } else {
+            "validate_repostate"
+        };
+        self.call0(method)?;
+        Ok(())
+    }
+
+    fn is_releasable_branch(&self) -> Result<Option<bool>, RezCoreError> {
+        if !self.has_method("is_releasable_branch")? {
+            return Ok(None);
+        }
+        let value = self.call0("is_releasable_branch")?;
+        Python::attach(|py| {
+            if value.bind(py).is_none() {
+                Ok(None)
+            } else {
+                value
+                    .bind(py)
+                    .extract::<bool>()
+                    .map(Some)
+                    .map_err(|error| python_vcs_error("is_releasable_branch", error))
+            }
+        })
+    }
+
+    fn export(&self, revision: &VCSRevision, path: &Path) -> Result<(), RezCoreError> {
+        Python::attach(|py| {
+            let revision = Py::new(py, PyVCSRevision::from(revision.clone()))
+                .map_err(|error| python_vcs_error("export", error))?;
+            self.inner
+                .bind(py)
+                .call_method1("export", (revision, path.to_string_lossy().as_ref()))
+                .map(|_| ())
+                .map_err(|error| python_vcs_error("export", error))
+        })
+    }
+}
+
+fn python_vcs_error(operation: &str, error: PyErr) -> RezCoreError {
+    RezCoreError::ReleaseVCSError(format!(
+        "Python VCS operation '{operation}' failed: {error}"
+    ))
+}
+
+fn python_value_to_string(
+    operation: &str,
+    value: &Bound<'_, PyAny>,
+) -> Result<String, RezCoreError> {
+    value
+        .extract::<String>()
+        .or_else(|_| {
+            value
+                .str()
+                .map(|string| string.to_string_lossy().into_owned())
+        })
+        .map_err(|error| python_vcs_error(operation, error))
+}
+
 #[pymethods]
 impl PyReleaseVCS {
     #[new]
@@ -319,9 +626,27 @@ impl PyReleaseVCS {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
-    pub fn get_changelog(&self, from_rev: Option<&str>, to_rev: Option<&str>) -> PyResult<String> {
+    #[pyo3(signature = (previous_revision=None, max_revisions=None))]
+    pub fn get_changelog(
+        &self,
+        previous_revision: Option<&Bound<'_, PyAny>>,
+        max_revisions: Option<usize>,
+    ) -> PyResult<String> {
+        let previous_revision = previous_revision
+            .map(|revision| {
+                if let Ok(revision_id) = revision.getattr("revision_id") {
+                    revision_id.extract::<String>()
+                } else if let Ok(revision_id) = revision.extract::<String>() {
+                    Ok(revision_id)
+                } else {
+                    revision
+                        .str()
+                        .map(|value| value.to_string_lossy().into_owned())
+                }
+            })
+            .transpose()?;
         self.require_inner()?
-            .get_changelog(from_rev, to_rev)
+            .get_changelog(previous_revision.as_deref(), max_revisions)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
 
@@ -335,6 +660,14 @@ impl PyReleaseVCS {
     pub fn validate_repo_state(&self) -> PyResult<()> {
         self.require_inner()?
             .validate_repo_state()
+            .map(|_| ())
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Validate repository state using Rez's upstream method spelling.
+    pub fn validate_repostate(&self) -> PyResult<()> {
+        self.require_inner()?
+            .validate_repostate()
             .map(|_| ())
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
     }
@@ -531,6 +864,10 @@ pub struct PyReleaseManager {
     pub(crate) mode: ReleaseMode,
     pub(crate) skip_build: bool,
     pub(crate) skip_tests: bool,
+    pub(crate) variants: Option<Vec<usize>>,
+    pub(crate) skip_repo_errors: bool,
+    pub(crate) skip_vcs_validation: bool,
+    pub(crate) ensure_latest: bool,
 }
 
 #[pymethods]
@@ -542,7 +879,32 @@ impl PyReleaseManager {
             mode: ReleaseMode::from_str(mode.unwrap_or("release")),
             skip_build,
             skip_tests,
+            variants: None,
+            skip_repo_errors: false,
+            skip_vcs_validation: false,
+            ensure_latest: true,
         }
+    }
+
+    /// Skip repository-state validation before releasing.
+    pub fn set_skip_vcs_validation(&mut self, skip: bool) {
+        self.skip_vcs_validation = skip;
+    }
+
+    /// Downgrade only dedicated VCS failures to warnings during a release.
+    pub fn set_skip_repo_errors(&mut self, skip: bool) {
+        self.skip_repo_errors = skip;
+    }
+
+    /// Select the zero-based variants to release. `None` releases all variants.
+    #[pyo3(signature = (variants=None))]
+    pub fn set_variants(&mut self, variants: Option<Vec<usize>>) {
+        self.variants = variants;
+    }
+
+    /// Set whether a newer published version should reject this release.
+    pub fn set_ensure_latest(&mut self, ensure_latest: bool) {
+        self.ensure_latest = ensure_latest;
     }
 
     pub(crate) fn __str__(&self) -> String {
@@ -558,12 +920,13 @@ impl PyReleaseManager {
     /// `ignore_existing_tag` controls what happens when the release tag is
     /// already present: `None` keeps the legacy warn-and-continue behaviour,
     /// `Some(false)` makes it an error, `Some(true)` allows re-releasing.
-    #[pyo3(signature = (source_dir=None, message=None, ignore_existing_tag=None))]
+    #[pyo3(signature = (source_dir=None, message=None, ignore_existing_tag=None, vcs=None))]
     pub(crate) fn release(
         &self,
         source_dir: Option<&str>,
         message: Option<&str>,
         ignore_existing_tag: Option<bool>,
+        vcs: Option<Py<PyAny>>,
     ) -> PyResult<PyReleaseResult> {
         use rez_next_build::release::{
             ReleaseManager as RustReleaseManager, ReleaseMode as RustReleaseMode,
@@ -578,7 +941,17 @@ impl PyReleaseManager {
 
         // Create Rust ReleaseManager
         let mut rust_manager = RustReleaseManager::new(mode, self.skip_build, self.skip_tests);
+        rust_manager.set_skip_vcs_validation(self.skip_vcs_validation);
+        rust_manager.set_skip_repo_errors(self.skip_repo_errors);
         rust_manager.set_ignore_existing_tag(ignore_existing_tag);
+        rust_manager.set_ensure_latest(self.ensure_latest);
+        rust_manager.set_variants(self.variants.clone());
+
+        let vcs = vcs
+            .map(PythonReleaseVCS::new)
+            .transpose()
+            .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?
+            .map(|vcs| Arc::new(vcs) as Arc<dyn ReleaseVCS + Send + Sync>);
 
         // Convert source_dir to Path
         let cwd = std::env::current_dir()
@@ -591,7 +964,7 @@ impl PyReleaseManager {
         };
 
         // Call Rust implementation
-        match rust_manager.release(&source, message) {
+        match rust_manager.release_with_vcs(&source, message, vcs) {
             Ok(result) => {
                 // Convert VCSMetadata to JSON string (if present)
                 let vcs_metadata = result
@@ -665,33 +1038,24 @@ impl PyReleaseManager {
     ) -> PyResult<Vec<String>> {
         use crate::package_functions::expand_home;
         use rez_next_common::config::RezCoreConfig;
-        use rez_next_repository::package_repository::FilesystemPackageRepository;
-        use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
         use rez_next_repository::simple_repository::RepositoryManager;
-        use std::path::PathBuf;
 
         let rt = get_runtime();
 
         let config = RezCoreConfig::load();
-        let mut repo_manager = RepositoryManager::new();
 
-        let pkg_paths: Vec<PathBuf> = paths
-            .map(|p| p.into_iter().map(PathBuf::from).collect())
+        let pkg_paths: Vec<String> = paths
+            .map(|p| p.into_iter().map(|path| expand_home(&path)).collect())
             .unwrap_or_else(|| {
                 config
                     .packages_path
                     .iter()
-                    .map(|p| PathBuf::from(expand_home(p)))
+                    .map(|p| expand_home(p))
                     .collect()
             });
 
-        for (i, path) in pkg_paths.iter().enumerate() {
-            if path.exists() {
-                let repository =
-                    FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-                repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-            }
-        }
+        let repo_manager = RepositoryManager::from_package_paths(pkg_paths)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         let packages = rt
             .block_on(repo_manager.find_packages(package_name))
@@ -730,7 +1094,7 @@ pub fn release_package(
         "release"
     };
     let mgr = PyReleaseManager::new(Some(mode), false, false);
-    mgr.release(source_dir, message, ignore_existing_tag)
+    mgr.release(source_dir, message, ignore_existing_tag, None)
 }
 
 #[cfg(test)]

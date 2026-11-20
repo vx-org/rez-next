@@ -30,16 +30,17 @@ curl -fsSL https://raw.githubusercontent.com/vx-org/rez-next/main/install.sh | s
 或指定版本安装：
 
 ```bash
-REZ_NEXT_VERSION=0.3.12 curl -fsSL https://raw.githubusercontent.com/vx-org/rez-next/main/install.sh | sh # x-release-please-version
+REZ_NEXT_VERSION=0.3.13 curl -fsSL https://raw.githubusercontent.com/vx-org/rez-next/main/install.sh | sh # x-release-please-version
 ```
 
 环境变量说明：
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `REZ_NEXT_VERSION` | 指定安装版本（如 `0.3.12`） | 最新版本 | <!-- x-release-please-version -->
+| `REZ_NEXT_VERSION` | 指定安装版本（如 `0.3.13`） | 最新版本 | <!-- x-release-please-version -->
 | `REZ_NEXT_INSTALL` | 安装目录 | `$HOME/.rez-next/bin` |
 | `REZ_NEXT_MUSL` | Linux 强制使用 musl 构建 | 自动检测 |
+| `REZ_NEXT_NO_COMPLETIONS` | 跳过动态 Shell 补全安装 | 未设置 |
 
 ### Windows（PowerShell）
 
@@ -75,11 +76,26 @@ rez-next self-update
 rez-next self-update --check
 
 # 更新到指定版本
-rez-next self-update --version 0.3.12 # x-release-please-version
+rez-next self-update --version 0.3.13 # x-release-please-version
 
 # 强制重新安装当前版本
 rez-next self-update --force
 ```
+
+---
+
+## CLI 与 IDE 补全
+
+安装脚本会为 bash、zsh、fish 或 PowerShell 注册动态补全。IDE/LSP 客户端
+可复用同一个基于 Rez 包仓库的查询接口：
+
+```bash
+rez-next completions packages --prefix pyth --json
+rez-next completions versions --package python --json
+rez-next completions shell --shell powershell
+```
+
+JSON 契约与手动 Shell 配置见[补全 API](docs/completion-api.md)。
 
 ---
 
@@ -262,7 +278,7 @@ for r in results:
 names = search_package_names("^py")  # 支持正则
 ```
 
-#### Shell 补全（rez.complete）
+#### Python Shell 补全（rez.complete）
 
 ```python
 from rez_next.complete import get_completion_script
@@ -436,6 +452,9 @@ cargo bench --bench simple_package_benchmark
 - [API 稳定性](docs/api-stability.md) — 公开 API 契约与 semver 门禁
 - [贡献指南](docs/contributing.md) — 开发工作流和 CI
 - [Python 集成](docs/python-integration_zh.md) — Python 绑定使用说明与模块覆盖
+- [Rust 集成](docs/rust-integration.md) — 面向 vx 的稳定嵌入边界
+- [Rez 兼容基线](docs/rez-compatibility.md) — 官方版本基线、已支持契约与剩余差距
+- [补全 API](docs/completion-api.md) — 版本化 IDE 查询与动态 Shell 注册
 - [基准测试指南](docs/benchmark_guide.md) — 运行和解读基准测试
 - [性能指南](docs/performance.md) — 性能分析工具
 - [Pre-commit 配置](docs/PRE_COMMIT_SETUP.md) — 代码质量钩子

@@ -153,8 +153,6 @@ pub async fn add_variants(
     args: &PkgCacheArgs,
 ) -> RezCoreResult<()> {
     use rez_next_common::config::RezCoreConfig;
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
 
     println!("Adding {} variant(s) to cache:", variant_uris.len());
@@ -178,15 +176,12 @@ pub async fn add_variants(
         };
 
         // Find package in repos
-        let mut repo_manager = RepositoryManager::new();
-        for (i, path_str) in config.packages_path.iter().enumerate() {
-            let path = std::path::PathBuf::from(path_str);
-            if path.exists() {
-                repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(
-                    FilesystemPackageRepository::with_name(path, format!("repo_{i}")),
-                )));
-            }
-        }
+        let repo_manager = RepositoryManager::from_package_paths(
+            config
+                .packages_path
+                .iter()
+                .map(|path| expand_home_path(path).to_string_lossy().into_owned()),
+        )?;
 
         let packages = repo_manager
             .find_packages(&pkg_name)

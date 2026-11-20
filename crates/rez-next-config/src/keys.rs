@@ -610,7 +610,7 @@ static REGISTRY: Lazy<Vec<KeyDef>> = Lazy::new(|| {
         KeyDef {
             name: "max_package_changelog_chars",
             ty: KeyType::Int,
-            default: Some(JsonValue::from(5000)),
+            default: Some(JsonValue::from(65536)),
             origin: Origin::Rez,
             deprecated: false,
             doc: "Maximum characters of changelog kept per package.",
@@ -630,6 +630,19 @@ static REGISTRY: Lazy<Vec<KeyDef>> = Lazy::new(|| {
             origin: Origin::Rez,
             deprecated: false,
             doc: "Directory a package is built in.",
+        },
+        KeyDef {
+            name: "build_script_names",
+            ty: KeyType::StrList,
+            default: Some(JsonValue::Array(vec![
+                JsonValue::String("build.sh".to_string()),
+                JsonValue::String("build.bat".to_string()),
+                JsonValue::String("build.py".to_string()),
+                JsonValue::String("build".to_string()),
+            ])),
+            origin: Origin::RezNext,
+            deprecated: false,
+            doc: "Custom build script detection order. rez has no equivalent key.",
         },
         KeyDef {
             name: "documentation_url",
@@ -925,6 +938,7 @@ mod tests {
         "local_packages_path",
         "release_packages_path",
         "plugin_path",
+        "plugins",
         "package_cache_path",
         "default_shell",
         "tmpdir",
@@ -941,6 +955,7 @@ mod tests {
         "default_relocatable",
         "build_directory",
         "context_tmpdir",
+        "max_package_changelog_chars",
         "use_rust_version",
         "use_rust_solver",
         "use_rust_repository",
@@ -979,6 +994,7 @@ mod tests {
             "default_relocatable",
             "build_directory",
             "context_tmpdir",
+            "max_package_changelog_chars",
         ] {
             assert_eq!(
                 find(name).unwrap().origin,

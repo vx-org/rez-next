@@ -19,6 +19,8 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from .exceptions import ReleaseHookCancellingError as RezReleaseHookCancellingError
+
 logger = logging.getLogger(__name__)
 
 
@@ -218,6 +220,8 @@ class BuildProcessHelper(BuildProcess):
             request.extend(str(r) for r in requires)
         build_requires = getattr(pkg, "build_requires", None) or []
         request.extend(str(r) for r in build_requires)
+        private_build_requires = getattr(pkg, "private_build_requires", None) or []
+        request.extend(str(r) for r in private_build_requires)
         try:
             ctx = ResolvedContext(request)
         except Exception as e:
@@ -235,7 +239,7 @@ class BuildProcessHelper(BuildProcess):
                 rxt_path = None
         return ctx, rxt_path
 
-    def pre_release(self):
+    def pre_release(self, release_message=None):
         """Validate pre-release conditions."""
         pkg = self.package
         if pkg is None:
@@ -269,6 +273,17 @@ class BuildProcessHelper(BuildProcess):
                         f"Newer published version exists ({prev_version} > {version}). "
                         "Set ensure_latest=False to bypass."
                     )
+        install_path = self.get_package_install_path(self.working_dir or os.getcwd())
+        self.run_hooks(
+            "pre_release",
+            user=os.getenv("USER") or os.getenv("USERNAME") or "",
+            install_path=install_path,
+            variants=None,
+            release_message=release_message,
+            changelog=None,
+            previous_version=None,
+            previous_revision=None,
+        )
         self._print("Pre-release validation passed.")
         return True
 
@@ -278,6 +293,17 @@ class BuildProcessHelper(BuildProcess):
         pkg = self.package
         version = getattr(pkg, "version", "unknown") if pkg else "unknown"
         self._print_header(f"Post-release: tagging {version} as {tag_name}")
+        install_path = self.get_package_install_path(self.working_dir or os.getcwd())
+        self.run_hooks(
+            "post_release",
+            user=os.getenv("USER") or os.getenv("USERNAME") or "",
+            install_path=install_path,
+            variants=[str(index) for index, _ in enumerate(getattr(pkg, "variants", None) or [None])],
+            release_message=release_message,
+            changelog=self.get_changelog(),
+            previous_version=None,
+            previous_revision=None,
+        )
         with self.repo_operation("tag"):
             if hasattr(self._vcs, "create_tag"):
                 self._vcs.create_tag(tag_name, message=release_message)
@@ -291,26 +317,41 @@ class BuildProcessHelper(BuildProcess):
         pkg = self.package
         if pkg is None:
             return "unknown"
+        name = getattr(pkg, "name", "unknown")
         version = getattr(pkg, "version", "unknown")
-        tag_format = "v{version}"
+        qualified_name = f"{name}-{version}"
+        tag_format = "{qualified_name}"
         from rez_next import config as cfg
 
         try:
-            cfg_tag = cfg.get("plugins.release_vcs.tag_name", None)
-            if cfg_tag:
+            plugin_data = cfg.plugins.data()
+            release_vcs = plugin_data.get("release_vcs", {})
+            cfg_tag = release_vcs.get("tag_name") if isinstance(release_vcs, dict) else None
+            if isinstance(cfg_tag, str) and cfg_tag:
                 tag_format = cfg_tag
-        except (AttributeError, KeyError):
+        except (AttributeError, KeyError, TypeError):
             pass  # Config may not have the expected structure
-        return tag_format.format(version=version)
+        return (
+            tag_format.replace("{name}", str(name))
+            .replace("{version}", str(version))
+            .replace("{qualified_name}", qualified_name)
+        )
 
     def run_hooks(self, hook_event, **kwargs):
         """Run configured release hooks."""
         try:
             from rez_next.release_hook import run_hooks
 
-            run_hooks(hook_event, package=self.package, vcs=self._vcs, **kwargs)
+            run_hooks(
+                hook_event,
+                package=self.package,
+                source_path=self.working_dir or os.getcwd(),
+                **kwargs,
+            )
         except ReleaseHookCancellingError:
             raise
+        except RezReleaseHookCancellingError as e:
+            raise ReleaseHookCancellingError(str(e)) from e
         except (ModuleNotFoundError, ImportError):
             logger.debug("release_hook module not available, skipping %s", hook_event)
         except Exception as e:
@@ -380,20 +421,30 @@ class BuildProcessHelper(BuildProcess):
         return success_count
 
     def release(self, release_message=None, variants=None):
-        """Default release implementation."""
+        """Delegate release orchestration to the native ReleaseManager."""
         if self._build_system is None:
             raise BuildProcessError("No build system configured for release")
-        pkg = self.package
-        name = getattr(pkg, "name", "unknown") if pkg else "unknown"
-        version = getattr(pkg, "version", "unknown") if pkg else "unknown"
-        self._print_header(f"Releasing {name}-{version}")
-        self.pre_release()
-        build_count = self.build(install=True, variants=variants)
-        if build_count == 0:
-            raise ReleaseError("Build failed: no variants were built successfully")
-        tag_name = self.post_release(release_message=release_message)
-        self._print(f"Release complete: {name}-{version} tagged as {tag_name}")
-        return build_count
+        try:
+            from rez_next.release import ReleaseManager
+
+            manager = ReleaseManager()
+            manager.set_skip_repo_errors(self._skip_repo_errors)
+            manager.set_ensure_latest(self._ensure_latest)
+            manager.set_variants(list(variants) if variants is not None else None)
+            result = manager.release(
+                self.working_dir or os.getcwd(),
+                release_message,
+                self._ignore_existing_tag,
+                vcs=self._vcs,
+            )
+        except Exception as error:
+            raise ReleaseError(f"Native release failed: {error}") from error
+
+        if result.errors or not result.success:
+            details = "; ".join(result.errors) or "release was not successful"
+            raise ReleaseError(details)
+
+        return len(variants) if variants is not None else max(len(getattr(self.package, "variants", None) or []), 1)
 
 
 # --- Factory functions ---

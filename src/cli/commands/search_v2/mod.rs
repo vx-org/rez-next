@@ -16,9 +16,8 @@ pub use types::{SearchArgs, SearchResult};
 
 use crate::cli::utils::expand_home_path;
 use rez_next_common::{config::RezCoreConfig, error::RezCoreResult};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
+use std::path::Path;
 
 /// Execute the search command
 pub fn execute(args: SearchArgs) -> RezCoreResult<()> {
@@ -44,11 +43,23 @@ async fn search_async(args: SearchArgs) -> RezCoreResult<()> {
         // Use default repositories from RezCoreConfig.
         add_default_repositories(&mut repo_manager).await?;
     } else {
-        for (i, repo_path) in args.repository.iter().enumerate() {
-            let expanded = expand_home_path(&repo_path.to_string_lossy());
-            let repository = FilesystemPackageRepository::with_name(expanded, format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
+        let repository_paths: Vec<String> = args
+            .repository
+            .iter()
+            .map(|path| {
+                expand_home_path(&path.to_string_lossy())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        for path in &repository_paths {
+            if !Path::new(path).is_dir() {
+                return Err(rez_next_common::error::RezCoreError::Repository(format!(
+                    "Repository path does not exist: {path}"
+                )));
+            }
         }
+        repo_manager = RepositoryManager::from_package_paths(repository_paths)?;
     }
 
     if !is_json_mode {
@@ -70,15 +81,12 @@ async fn search_async(args: SearchArgs) -> RezCoreResult<()> {
 /// Add default repositories from rez config
 async fn add_default_repositories(repo_manager: &mut RepositoryManager) -> RezCoreResult<()> {
     let config = RezCoreConfig::load();
-
-    for (i, path_str) in config.packages_path.iter().enumerate() {
-        let path = expand_home_path(path_str);
-        if path.exists() {
-            let repository = FilesystemPackageRepository::with_name(&path, format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
-
+    *repo_manager = RepositoryManager::from_package_paths(
+        config
+            .packages_path
+            .iter()
+            .map(|path| expand_home_path(path).to_string_lossy().into_owned()),
+    )?;
     Ok(())
 }
 

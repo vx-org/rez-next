@@ -661,8 +661,9 @@ impl PySolver {
 
     /// Resolve a list of package requirements into a ResolvedContext.
     /// Compatible with `solver.solve(packages)` -> `[ResolvedPackage, ...]`
-    fn solve(&self, packages: Vec<String>) -> PyResult<PyResolvedContext> {
+    fn solve(&self, py: Python<'_>, packages: Vec<String>) -> PyResult<PyResolvedContext> {
         PyResolvedContext::new(
+            py,
             packages,
             Some(
                 self.paths
@@ -670,6 +671,7 @@ impl PySolver {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect(),
             ),
+            true,
         )
     }
 }

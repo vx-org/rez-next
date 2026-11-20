@@ -1,6 +1,6 @@
 //! Build manager and coordination
 
-use crate::{BuildArtifacts, BuildEnvironment, BuildEvent, BuildProcess};
+use crate::{BuildArtifacts, BuildEnvironment, BuildEvent, BuildProcess, BuildType};
 use rez_next_common::RezCoreError;
 use rez_next_context::ResolvedContext;
 use rez_next_package::{Package, PackageInstallLayout};
@@ -34,6 +34,9 @@ pub struct BuildConfig {
     pub build_timeout_seconds: u64,
     /// Whether to clean build directory before building
     pub clean_before_build: bool,
+    /// Build type exposed as REZ_BUILD_TYPE.
+    #[serde(default)]
+    pub build_type: BuildType,
     /// Whether to keep build artifacts after successful build
     pub keep_artifacts: bool,
     /// Build verbosity level
@@ -66,6 +69,7 @@ impl Default for BuildConfig {
             max_concurrent_builds: 4,
             build_timeout_seconds: 3600, // 1 hour
             clean_before_build: false,
+            build_type: BuildType::Local,
             keep_artifacts: true,
             verbosity: BuildVerbosity::Normal,
             build_env_vars: HashMap::new(),
@@ -304,11 +308,12 @@ impl BuildManager {
         let build_id = Uuid::new_v4().to_string();
 
         // Create build environment
-        let mut build_env = BuildEnvironment::with_install_path(
+        let mut build_env = BuildEnvironment::with_install_path_and_type(
             &request.package,
             &self.config.build_dir,
             request.context.as_ref(),
             request.install_path.as_ref(),
+            self.config.build_type.clone(),
         )?;
         build_env.set_source_path(&request.source_dir);
         Self::apply_build_env_overrides(&mut build_env, &request, &self.config);

@@ -3,9 +3,10 @@
 use crate::{EnvironmentManager, ShellType};
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageRequirement};
+use rez_next_rex::RexEnvironment;
 use rez_next_version::Version;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -64,6 +65,7 @@ pub enum ContextStatus {
 
 /// Context configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextConfig {
     /// Whether to include parent environment variables
     pub inherit_parent_env: bool,
@@ -75,12 +77,11 @@ pub struct ContextConfig {
     pub additional_env_vars: HashMap<String, String>,
     /// Variables to unset
     pub unset_vars: Vec<String>,
-    /// Legacy tools-only PATH fallback strategy for packages without command phases.
-    /// Explicit pre_commands, commands and post_commands remain authoritative.
+    /// PATH modification strategy
     pub path_strategy: PathStrategy,
 }
 
-/// Legacy tools-only PATH fallback strategy for packages without command phases.
+/// PATH modification strategy
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PathStrategy {
     /// Prepend to existing PATH
@@ -126,6 +127,38 @@ impl ResolvedContext {
             status: ContextStatus::Resolving,
             config: ContextConfig::default(),
         }
+    }
+
+    /// Return requirements added by Rez configuration during resolution.
+    pub fn implicit_packages(&self) -> Vec<PackageRequirement> {
+        self.metadata
+            .get(RESOLVED_CONTEXT_IMPLICIT_PACKAGES_KEY)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default()
+    }
+
+    /// Store requirements added by Rez configuration during resolution.
+    pub fn set_implicit_packages(&mut self, requirements: Vec<PackageRequirement>) {
+        self.metadata.insert(
+            RESOLVED_CONTEXT_IMPLICIT_PACKAGES_KEY.to_string(),
+            serde_json::to_string(&requirements).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+
+    /// Return the ephemeral requirements selected during resolution.
+    pub fn resolved_ephemerals(&self) -> Vec<PackageRequirement> {
+        self.metadata
+            .get(RESOLVED_CONTEXT_EPHEMERALS_KEY)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default()
+    }
+
+    /// Store the ephemeral requirements selected during resolution.
+    pub fn set_resolved_ephemerals(&mut self, requirements: Vec<PackageRequirement>) {
+        self.metadata.insert(
+            RESOLVED_CONTEXT_EPHEMERALS_KEY.to_string(),
+            serde_json::to_string(&requirements).unwrap_or_else(|_| "[]".to_string()),
+        );
     }
 
     /// Get a package by name
@@ -193,11 +226,98 @@ impl ResolvedContext {
 
     /// Generate environment variables for this context
     pub async fn generate_environment(&mut self) -> Result<(), RezCoreError> {
-        let env_manager = EnvironmentManager::new(self.config.clone());
-        self.environment_vars = env_manager
-            .generate_environment(&self.resolved_packages)
-            .await?;
+        self.environment_vars = self.get_environ(None).await?;
         Ok(())
+    }
+
+    /// Generate the environment produced by this context.
+    ///
+    /// An explicit parent environment is interpreted according to this
+    /// context's inheritance policy. Context-level `REZ_USED_*` metadata is
+    /// added after package actions.
+    pub async fn get_environ(
+        &self,
+        parent_environment: Option<HashMap<String, String>>,
+    ) -> Result<HashMap<String, String>, RezCoreError> {
+        Ok(self.get_rex_environment(parent_environment).await?.vars)
+    }
+
+    /// Generate the complete Rex activation state for this context.
+    pub async fn get_rex_environment(
+        &self,
+        parent_environment: Option<HashMap<String, String>>,
+    ) -> Result<RexEnvironment, RezCoreError> {
+        let environment_manager = match parent_environment {
+            Some(environment) => {
+                EnvironmentManager::with_parent_environment(self.config.clone(), environment)
+            }
+            None => EnvironmentManager::new(self.config.clone()),
+        };
+        let resolved_ephemeral_names = self
+            .resolved_ephemerals()
+            .iter()
+            .map(|requirement| requirement.name.trim_start_matches('.').to_string())
+            .collect::<HashSet<_>>();
+        let mut environment = environment_manager
+            .generate_rex_environment_with_ephemerals(
+                &self.resolved_packages,
+                &resolved_ephemeral_names,
+            )
+            .await?;
+        self.add_context_environment_metadata(&mut environment.vars);
+        Ok(environment)
+    }
+
+    fn add_context_environment_metadata(&self, environment: &mut HashMap<String, String>) {
+        let request = self
+            .requirements
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let resolved_packages = self
+            .resolved_packages
+            .iter()
+            .map(|package| match &package.version {
+                Some(version) => format!("{}-{}", package.name, version.as_str()),
+                None => package.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let resolve = resolved_packages.join(" ");
+
+        environment.insert("REZ_USED_REQUEST".to_string(), request);
+        environment.insert("REZ_USED_RESOLVE".to_string(), resolve.clone());
+        environment.insert("REZ_USED_PACKAGES_NAMES".to_string(), resolve);
+        environment.insert(
+            "REZ_USED_IMPLICIT_PACKAGES".to_string(),
+            self.implicit_packages()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let resolved_ephemerals = self.resolved_ephemerals();
+        if !resolved_ephemerals.is_empty() {
+            environment.insert(
+                "REZ_USED_EPH_RESOLVE".to_string(),
+                resolved_ephemerals
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        environment.insert(
+            "REZ_USED_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        environment.insert(
+            "REZ_USED_TIMESTAMP".to_string(),
+            self.created_at.to_string(),
+        );
+        if let Some(package_paths) = self.metadata.get("package_paths") {
+            environment.insert("REZ_USED_PACKAGES_PATH".to_string(), package_paths.clone());
+        }
     }
 
     /// Get all tools from resolved packages
@@ -308,6 +428,45 @@ impl ResolvedContext {
         // Hash configuration
         self.config.inherit_parent_env.hash(&mut hasher);
         format!("{:x}", hasher.finish())
+    }
+}
+
+pub(crate) const CONTEXT_PARENT_VARIABLES_KEY: &str = "__rez_next_parent_variables";
+pub(crate) const CONTEXT_ALL_PARENT_VARIABLES_KEY: &str = "__rez_next_all_parent_variables";
+const RESOLVED_CONTEXT_IMPLICIT_PACKAGES_KEY: &str = "__rez_next_implicit_packages";
+const RESOLVED_CONTEXT_EPHEMERALS_KEY: &str = "__rez_next_resolved_ephemerals";
+
+impl ContextConfig {
+    /// Return parent variables whose original values may be inherited.
+    pub fn parent_variables(&self) -> Vec<String> {
+        self.additional_env_vars
+            .get(CONTEXT_PARENT_VARIABLES_KEY)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default()
+    }
+
+    /// Configure parent variables whose original values may be inherited.
+    pub fn set_parent_variables(&mut self, variables: Vec<String>) {
+        self.additional_env_vars.insert(
+            CONTEXT_PARENT_VARIABLES_KEY.to_string(),
+            serde_json::to_string(&variables).unwrap_or_else(|_| "[]".to_string()),
+        );
+    }
+
+    /// Return whether all touched variables inherit their parent value.
+    pub fn all_parent_variables(&self) -> bool {
+        self.additional_env_vars
+            .get(CONTEXT_ALL_PARENT_VARIABLES_KEY)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(false)
+    }
+
+    /// Configure whether all touched variables inherit their parent value.
+    pub fn set_all_parent_variables(&mut self, enabled: bool) {
+        self.additional_env_vars.insert(
+            CONTEXT_ALL_PARENT_VARIABLES_KEY.to_string(),
+            enabled.to_string(),
+        );
     }
 }
 

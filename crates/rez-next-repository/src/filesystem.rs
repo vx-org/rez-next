@@ -325,7 +325,10 @@ impl FileSystemRepository {
             }
 
             // First check if this directory itself contains a package file (flat layout)
-            let has_direct_pkg = family_path.join("package.py").exists();
+            let has_direct_pkg = ["package.py", "package.yaml", "package.yml"]
+                .iter()
+                .map(|name| family_path.join(name))
+                .any(|path| path.is_file());
 
             if has_direct_pkg {
                 if let Ok(scan_result) = self
@@ -383,7 +386,11 @@ impl FileSystemRepository {
         let mut size_bytes = 0;
 
         // Look for package definition files
-        let package_files = [path.join("package.py")];
+        let package_files = [
+            path.join("package.py"),
+            path.join("package.yaml"),
+            path.join("package.yml"),
+        ];
 
         for package_file in &package_files {
             if package_file.exists() {
@@ -432,6 +439,7 @@ impl FileSystemRepository {
                             package_file.display(),
                             e
                         );
+                        return Err(e);
                     }
                 }
             }

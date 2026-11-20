@@ -6,10 +6,27 @@
 #   REZ_NEXT_VERSION  - Specific version to install (e.g., "0.1.0"). Default: latest
 #   REZ_NEXT_INSTALL  - Installation directory. Default: $HOME/.rez-next/bin
 #   REZ_NEXT_MUSL     - Set to "1" on Linux to prefer musl build. Default: auto-detect
+#   REZ_NEXT_NO_COMPLETIONS - Set to "1" to skip shell completion installation
 set -eu
 
 REPO="vx-org/rez-next"
 BINARY_NAME="rez-next"
+
+create_compatibility_wrappers() {
+    for alias in \
+        rezolve rez-bind rez-build rez-config rez-context rez-cp rez-depends \
+        rez-diff rez-env rez-gui rez-help rez-interpret rez-memcache rez-mv \
+        rez-pip rez-pkg-cache rez-pkg-ignore rez-plugins rez-python \
+        rez-release rez-rm rez-search rez-selftest rez-status rez-suite \
+        rez-test rez-view rez-yaml2py rez-bundle rez-benchmark; do
+        cat > "$INSTALL_DIR/$alias" <<EOF
+#!/bin/sh
+export REZ_NEXT_ENTRYPOINT="$alias"
+exec "\$(dirname "\$0")/$BINARY_NAME" "\$@"
+EOF
+        chmod +x "$INSTALL_DIR/$alias"
+    done
+}
 
 # --- Logging helpers ---
 info() { printf '\033[0;34minfo:\033[0m %s\n' "$*"; }
@@ -103,6 +120,32 @@ detect_target() {
     esac
 
     info "Detected platform: $OS $ARCH ($TARGET)"
+}
+
+# --- Install dynamic shell completions ---
+install_completions() {
+    if [ "${REZ_NEXT_NO_COMPLETIONS:-0}" = "1" ]; then
+        info "Skipping shell completions (REZ_NEXT_NO_COMPLETIONS=1)"
+        return
+    fi
+
+    local binary="$INSTALL_DIR/$BINARY_NAME"
+    local bash_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+    local zsh_dir="$HOME/.zsh/completions"
+    local fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+
+    if ! mkdir -p "$bash_dir" "$zsh_dir" "$fish_dir"; then
+        warn "Could not create shell completion directories"
+        return
+    fi
+
+    if "$binary" completions shell --shell bash > "$bash_dir/$BINARY_NAME" &&
+       "$binary" completions shell --shell zsh > "$zsh_dir/_$BINARY_NAME" &&
+       "$binary" completions shell --shell fish > "$fish_dir/$BINARY_NAME.fish"; then
+        success "Installed dynamic completions for bash, zsh, and fish"
+    else
+        warn "Could not install one or more shell completion scripts"
+    fi
 }
 
 # --- Get latest version ---
@@ -224,6 +267,22 @@ install() {
 
     chmod +x "$binary_path"
     mv "$binary_path" "$INSTALL_DIR/$BINARY_NAME"
+
+    local rez_binary_path
+    rez_binary_path=$(find "$tmpdir" -name "rez" -type f | head -1)
+    if [ -z "$rez_binary_path" ]; then
+        rez_binary_path=$(find "$tmpdir" -name "rez.exe" -type f | head -1)
+    fi
+    if [ -n "$rez_binary_path" ]; then
+        chmod +x "$rez_binary_path"
+        local rez_binary_name="rez"
+        case "$rez_binary_path" in
+            *.exe) rez_binary_name="rez.exe" ;;
+        esac
+        mv "$rez_binary_path" "$INSTALL_DIR/$rez_binary_name"
+    fi
+
+    create_compatibility_wrappers
     success "${BINARY_NAME} v${VERSION} installed to ${INSTALL_DIR}/${BINARY_NAME}"
 
     # Show upgrade info
@@ -268,6 +327,7 @@ install() {
         local installed_version
         installed_version=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null | head -1)
         success "Verified: ${installed_version}"
+        install_completions
     else
         warn "Could not verify installation, but binary was placed at ${INSTALL_DIR}/${BINARY_NAME}"
     fi

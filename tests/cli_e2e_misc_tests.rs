@@ -12,7 +12,7 @@ use std::process::Command;
 #[path = "cli_e2e_helpers.rs"]
 mod cli_e2e_helpers;
 
-use cli_e2e_helpers::{make_test_repo, rez_ok, rez_output};
+use cli_e2e_helpers::{make_test_repo, rez_ok, rez_output, write_package};
 
 macro_rules! skip_no_bin {
     () => {
@@ -276,9 +276,27 @@ fn test_diff_help() {
 // ── plugins ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_plugins_list() {
+fn test_plugins_list_uses_package_metadata() {
     skip_no_bin!();
-    let out = rez_ok(&["plugins"]);
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("packages");
+    write_package(&repository, "maya", "2024", "");
+    write_package(
+        &repository,
+        "maya_plugin",
+        "1.0.0",
+        r#"plugin_for = ["maya"]"#,
+    );
+    write_package(
+        &repository,
+        "plugin_named_tool",
+        "1.0.0",
+        r#"tools = ["maya"]; requires = ["maya"]"#,
+    );
+
+    let repository = repository.to_string_lossy().to_string();
+    let out = rez_ok(&["plugins", "maya", "--paths", &repository]);
+    assert_eq!(out.trim(), "maya_plugin");
     assert!(
         !out.contains('\0'),
         "plugins output should not contain NUL bytes: {out}"

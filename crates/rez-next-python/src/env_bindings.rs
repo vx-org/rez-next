@@ -6,18 +6,14 @@
 //! - `env_apply()`: apply environment to current process
 
 use crate::package_bindings::PyPackage;
-use crate::package_functions::expand_home;
 use crate::runtime::get_runtime;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rez_next_package::{PackageRequirement, Requirement};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_rex::{RexExecutor, ShellType, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Complete rez environment: resolved packages + generated environment variables + shell scripts.
@@ -54,15 +50,7 @@ impl PyRezEnv {
         use rez_next_common::config::RezCoreConfig;
 
         let config = RezCoreConfig::load();
-        let pkg_paths: Vec<PathBuf> = paths
-            .map(|p| p.into_iter().map(PathBuf::from).collect())
-            .unwrap_or_else(|| {
-                config
-                    .packages_path
-                    .iter()
-                    .map(|p| PathBuf::from(expand_home(p)))
-                    .collect()
-            });
+        let pkg_paths: Vec<String> = paths.unwrap_or_else(|| config.packages_path.clone());
 
         // Parse requirements
         let requirements: Result<Vec<PackageRequirement>, _> = packages
@@ -85,14 +73,8 @@ impl PyRezEnv {
         };
 
         // Build repository manager
-        let mut repo_manager = RepositoryManager::new();
-        for (i, path) in pkg_paths.iter().enumerate() {
-            if path.exists() {
-                let repository =
-                    FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-                repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-            }
-        }
+        let repo_manager = RepositoryManager::from_package_paths(pkg_paths)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         // Convert to Requirement for resolver
         let resolver_reqs: Vec<Requirement> = requirements

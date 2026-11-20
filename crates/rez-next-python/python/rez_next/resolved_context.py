@@ -352,6 +352,11 @@ def _context_graph(self, as_dot=False):
     return self.get_dependency_graph(as_dot=as_dot)
 
 
+def _context_has_graph(self):
+    """Whether the context contains resolved package graph data."""
+    return bool(getattr(self, "resolved_packages", []) or [])
+
+
 def _context_failed(self):
     """Whether the context failed to resolve."""
     return not self.success
@@ -454,6 +459,38 @@ def _context_print_resolve_diff(self, other, heading=None):
     return text
 
 
+def _context_get_resolve_diff(self, other):
+    """Return the Rez-shaped version changes between two contexts."""
+    current = {getattr(package, "name", ""): package for package in self.resolved_packages}
+    newer = {}
+    for package in other.resolved_packages:
+        name = getattr(package, "name", "")
+        previous = current.get(name)
+        if previous is None:
+            continue
+        if getattr(previous, "version_str", None) != getattr(package, "version_str", None):
+            newer[name] = [previous, package]
+    return {"newer_packages": newer} if newer else {}
+
+
+def _context_get_tool_variants(self, tool):
+    """Return resolved packages that provide *tool*."""
+    return [
+        package
+        for package in self.resolved_packages
+        if tool in (getattr(package, "tools", None) or [])
+    ]
+
+
+def _context_get_conflicting_tools(self):
+    """Return tools provided by more than one resolved package."""
+    providers = {}
+    for package in self.resolved_packages:
+        for tool in getattr(package, "tools", None) or []:
+            providers.setdefault(tool, []).append(package)
+    return {tool: packages for tool, packages in providers.items() if len(packages) > 1}
+
+
 def _context_get_resolve_as_exact_requests(self):
     """Convert resolved packages to exact version requests.
 
@@ -499,11 +536,15 @@ def _apply_patches():
         "which": _context_which,
         "get_dependency_graph": _context_get_dependency_graph,
         "graph": _context_graph,
+        "has_graph": property(_context_has_graph),
         "failed": property(_context_failed),
         "requirements": property(_context_requirements),
         "is_current": _context_is_current,
         "to_dot": _context_to_dot,
         "print_resolve_diff": _context_print_resolve_diff,
+        "get_resolve_diff": _context_get_resolve_diff,
+        "get_tool_variants": _context_get_tool_variants,
+        "get_conflicting_tools": _context_get_conflicting_tools,
         "get_resolve_as_exact_requests": _context_get_resolve_as_exact_requests,
     }
 

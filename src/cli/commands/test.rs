@@ -11,9 +11,10 @@ use crate::cli::utils::expand_home_path;
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
-use rez_next_package::{Requirement, serialization::PackageSerializer};
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
+use rez_next_package::{
+    Requirement, TestCommand, TestVariantFilter, serialization::PackageSerializer, shell_command,
+};
+use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
@@ -26,12 +27,21 @@ use std::time::Instant;
 #[derive(Debug, Clone, Args)]
 pub struct TestArgs {
     /// Package to test (can be a path or package name)
-    #[arg(value_name = "PKG")]
+    #[arg(
+        value_name = "PKG",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub package: String,
 
     /// Test names to run (defaults to all tests)
     #[arg(value_name = "TEST")]
     pub tests: Vec<String>,
+
+    /// Arguments forwarded to the single selected test after `--`.
+    #[arg(skip)]
+    pub extra_args: Vec<String>,
 
     /// List available tests and exit
     #[arg(short = 'l', long = "list")]
@@ -42,7 +52,12 @@ pub struct TestArgs {
     pub inplace: bool,
 
     /// Extra packages to add to test environment
-    #[arg(long = "extra-packages")]
+    #[arg(
+        long = "extra-packages",
+        add = clap_complete::ArgValueCompleter::new(
+            crate::cli::commands::completions::package_request_candidates
+        )
+    )]
     pub extra_packages: Vec<String>,
 
     /// Package search paths (colon-separated)
@@ -102,16 +117,7 @@ pub struct TestDefinition {
     /// Whether to run in the package's context
     pub run_on: Vec<String>,
     /// Whether this test is on by default
-    pub on_variants: Option<bool>,
-}
-
-/// Test command format
-#[derive(Debug, Clone)]
-pub enum TestCommand {
-    /// Simple string command
-    String(String),
-    /// List of arguments
-    List(Vec<String>),
+    pub on_variants: Option<TestVariantFilter>,
 }
 
 /// Test runner for package tests
@@ -127,6 +133,10 @@ pub struct PackageTestRunner {
     test_definitions: HashMap<String, TestDefinition>,
     /// Resolved package environment used by test commands.
     test_environment: Option<HashMap<String, String>>,
+    /// Resolved environments keyed by test name.
+    test_environments: HashMap<String, HashMap<String, String>>,
+    /// Resolution failures keyed by test name, reported when that test runs.
+    test_environment_errors: HashMap<String, String>,
     /// Why an inplace test cannot run in the current resolved environment.
     inplace_skip_reason: Option<String>,
 }
@@ -148,6 +158,8 @@ impl PackageTestRunner {
             test_results: Vec::new(),
             test_definitions: HashMap::new(),
             test_environment: None,
+            test_environments: HashMap::new(),
+            test_environment_errors: HashMap::new(),
             inplace_skip_reason: None,
         };
 
@@ -165,17 +177,19 @@ impl PackageTestRunner {
         args: &TestArgs,
     ) -> RezCoreResult<()> {
         let config = RezCoreConfig::load();
-        let mut search_paths: Vec<PathBuf> = args
+        let configured_entries: Vec<String> = args
             .paths
             .as_deref()
-            .map(|paths| std::env::split_paths(paths).collect())
-            .unwrap_or_default();
+            .map(|paths| {
+                std::env::split_paths(paths)
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| config.packages_path.clone());
+        let mut search_paths = resolve_filesystem_paths(configured_entries)?;
         let local_path = expand_home_path(&config.local_packages_path);
-        for search_path in &config.packages_path {
-            let path = expand_home_path(search_path);
-            if (!args.no_local || path != local_path) && !search_paths.contains(&path) {
-                search_paths.push(path);
-            }
+        if args.paths.is_none() && args.no_local {
+            search_paths.retain(|path| path != &local_path);
         }
         let candidates = [working_dir.join("package.py")];
 
@@ -231,18 +245,15 @@ impl PackageTestRunner {
         search_paths: &[PathBuf],
         from_repository: bool,
     ) -> RezCoreResult<()> {
-        // Package.tests is HashMap<String, String> where value is the command
-        for (test_name, command_str) in &package.tests {
-            let cmd = TestCommand::String(command_str.clone());
-
+        for (test_name, definition) in &package.tests {
             self.test_definitions.insert(
                 test_name.clone(),
                 TestDefinition {
                     name: test_name.clone(),
-                    command: cmd,
-                    requires: vec![],
-                    run_on: vec!["default".to_string()],
-                    on_variants: None,
+                    command: definition.command.clone(),
+                    requires: definition.requires.clone(),
+                    run_on: definition.run_on.clone(),
+                    on_variants: definition.on_variants.clone(),
                 },
             );
         }
@@ -274,72 +285,92 @@ impl PackageTestRunner {
         let runtime = tokio::runtime::Runtime::new().map_err(|error| {
             RezCoreError::CliError(format!("Failed to create test runtime: {error}"))
         })?;
-        let mut repositories = RepositoryManager::new();
-        for (index, path) in search_paths.iter().filter(|path| path.exists()).enumerate() {
-            let repository =
-                FilesystemPackageRepository::with_name(path, format!("test_repo_{index}"));
-            repositories.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
+        let repositories = RepositoryManager::from_package_paths(
+            search_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        )?;
         let repositories = Arc::new(repositories);
-        let requirement_sets = test_requirement_sets(package, args, from_repository);
-        let mut last_error = None;
-        let mut packages = None;
-        for requirement_strings in requirement_sets {
-            if requirement_strings.is_empty() {
-                packages = Some(Vec::new());
-                break;
-            }
-            let requirements = parse_test_requirements(&requirement_strings)?;
-            let mut resolver = DependencyResolver::new(
-                repositories.clone(),
-                SolverConfig {
-                    strict_mode: true,
-                    ..SolverConfig::default()
-                },
-            );
-            match runtime.block_on(resolver.resolve(requirements)) {
-                Ok(result) => {
-                    packages = Some(
-                        result
-                            .resolved_packages
-                            .iter()
-                            .map(|resolved| resolved.try_materialized_package())
-                            .collect::<Result<Vec<_>, _>>()?,
+        let test_definitions: Vec<_> = self
+            .test_definitions
+            .iter()
+            .map(|(name, definition)| (name.clone(), definition.clone()))
+            .collect();
+        for (test_name, definition) in test_definitions {
+            let resolved = (|| -> RezCoreResult<HashMap<String, String>> {
+                let mut last_error = None;
+                let mut packages = None;
+                for requirement_strings in
+                    test_requirement_sets(package, args, from_repository, &definition)
+                {
+                    if requirement_strings.is_empty() {
+                        packages = Some(Vec::new());
+                        break;
+                    }
+                    let requirements = parse_test_requirements(&requirement_strings)?;
+                    let mut resolver = DependencyResolver::new(
+                        repositories.clone(),
+                        SolverConfig {
+                            strict_mode: true,
+                            ..SolverConfig::default()
+                        },
                     );
-                    break;
+                    match runtime.block_on(resolver.resolve(requirements)) {
+                        Ok(result) => {
+                            packages = Some(
+                                result
+                                    .resolved_packages
+                                    .iter()
+                                    .map(|resolved| resolved.try_materialized_package())
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            );
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
                 }
-                Err(error) => last_error = Some(error),
+                let mut packages = packages.ok_or_else(|| {
+                    last_error.unwrap_or_else(|| {
+                        RezCoreError::CliError(format!(
+                            "No compatible test variant found for package '{}'",
+                            package.qualified_name()
+                        ))
+                    })
+                })?;
+                if from_repository {
+                    let resolved_package = packages
+                        .iter_mut()
+                        .find(|resolved| resolved.name == package.name)
+                        .ok_or_else(|| {
+                            RezCoreError::CliError(format!(
+                                "Resolved test environment omitted package '{}'",
+                                package.qualified_name()
+                            ))
+                        })?;
+                    apply_pre_test_commands(resolved_package);
+                } else {
+                    let mut test_package = package.clone();
+                    apply_pre_test_commands(&mut test_package);
+                    packages.push(test_package);
+                }
+                let context_config = ContextConfig {
+                    inherit_parent_env: true,
+                    ..ContextConfig::default()
+                };
+                let manager = EnvironmentManager::new(context_config);
+                runtime.block_on(manager.generate_environment(&packages))
+            })();
+
+            match resolved {
+                Ok(environment) => {
+                    self.test_environments.insert(test_name, environment);
+                }
+                Err(error) => {
+                    self.test_environment_errors
+                        .insert(test_name, error.to_string());
+                }
             }
         }
-        let mut packages = packages.ok_or_else(|| {
-            last_error.unwrap_or_else(|| {
-                RezCoreError::CliError(format!(
-                    "No compatible test variant found for package '{}'",
-                    package.qualified_name()
-                ))
-            })
-        })?;
-        if from_repository {
-            let resolved_package = packages
-                .iter_mut()
-                .find(|resolved| resolved.name == package.name)
-                .ok_or_else(|| {
-                    RezCoreError::CliError(format!(
-                        "Resolved test environment omitted package '{}'",
-                        package.qualified_name()
-                    ))
-                })?;
-            apply_pre_test_commands(resolved_package);
-        } else {
-            let mut test_package = package.clone();
-            apply_pre_test_commands(&mut test_package);
-            packages.push(test_package);
-        }
-        let manager = EnvironmentManager::new(ContextConfig {
-            inherit_parent_env: true,
-            ..ContextConfig::default()
-        });
-        self.test_environment = Some(runtime.block_on(manager.generate_environment(&packages))?);
         Ok(())
     }
 
@@ -359,7 +390,14 @@ impl PackageTestRunner {
         let available_tests = self.get_test_names()?;
 
         if requested.is_empty() {
-            return Ok(available_tests);
+            return Ok(available_tests
+                .into_iter()
+                .filter(|name| {
+                    self.test_definitions.get(name).is_some_and(|definition| {
+                        definition.run_on.iter().any(|tag| tag == "default")
+                    })
+                })
+                .collect());
         }
 
         let mut matched_tests = Vec::new();
@@ -386,6 +424,15 @@ impl PackageTestRunner {
 
     /// Run a specific test by name
     pub fn run_test(&mut self, test_name: &str) -> RezCoreResult<i32> {
+        self.run_test_with_args(test_name, &[])
+    }
+
+    /// Run a specific test with arguments forwarded after `--`.
+    pub fn run_test_with_args(
+        &mut self,
+        test_name: &str,
+        extra_args: &[String],
+    ) -> RezCoreResult<i32> {
         if self.verbose > 0 {
             println!("Running test: {}", test_name);
         }
@@ -404,7 +451,7 @@ impl PackageTestRunner {
         } else {
             // Look up the test definition
             if let Some(test_def) = self.test_definitions.get(test_name) {
-                self.execute_test_command(test_def)
+                self.execute_test_command(test_name, test_def, extra_args)
             } else {
                 (
                     TestStatus::Error,
@@ -476,19 +523,24 @@ impl PackageTestRunner {
     /// Execute a test command and return (status, stdout, stderr, exit_code)
     fn execute_test_command(
         &self,
+        test_name: &str,
         test_def: &TestDefinition,
+        extra_args: &[String],
     ) -> (TestStatus, String, Option<String>, i32) {
-        let (program, args) = match &test_def.command {
+        let command = test_def
+            .command
+            .expanded_for_root(&self.working_dir)
+            .with_extra_args(extra_args);
+        let (mut command, display) = match command {
             TestCommand::String(cmd) => {
-                // Shell-execute the string command
-                if cfg!(windows) {
-                    ("cmd".to_string(), vec!["/c".to_string(), cmd.clone()])
-                } else {
-                    ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
-                }
+                let display = format!("shell: {cmd}");
+                (shell_command(&cmd), display)
             }
             TestCommand::List(parts) if !parts.is_empty() => {
-                (parts[0].clone(), parts[1..].to_vec())
+                let display = parts.join(" ");
+                let mut command = Command::new(&parts[0]);
+                command.args(&parts[1..]);
+                (command, display)
             }
             _ => {
                 return (
@@ -501,16 +553,26 @@ impl PackageTestRunner {
         };
 
         if self.verbose > 0 {
-            println!("  Executing: {} {}", program, args.join(" "));
+            println!("  Executing: {}", display);
         }
 
-        let mut command = Command::new(&program);
         command
-            .args(&args)
             .current_dir(&self.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(environment) = &self.test_environment {
+        if let Some(error) = self.test_environment_errors.get(test_name) {
+            return (
+                TestStatus::Error,
+                String::new(),
+                Some(format!("Failed to resolve test environment: {error}")),
+                -1,
+            );
+        }
+        if let Some(environment) = self
+            .test_environments
+            .get(test_name)
+            .or(self.test_environment.as_ref())
+        {
             command.env_clear().envs(environment);
         }
         let result = command.output();
@@ -610,27 +672,47 @@ fn test_requirement_sets(
     package: &rez_next_package::Package,
     args: &TestArgs,
     from_repository: bool,
+    definition: &TestDefinition,
 ) -> Vec<Vec<String>> {
-    if from_repository {
-        return vec![
-            std::iter::once(package.qualified_name())
-                .chain(args.extra_packages.iter().cloned())
-                .collect(),
-        ];
-    }
-
-    let base: Vec<_> = package
-        .requires
-        .iter()
-        .chain(args.extra_packages.iter())
-        .cloned()
-        .collect();
-    if package.variants.is_empty() {
-        vec![base]
+    let base: Vec<_> = if from_repository {
+        std::iter::once(package.qualified_name())
+            .chain(args.extra_packages.iter().cloned())
+            .chain(definition.requires.iter().cloned())
+            .collect()
     } else {
         package
+            .requires
+            .iter()
+            .chain(args.extra_packages.iter())
+            .cloned()
+            .chain(definition.requires.iter().cloned())
+            .collect()
+    };
+
+    let variants: Vec<&Vec<String>> = match definition.on_variants.as_ref() {
+        Some(TestVariantFilter::Enabled(true)) => package.variants.iter().collect(),
+        Some(TestVariantFilter::Requires(filters)) => package
             .variants
             .iter()
+            .filter(|variant| {
+                TestVariantFilter::Requires(filters.clone()).matches_variant_requires(variant)
+            })
+            .collect(),
+        Some(TestVariantFilter::Enabled(false)) | None => package.variants.iter().take(1).collect(),
+    };
+
+    if package.variants.is_empty() {
+        if let Some(filter @ TestVariantFilter::Requires(_)) = definition.on_variants.as_ref()
+            && !filter.matches_variant_requires(&[])
+        {
+            return Vec::new();
+        }
+        vec![base]
+    } else if variants.is_empty() {
+        Vec::new()
+    } else {
+        variants
+            .into_iter()
             .map(|variant| {
                 base.iter()
                     .cloned()
@@ -662,6 +744,12 @@ pub fn execute(args: TestArgs) -> RezCoreResult<()> {
     if args.inplace && (!args.extra_packages.is_empty() || args.paths.is_some() || args.no_local) {
         return Err(RezCoreError::CliError(
             "Cannot use --inplace in combination with --extra-packages/--paths/--no-local"
+                .to_string(),
+        ));
+    }
+    if !args.extra_args.is_empty() && args.tests.len() != 1 {
+        return Err(RezCoreError::CliError(
+            "You can only pass extra arguments to a single, specified test. Please rerun the command and specify a single test to run."
                 .to_string(),
         ));
     }
@@ -706,7 +794,7 @@ pub fn execute(args: TestArgs) -> RezCoreResult<()> {
     // Run tests
     let mut exit_code = 0;
     for test_name in &tests_to_run {
-        let result = runner.run_test(test_name)?;
+        let result = runner.run_test_with_args(test_name, &args.extra_args)?;
         if result != 0 && exit_code == 0 {
             exit_code = result;
         }

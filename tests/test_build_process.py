@@ -314,14 +314,14 @@ class TestBuildProcessHelper:
 
     def test_post_release_creates_tag(self, helper):
         tag = helper.post_release(release_message="v1.0")
-        assert tag == "v1.0.0"
+        assert tag == "test_pkg-1.0.0"
         helper._vcs.create_tag.assert_called_once_with(
-            "v1.0.0", message="v1.0"
+            "test_pkg-1.0.0", message="v1.0"
         )
 
     def test_get_current_tag_name(self, helper):
         tag = helper.get_current_tag_name()
-        assert tag == "v1.0.0"
+        assert tag == "test_pkg-1.0.0"
 
     def test_get_changelog_delegates(self, helper):
         helper._vcs.get_changelog.return_value = "changelog"

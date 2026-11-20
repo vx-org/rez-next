@@ -171,6 +171,7 @@ impl PyRezPluginManager {
             ("cmd", "Windows CMD shell"),
             ("powershell", "Windows PowerShell"),
             ("pwsh", "PowerShell Core (cross-platform)"),
+            ("gitbash", "Git Bash shell"),
             ("csh", "C shell"),
             ("tcsh", "TENEX C shell"),
         ];
@@ -202,16 +203,15 @@ impl PyRezPluginManager {
             });
         }
 
-        // Release hook plugins
-        let release_hooks = [
-            ("emailer", "Send email notification on release"),
-            ("command", "Run custom command on release"),
-        ];
-        for (name, desc) in &release_hooks {
+        // Release hook plugins are derived from the Rust registry so the
+        // Python-facing inventory cannot advertise names that cannot resolve.
+        rez_next_release_hook::init();
+        let release_hooks = rez_next_release_hook::get_release_hook_types();
+        for name in release_hooks {
             self.plugins.push(PyPlugin {
-                name: name.to_string(),
+                name: name.clone(),
                 plugin_type: "release_hook".to_string(),
-                description: desc.to_string(),
+                description: format!("Built-in release hook: {name}"),
                 version: "1.0.0".to_string(),
             });
         }

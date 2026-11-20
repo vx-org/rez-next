@@ -2,17 +2,17 @@
 
 import pytest
 from rez_next.plugin_managers import (
+    BuildProcessPluginType,
+    BuildSystemPluginType,
+    CommandPluginType,
+    LazySingleton,
+    PackageRepositoryPluginType,
+    ReleaseHookPluginType,
+    ReleaseVCSPluginType,
     RezPluginManager,
     RezPluginType,
-    LazySingleton,
-    extend_path,
     ShellPluginType,
-    ReleaseVCSPluginType,
-    ReleaseHookPluginType,
-    BuildSystemPluginType,
-    PackageRepositoryPluginType,
-    BuildProcessPluginType,
-    CommandPluginType,
+    extend_path,
     plugin_manager,
 )
 
@@ -116,3 +116,75 @@ class TestPluginManager:
         from rez_next.exceptions import RezPluginError
         with pytest.raises(RezPluginError):
             plugin_manager.get_plugin_class("shell", "nonexistent")
+
+    def test_plugin_path_discovers_package_repository_and_release_hook_plugins(
+        self, tmp_path, monkeypatch
+    ):
+        plugin_root = tmp_path / "plugins"
+        release_hook_dir = plugin_root / "rezplugins" / "release_hook"
+        package_repository_dir = plugin_root / "rezplugins" / "package_repository"
+        release_hook_dir.mkdir(parents=True)
+        package_repository_dir.mkdir(parents=True)
+        (plugin_root / "rezplugins" / "__init__.py").write_text("")
+        (release_hook_dir / "__init__.py").write_text("")
+        (package_repository_dir / "__init__.py").write_text("")
+        (release_hook_dir / "custom_hook.py").write_text(
+            """
+from rez_next.release_hook import ReleaseHook
+
+
+class CustomHook(ReleaseHook):
+    @classmethod
+    def name(cls):
+        return "custom_hook"
+
+
+def register_plugin():
+    return CustomHook
+"""
+        )
+        (package_repository_dir / "custom_repository.py").write_text(
+            """
+from rez_next.package_repository import PackageRepository
+
+
+class CustomRepository(PackageRepository):
+    @classmethod
+    def name(cls):
+        return "custom_repository"
+
+
+def register_plugin():
+    return CustomRepository
+"""
+        )
+        (package_repository_dir / "filesystem.py").write_text(
+            """
+from rez_next.package_repository import PackageRepository
+
+
+class CustomFilesystem(PackageRepository):
+    @classmethod
+    def name(cls):
+        return "filesystem"
+
+
+def register_plugin():
+    return CustomFilesystem
+"""
+        )
+
+        from rez_next import config
+
+        monkeypatch.setattr(config, "plugin_path", [str(plugin_root)])
+        release_hooks = ReleaseHookPluginType()
+        repositories = PackageRepositoryPluginType()
+
+        assert "custom_hook" in release_hooks.plugin_classes
+        assert release_hooks.get_plugin_class("custom_hook").name() == "custom_hook"
+        assert "custom_repository" in repositories.plugin_classes
+        assert (
+            repositories.get_plugin_class("custom_repository").name()
+            == "custom_repository"
+        )
+        assert repositories.get_plugin_class("filesystem").__name__ == "CustomFilesystem"

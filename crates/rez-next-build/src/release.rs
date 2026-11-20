@@ -4,11 +4,20 @@
 //! VCS validation, package building, tag creation, and metadata generation.
 
 use crate::vcs::{ReleaseVCS, VCSMetadata, detect_vcs};
+use crate::{BuildManager, BuildOptions, BuildRequest};
 use rez_next_common::{RezCoreConfig, RezCoreError};
-use rez_next_package::serialization::PackageSerializer;
-use rez_next_package::{Package, PackageInstallLayout};
+use rez_next_context::{ContextConfig, EnvironmentManager, normalize_environment_paths};
+use rez_next_package::serialization::{PackageFormat, PackageSerializer};
+use rez_next_package::{
+    Package, PackageInstallLayout, PackageRequirement, Requirement, TestCommand,
+};
+use rez_next_release_hook::{ReleaseHookError, ReleaseHookEvent};
+use rez_next_repository::simple_repository::RepositoryManager;
+use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Release mode for the package release process
 ///
@@ -28,8 +37,7 @@ use std::path::{Path, PathBuf};
 pub enum ReleaseMode {
     /// Normal release to `release_packages_path`.
     ///
-    /// Falls back to `local_packages_path` when `release_packages_path` is
-    /// empty or still the default `~/.rez/packages/int`.
+    /// Requires `release_packages_path` to exist before a release starts.
     Release,
     /// Local release to `local_packages_path`
     Local,
@@ -128,13 +136,22 @@ pub struct ReleaseManager {
     mode: ReleaseMode,
     skip_build: bool,
     skip_tests: bool, // now used in release() method
+    /// Legacy opt-out that bypasses repository validation entirely.
     skip_vcs_validation: bool,
+    /// Suppress only failures reported by a release VCS backend.
+    skip_repo_errors: bool,
     /// How to treat an already-existing release tag.
     ///
     /// - `Some(false)`: hard-fail (the CLI default).
     /// - `Some(true)`: proceed, equivalent to `rez release --ignore-existing-tag`.
     /// - `None`: legacy behaviour — warn and continue.
     ignore_existing_tag: Option<bool>,
+    /// Explicit release hooks. `None` uses the configured global hook list.
+    release_hooks: Option<Vec<String>>,
+    /// Reject a release when a newer version is already published.
+    ensure_latest: bool,
+    /// Optional zero-based variant selection. `None` releases every variant.
+    variants: Option<Vec<usize>>,
 }
 
 impl ReleaseManager {
@@ -145,13 +162,23 @@ impl ReleaseManager {
             skip_build,
             skip_tests,
             skip_vcs_validation: false,
+            skip_repo_errors: false,
             ignore_existing_tag: None,
+            release_hooks: None,
+            ensure_latest: true,
+            variants: None,
         }
     }
 
     /// Set whether to skip VCS validation
     pub fn set_skip_vcs_validation(&mut self, skip: bool) {
         self.skip_vcs_validation = skip;
+    }
+
+    /// Set whether dedicated release VCS errors should be downgraded to
+    /// warnings while the workflow continues.
+    pub fn set_skip_repo_errors(&mut self, skip: bool) {
+        self.skip_repo_errors = skip;
     }
 
     /// Set how an existing release tag is treated.
@@ -167,6 +194,28 @@ impl ReleaseManager {
     /// allowing a re-release if the legacy default is ever tightened.
     pub fn set_ignore_existing_tag(&mut self, ignore_existing_tag: Option<bool>) {
         self.ignore_existing_tag = ignore_existing_tag;
+    }
+
+    /// Set the release hooks for this manager.
+    ///
+    /// Passing a list makes the release self-contained and is useful for
+    /// embedders that already own their release configuration. Passing `None`
+    /// restores the global `release_hooks` configuration.
+    pub fn set_release_hooks(&mut self, release_hooks: Option<Vec<String>>) {
+        self.release_hooks = release_hooks;
+    }
+
+    /// Set the zero-based variants to release.
+    ///
+    /// `None` releases every variant. The indices are validated against the
+    /// loaded package before any build work starts.
+    pub fn set_variants(&mut self, variants: Option<Vec<usize>>) {
+        self.variants = variants;
+    }
+
+    /// Set whether a newer published version should reject this release.
+    pub fn set_ensure_latest(&mut self, ensure_latest: bool) {
+        self.ensure_latest = ensure_latest;
     }
 
     /// Execute the complete release workflow, detecting the VCS from
@@ -203,10 +252,12 @@ impl ReleaseManager {
     /// * `vcs` — the VCS to drive the release with. `None` falls back to
     ///   [`detect_vcs`]; when that finds nothing the release proceeds without
     ///   one, recording a warning and skipping metadata, changelog, and the tag.
-    ///   A supplied VCS is validated in step 2 **unless VCS validation has been
-    ///   disabled** with
+    ///   A supplied VCS is validated in step 2. Dedicated VCS failures can be
+    ///   downgraded with
+    ///   [`set_skip_repo_errors(true)`](Self::set_skip_repo_errors). The legacy
+    ///   explicit validation bypass remains available through
     ///   [`set_skip_vcs_validation(true)`](Self::set_skip_vcs_validation), in
-    ///   which case injecting one does bypass the repository-state check.
+    ///   which case injecting one bypasses the repository-state check.
     ///
     /// # Steps
     ///
@@ -226,8 +277,10 @@ impl ReleaseManager {
     ///
     /// # Tag policy
     ///
-    /// The tag name is `{name}-{version}`. Step 3 only *inspects* it; step 9 is
-    /// what creates it, and only after every mutating step has succeeded. Where
+    /// The default tag name is `{qualified_name}` (`{name}-{version}`). A
+    /// configured `plugins.release_vcs.tag_name` may use `{name}`, `{version}`,
+    /// and `{qualified_name}` placeholders. Step 3 only *inspects* it; step 9
+    /// is what creates it, and only after every mutating step has succeeded. Where
     /// a VCS is in play, that ordering keeps the invariant **tag exists ⟺
     /// release succeeded**: a build or test failure leaves no tag behind, so the
     /// same version can be retried without an override. With no VCS there is no
@@ -293,7 +346,7 @@ impl ReleaseManager {
         let mut result = ReleaseResult::default();
 
         // Step 1: Load package definition
-        let package = self.load_package(source_dir, &mut result)?;
+        let mut package = self.load_package(source_dir, &mut result)?;
         if !result.errors.is_empty() {
             return Ok(result);
         }
@@ -302,12 +355,24 @@ impl ReleaseManager {
         let install_path = self.get_install_path(&package)?;
         result.install_path = install_path.to_string_lossy().to_string();
 
+        if self.mode == ReleaseMode::Release {
+            let release_path = self.get_install_base();
+            if release_path.as_os_str().is_empty() || !release_path.is_dir() {
+                result.errors.push(format!(
+                    "Release path does not exist or is not a directory: {}",
+                    release_path.display()
+                ));
+                return Ok(result);
+            }
+        }
+
         // Step 2: VCS detection and validation. A caller-supplied VCS is still
         // validated, so injecting one cannot bypass the repository-state check.
         let vcs = match vcs {
             Some(vcs_impl) => {
                 if !self.skip_vcs_validation
                     && let Err(e) = vcs_impl.validate_repo_state()
+                    && !self.skip_repo_error("validate repository state", &e, &mut result)
                 {
                     result.errors.push(format!("VCS validation failed: {}", e));
                     return Ok(result);
@@ -339,6 +404,16 @@ impl ReleaseManager {
             return Ok(result);
         }
 
+        self.populate_previous_release(&mut package, &mut result);
+
+        if self.ensure_latest {
+            self.reject_older_release(&package, &mut result);
+        }
+        if !result.errors.is_empty() {
+            result.success = false;
+            return Ok(result);
+        }
+
         // Step 3: Reject an already-released version before anything is built
         // or installed. The tag check must run first: the build step copies
         // `package.py` into the install path, so checking afterwards would
@@ -358,9 +433,23 @@ impl ReleaseManager {
             return Ok(result);
         }
 
+        if !self.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir,
+            &package,
+            &install_path,
+            message,
+            None,
+            None,
+            &mut result,
+        ) {
+            result.success = false;
+            return Ok(result);
+        }
+
         // Step 4: Build the package (if not skipped)
         if !self.skip_build {
-            self.build_package(source_dir, &package, &install_path, &mut result)?;
+            self.build_package(source_dir, &package, &mut result)?;
         }
 
         // Step 5: Run tests (if not skipped)
@@ -369,7 +458,12 @@ impl ReleaseManager {
                 .warnings
                 .push("Tests skipped (skip_tests=true)".to_string());
         } else {
-            self.run_tests(source_dir, &package, &install_path, &mut result)?;
+            self.run_tests(&package, &install_path, &mut result)?;
+        }
+
+        if !result.errors.is_empty() {
+            result.success = false;
+            return Ok(result);
         }
 
         // Step 6: Generate changelog (if VCS is available)
@@ -377,11 +471,30 @@ impl ReleaseManager {
             self.generate_changelog(vcs_impl.as_ref(), &package, &mut result)?;
         }
 
+        self.populate_release_metadata(&mut package, &vcs, message, &mut result);
+
         // Step 7: Write release metadata
-        self.write_release_metadata(&package, &install_path, &vcs, &mut result)?;
+        self.write_vcs_metadata(&install_path, &vcs, &mut result)?;
 
         // Step 8: Install package definition
         self.install_package_definition(source_dir, &install_path, &package, &mut result)?;
+
+        let hook_changelog = result.changelog.clone().map(|value| vec![value]);
+        if result.errors.is_empty()
+            && !self.run_release_hooks(
+                ReleaseHookEvent::PostRelease,
+                source_dir,
+                &package,
+                &install_path,
+                message,
+                hook_changelog.as_deref(),
+                None,
+                &mut result,
+            )
+        {
+            result.success = false;
+            return Ok(result);
+        }
 
         // Step 9: Create the VCS tag, and only now. Every mutating step has
         // happened above, so `errors.is_empty()` means the package really was
@@ -455,24 +568,19 @@ impl ReleaseManager {
 
     /// Get the install path for the package
     fn get_install_path(&self, package: &Package) -> Result<PathBuf, RezCoreError> {
-        let config = RezCoreConfig::load();
         let package_relative_path = PackageInstallLayout::package_base_relative_path(package)?;
+        Ok(self.get_install_base().join(package_relative_path))
+    }
 
-        let install_base = match self.mode {
+    /// Get the repository root used for the selected release mode.
+    fn get_install_base(&self) -> PathBuf {
+        let config = RezCoreConfig::load();
+        match self.mode {
             ReleaseMode::Local | ReleaseMode::DryRun => {
                 PathBuf::from(expand_home(&config.local_packages_path))
             }
-            ReleaseMode::Release => {
-                let rp = &config.release_packages_path;
-                if !rp.is_empty() && rp != "~/.rez/packages/int" {
-                    PathBuf::from(expand_home(rp))
-                } else {
-                    PathBuf::from(expand_home(&config.local_packages_path))
-                }
-            }
-        };
-
-        Ok(install_base.join(package_relative_path))
+            ReleaseMode::Release => PathBuf::from(expand_home(&config.release_packages_path)),
+        }
     }
 
     /// Validate VCS repository state
@@ -482,9 +590,18 @@ impl ReleaseManager {
         result: &mut ReleaseResult,
     ) -> Result<Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>>, RezCoreError> {
         match detect_vcs(source_dir) {
-            Some(vcs_impl) => {
+            Err(error) => {
+                if self.skip_repo_error("detect repository", &error, result) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            }
+            Ok(Some(vcs_impl)) => {
                 // Validate repo state
-                if let Err(e) = vcs_impl.validate_repo_state() {
+                if let Err(e) = vcs_impl.validate_repo_state()
+                    && !self.skip_repo_error("validate repository state", &e, result)
+                {
                     result.errors.push(format!("VCS validation failed: {}", e));
                     return Ok(None);
                 }
@@ -503,7 +620,7 @@ impl ReleaseManager {
 
                 Ok(Some(vcs_impl.into()))
             }
-            None => {
+            Ok(None) => {
                 result
                     .warnings
                     .push("No VCS detected in source directory".to_string());
@@ -512,91 +629,151 @@ impl ReleaseManager {
         }
     }
 
+    /// Downgrade a dedicated VCS failure when the caller requested the
+    /// upstream `skip_repo_errors` policy.
+    fn skip_repo_error(
+        &self,
+        operation: &str,
+        error: &RezCoreError,
+        result: &mut ReleaseResult,
+    ) -> bool {
+        if self.skip_repo_errors && matches!(error, RezCoreError::ReleaseVCSError(_)) {
+            result
+                .warnings
+                .push(format!("Skipped VCS operation '{operation}': {error}"));
+            true
+        } else {
+            false
+        }
+    }
+
     /// Build the package (including variants)
     fn build_package(
         &self,
         source_dir: &Path,
         package: &Package,
-        install_path: &Path,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        // Validate all destination paths before mutating the repository.
-        let layouts = if package.variants.is_empty() {
-            vec![PackageInstallLayout::for_variant(package, None)?]
-        } else {
-            (0..package.variants.len())
-                .map(|index| PackageInstallLayout::for_variant(package, Some(index)))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        // Create base install directory
-        if let Err(e) = fs::create_dir_all(install_path) {
-            result
-                .errors
-                .push(format!("Failed to create install directory: {}", e));
-            return Err(RezCoreError::BuildError(e.to_string()));
-        }
+        let variant_indices = self.release_variant_indices(package)?;
+        let install_base = self.get_install_base();
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!("Failed to create release build runtime: {error}"))
+        })?;
+        let mut build_manager = BuildManager::new();
 
-        // Check if package has variants
-        if !package.variants.is_empty() {
-            result.warnings.push(format!(
-                "Package has {} variant(s), creating variant directories",
-                package.variants.len()
-            ));
-
-            for (index, (variant, layout)) in package.variants.iter().zip(&layouts).enumerate() {
-                let variant_path = install_path.join(layout.variant_subpath());
-
-                if let Err(e) = fs::create_dir_all(&variant_path) {
-                    result.errors.push(format!(
-                        "Failed to create variant directory '{}': {}",
-                        layout.variant_subpath().display(),
-                        e
-                    ));
-                    continue;
-                }
-
-                // Write variant metadata file
-                let metadata = serde_json::json!({
-                    "variant": variant,
-                    "index": index,
-                    "subpath": layout.variant_subpath(),
-                });
-                let metadata_path = variant_path.join("variant.json");
-                if let Err(e) = fs::write(
-                    &metadata_path,
-                    serde_json::to_string_pretty(&metadata).unwrap_or_default(),
-                ) {
-                    result.warnings.push(format!(
-                        "Failed to write variant metadata for '{}': {}",
-                        layout.variant_subpath().display(),
-                        e
-                    ));
-                }
-
-                result.warnings.push(format!(
-                    "Created variant directory: {} for variant {:?}",
-                    layout.variant_subpath().display(),
-                    variant
-                ));
-            }
-        } else {
-            // No variants, just create the base install directory
+        if package.variants.is_empty() {
             result
                 .warnings
-                .push("No variants defined, using base install path".to_string());
+                .push("Package has no variants, building the base package".to_string());
+        } else {
+            result.warnings.push(format!(
+                "Building {} selected variant(s)",
+                variant_indices.len()
+            ));
         }
 
-        // The definition belongs at the package base for every variant layout.
-        let pkg_file = source_dir.join("package.py");
-        if pkg_file.exists()
-            && let Err(error) = fs::copy(&pkg_file, install_path.join("package.py"))
-        {
-            result
-                .errors
-                .push(format!("Failed to copy package.py: {error}"));
+        for variant_index in variant_indices {
+            let variant_requires = variant_index.map(|index| package.variants[index].clone());
+            let context = match resolve_build_context(package, variant_requires.as_deref()) {
+                Ok(context) => context,
+                Err(error) => {
+                    result.errors.push(format!(
+                        "Failed to resolve build context for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        error
+                    ));
+                    return Ok(());
+                }
+            };
+            let request = BuildRequest {
+                package: package.clone(),
+                context,
+                source_dir: source_dir.to_path_buf(),
+                variant_index,
+                variant_requires,
+                options: BuildOptions {
+                    force_rebuild: false,
+                    skip_tests: self.skip_tests,
+                    release_mode: true,
+                    build_args: Vec::new(),
+                    env_vars: std::collections::HashMap::new(),
+                },
+                install_path: Some(install_base.clone()),
+            };
+
+            let build_ids = match runtime.block_on(build_manager.start_build(request)) {
+                Ok(build_ids) => build_ids,
+                Err(error) => {
+                    result.errors.push(format!(
+                        "Failed to start build for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        error
+                    ));
+                    return Ok(());
+                }
+            };
+            for build_id in build_ids {
+                let build_result = match runtime.block_on(build_manager.wait_for_build(&build_id)) {
+                    Ok(build_result) => build_result,
+                    Err(error) => {
+                        result.errors.push(format!(
+                            "Failed to collect build result for variant {}: {}",
+                            variant_index
+                                .map_or_else(|| "none".to_string(), |index| index.to_string()),
+                            error
+                        ));
+                        return Ok(());
+                    }
+                };
+                if !build_result.success {
+                    result.errors.push(format!(
+                        "Build failed for variant {}: {}",
+                        variant_index.map_or_else(|| "none".to_string(), |index| index.to_string()),
+                        build_result.errors
+                    ));
+                    return Ok(());
+                }
+            }
         }
 
         Ok(())
+    }
+
+    fn release_variant_indices(
+        &self,
+        package: &Package,
+    ) -> Result<Vec<Option<usize>>, RezCoreError> {
+        if package.variants.is_empty() {
+            if self
+                .variants
+                .as_ref()
+                .is_some_and(|indices| !indices.is_empty())
+            {
+                return Err(RezCoreError::BuildError(format!(
+                    "Package '{}' has no variants",
+                    package.name
+                )));
+            }
+            return Ok(vec![None]);
+        }
+
+        let indices = self
+            .variants
+            .clone()
+            .unwrap_or_else(|| (0..package.variants.len()).collect());
+        indices
+            .into_iter()
+            .map(|index| {
+                if index >= package.variants.len() {
+                    Err(RezCoreError::BuildError(format!(
+                        "Variant index {index} is out of range for package '{}'",
+                        package.name
+                    )))
+                } else {
+                    Ok(Some(index))
+                }
+            })
+            .collect()
     }
 
     /// Check whether an already-released version is being released again.
@@ -666,15 +843,12 @@ impl ReleaseManager {
 
     /// Build the VCS tag name for a package version.
     fn release_tag_name(package: &Package) -> String {
-        format!(
-            "{}-{}",
-            package.name,
-            package
-                .version
-                .as_ref()
-                .map(|v| v.as_str())
-                .unwrap_or("unknown")
-        )
+        let tag_format = RezCoreConfig::load()
+            .get_field("plugins.release_vcs.tag_name")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "{qualified_name}".to_string());
+
+        format_release_tag(package, &tag_format)
     }
 
     /// Create the VCS tag for a successfully released version.
@@ -699,23 +873,126 @@ impl ReleaseManager {
                     .push(format!("Created VCS tag: {}", tag_name));
             }
             Err(e) => {
-                result
-                    .errors
-                    .push(format!("Failed to create VCS tag: {}", e));
+                if !self.skip_repo_error("create release tag", &e, result) {
+                    result
+                        .errors
+                        .push(format!("Failed to create VCS tag: {}", e));
+                }
             }
         }
 
         Ok(())
     }
 
+    /// Run the configured hooks for one release lifecycle event.
+    ///
+    /// Hook construction failures and ordinary hook errors are warnings so an
+    /// optional notification hook cannot make a release unsafe to retry. A
+    /// cancellation is a deliberate release rejection and is recorded as an
+    /// error so the caller receives the normal `ReleaseResult` failure contract.
+    #[allow(clippy::too_many_arguments)]
+    fn run_release_hooks(
+        &self,
+        event: ReleaseHookEvent,
+        source_dir: &Path,
+        package: &Package,
+        install_path: &Path,
+        release_message: Option<&str>,
+        changelog: Option<&[String]>,
+        variants: Option<&[usize]>,
+        result: &mut ReleaseResult,
+    ) -> bool {
+        let hook_names = self
+            .release_hooks
+            .clone()
+            .unwrap_or_else(|| RezCoreConfig::load().release_hooks);
+        if hook_names.is_empty() {
+            return true;
+        }
+
+        rez_next_release_hook::init();
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default();
+        let previous_version = package
+            .previous_version
+            .as_ref()
+            .map(|version| version.as_str());
+        let previous_revision = package.previous_revision.as_deref();
+        let hook_names: Vec<&str> = hook_names.iter().map(String::as_str).collect();
+        let hooks =
+            rez_next_release_hook::create_release_hooks(&hook_names, source_dir.to_path_buf());
+
+        for hook in hooks {
+            let hook_result = match event {
+                ReleaseHookEvent::PreBuild => hook.pre_build(
+                    &user,
+                    install_path,
+                    variants,
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+                ReleaseHookEvent::PreRelease => hook.pre_release(
+                    &user,
+                    install_path,
+                    variants,
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+                ReleaseHookEvent::PostRelease => hook.post_release(
+                    &user,
+                    install_path,
+                    &Self::release_variant_names(package),
+                    release_message,
+                    changelog,
+                    previous_version,
+                    previous_revision,
+                ),
+            };
+
+            match hook_result {
+                Ok(()) => {}
+                Err(ReleaseHookError::Cancelled(message)) => {
+                    result.errors.push(format!(
+                        "Release hook '{}' cancelled release: {message}",
+                        event.label()
+                    ));
+                    return false;
+                }
+                Err(ReleaseHookError::Error(message)) => {
+                    result.warnings.push(format!(
+                        "Release hook '{}' failed: {message}",
+                        event.label()
+                    ));
+                }
+            }
+        }
+
+        true
+    }
+
+    fn release_variant_names(package: &Package) -> Vec<String> {
+        if package.variants.is_empty() {
+            vec!["0".to_string()]
+        } else {
+            (0..package.variants.len())
+                .map(|index| index.to_string())
+                .collect()
+        }
+    }
+
     /// Generate changelog from VCS
     fn generate_changelog(
         &self,
         vcs: &dyn ReleaseVCS,
-        _package: &Package,
+        package: &Package,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        match vcs.get_changelog(None, None) {
+        match vcs.get_changelog(package.previous_revision.as_deref(), None) {
             Ok(changelog) => {
                 result.changelog = Some(changelog);
             }
@@ -728,10 +1005,136 @@ impl ReleaseManager {
         Ok(())
     }
 
-    /// Write release metadata to the package definition
-    fn write_release_metadata(
+    /// Populate the previous release fields before pre-release hooks run.
+    fn populate_previous_release(&self, package: &mut Package, result: &mut ReleaseResult) {
+        if package.previous_version.is_some() || package.version.is_none() {
+            return;
+        }
+
+        match self.find_previous_release(package) {
+            Ok(Some(previous)) => {
+                package.previous_version = previous.version.clone();
+                package.previous_revision = previous.revision.clone();
+            }
+            Ok(None) => {}
+            Err(error) => result
+                .warnings
+                .push(format!("Failed to find previous release: {error}")),
+        }
+    }
+
+    /// Populate release provenance on the package definition that is installed.
+    fn populate_release_metadata(
         &self,
-        _package: &Package,
+        package: &mut Package,
+        vcs: &Option<Arc<dyn ReleaseVCS + Send + Sync>>,
+        release_message: Option<&str>,
+        result: &mut ReleaseResult,
+    ) {
+        if package.timestamp.is_none() {
+            package.timestamp = Some(package_timestamp());
+        }
+        package.release_message = release_message.map(str::to_owned);
+        package.changelog = result.changelog.as_deref().map(|changelog| {
+            truncate_changelog(changelog, RezCoreConfig::load().max_package_changelog_chars)
+        });
+
+        if let Some(vcs_impl) = vcs {
+            package.vcs = Some(vcs_impl.get_type_name().to_string());
+            match vcs_impl.get_current_revision() {
+                Ok(revision) => package.revision = Some(revision.revision_id),
+                Err(error) => result
+                    .warnings
+                    .push(format!("Failed to get VCS revision: {error}")),
+            }
+        } else {
+            package.vcs = None;
+            package.revision = None;
+        }
+    }
+
+    /// Reject a release when a newer package version is already available.
+    fn reject_older_release(&self, package: &Package, result: &mut ReleaseResult) {
+        let Some(current_version) = package.version.as_ref() else {
+            return;
+        };
+
+        match self.find_latest_release(package) {
+            Ok(Some(latest))
+                if latest
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version > current_version) =>
+            {
+                result.errors.push(format!(
+                    "Newer published version exists ({} > {}). Set ensure_latest=false to bypass.",
+                    latest
+                        .version
+                        .as_ref()
+                        .map_or_else(|| "unknown".to_string(), ToString::to_string),
+                    current_version
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => result
+                .warnings
+                .push(format!("Failed to check for newer releases: {error}")),
+        }
+    }
+
+    /// Find the newest released package version older than the package being built.
+    fn find_previous_release(
+        &self,
+        package: &Package,
+    ) -> Result<Option<Arc<Package>>, RezCoreError> {
+        let Some(current_version) = package.version.as_ref() else {
+            return Ok(None);
+        };
+
+        Ok(self
+            .find_releases(package)?
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version < current_version)
+            })
+            .max_by(|left, right| left.version.cmp(&right.version)))
+    }
+
+    /// Find the newest package version visible from the configured repositories.
+    fn find_latest_release(&self, package: &Package) -> Result<Option<Arc<Package>>, RezCoreError> {
+        Ok(self
+            .find_releases(package)?
+            .into_iter()
+            .filter(|candidate| candidate.version.is_some())
+            .max_by(|left, right| left.version.cmp(&right.version)))
+    }
+
+    fn find_releases(&self, package: &Package) -> Result<Vec<Arc<Package>>, RezCoreError> {
+        let config = RezCoreConfig::load();
+        let mut search_paths = vec![self.get_install_base().to_string_lossy().into_owned()];
+        search_paths.extend(
+            config
+                .packages_path
+                .iter()
+                .map(|search_path| expand_home(search_path)),
+        );
+        search_paths.dedup();
+        let repository_manager = RepositoryManager::from_package_paths(search_paths)?;
+
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!(
+                "Failed to create release metadata runtime: {error}"
+            ))
+        })?;
+        runtime.block_on(repository_manager.find_packages(&package.name))
+    }
+
+    /// Write the VCS metadata sidecar for an installed package.
+    fn write_vcs_metadata(
+        &self,
         install_path: &Path,
         vcs: &Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>>,
         result: &mut ReleaseResult,
@@ -780,7 +1183,7 @@ impl ReleaseManager {
         &self,
         source_dir: &Path,
         install_path: &Path,
-        _package: &Package,
+        package: &Package,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
         let pkg_file = source_dir.join("package.py");
@@ -795,61 +1198,104 @@ impl ReleaseManager {
         };
 
         let dest = install_path.join(dest_name);
-        match fs::copy(src, &dest) {
-            Ok(_) => {}
-            Err(e) => {
-                result
-                    .errors
-                    .push(format!("Failed to copy package definition: {}", e));
-                return Err(RezCoreError::BuildError(e.to_string()));
-            }
+        if dest_name == "package.py" {
+            let content = fs::read_to_string(src).map_err(|error| {
+                RezCoreError::BuildError(format!(
+                    "Failed to read package definition {}: {error}",
+                    src.display()
+                ))
+            })?;
+            let content = append_python_release_metadata(&content, package)?;
+            fs::write(&dest, content).map_err(|error| {
+                result.errors.push(format!(
+                    "Failed to install package definition {}: {error}",
+                    dest.display()
+                ));
+                RezCoreError::BuildError(error.to_string())
+            })?;
+        } else {
+            PackageSerializer::save_to_file(package, &dest, PackageFormat::Yaml).map_err(
+                |error| {
+                    result.errors.push(format!(
+                        "Failed to install package definition {}: {error}",
+                        dest.display()
+                    ));
+                    error
+                },
+            )?;
         }
 
         Ok(())
     }
 
-    /// Run package tests
-    ///
-    /// Executes tests defined in `package.py::tests()` function.
-    /// Tests are shell commands that are executed in the install path.
+    /// Run package tests configured for the pre-release phase.
     fn run_tests(
         &self,
-        source_dir: &Path,
-        _package: &Package,
+        package: &Package,
         install_path: &Path,
         result: &mut ReleaseResult,
     ) -> Result<(), RezCoreError> {
-        // Try to get test commands from package.py::tests()
-        let test_commands = Self::get_test_commands(source_dir)?;
+        let mut tests: Vec<_> = package
+            .tests
+            .iter()
+            .filter(|(_, definition)| definition.run_on.iter().any(|tag| tag == "pre_release"))
+            .collect();
+        tests.sort_by_key(|(name, _)| *name);
 
-        if test_commands.is_empty() {
+        if tests.is_empty() {
             result
                 .warnings
-                .push("No test commands found in package.py::tests()".to_string());
+                .push("No pre_release package tests defined".to_string());
             return Ok(());
         }
 
-        // Execute each test command
-        for (i, cmd) in test_commands.iter().enumerate() {
-            match Self::execute_test_command(cmd, install_path) {
+        let mut base_environment = std::env::vars().collect();
+        normalize_environment_paths(&mut base_environment);
+        let context_config = ContextConfig {
+            inherit_parent_env: true,
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::with_base_environment(context_config, base_environment);
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            RezCoreError::BuildError(format!("Failed to create test runtime: {error}"))
+        })?;
+        let definition_name = package
+            .filepath
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .unwrap_or_else(|| std::ffi::OsStr::new("package.py"));
+
+        for (name, definition) in tests {
+            let mut test_package = package.clone();
+            test_package.filepath = Some(
+                install_path
+                    .join(definition_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            test_package
+                .requires
+                .extend(definition.requires.iter().cloned());
+            let environment = runtime.block_on(manager.generate_environment(&[test_package]))?;
+            match Self::execute_test_definition(definition, install_path, &environment) {
                 Ok(output) => {
                     if !output.status.success() {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         result.errors.push(format!(
-                            "Test {} failed:\nCommand: {}\nError: {}",
-                            i + 1,
-                            cmd,
+                            "Package test '{name}' failed:\nCommand: {}\nError: {}",
+                            definition.command.as_string(),
                             stderr
                         ));
+                        break;
                     }
                 }
                 Err(e) => {
                     result.errors.push(format!(
-                        "Failed to execute test {}: {}\nCommand: {}",
-                        i + 1,
+                        "Failed to execute package test '{name}': {}\nCommand: {}",
                         e,
-                        cmd
+                        definition.command.as_string()
                     ));
+                    break;
                 }
             }
         }
@@ -857,83 +1303,200 @@ impl ReleaseManager {
         Ok(())
     }
 
-    /// Get test commands from package.py::tests() function
-    fn get_test_commands(source_dir: &Path) -> Result<Vec<String>, RezCoreError> {
-        let package_py = source_dir.join("package.py");
-
-        if !package_py.exists() {
-            return Ok(Vec::new());
-        }
-
-        // Python script to call tests() and print result as JSON
-        let python_script = format!(
-            r#"
-import sys
-import json
-sys.path.insert(0, r"{}")
-try:
-    from package import tests
-    commands = tests()
-    print(json.dumps(commands))
-except ImportError:
-    print("[]")
-except Exception as e:
-    print("[]")
-"#,
-            source_dir.display()
-        );
-
-        // Execute Python script
-        let output = std::process::Command::new("python")
-            .arg("-c")
-            .arg(&python_script)
-            .output();
-
-        match output {
-            Ok(out) => {
-                if out.status.success() {
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let trimmed = stdout.trim();
-                    if trimmed.starts_with('[') {
-                        // Parse JSON array of strings
-                        match serde_json::from_str::<Vec<String>>(trimmed) {
-                            Ok(commands) => Ok(commands),
-                            Err(_) => Ok(Vec::new()),
-                        }
-                    } else {
-                        Ok(Vec::new())
-                    }
-                } else {
-                    Ok(Vec::new())
-                }
+    fn execute_test_definition(
+        definition: &rez_next_package::PackageTestDefinition,
+        install_path: &Path,
+        environment: &std::collections::HashMap<String, String>,
+    ) -> Result<std::process::Output, std::io::Error> {
+        match definition.command.expanded_for_root(install_path) {
+            TestCommand::String(command) => {
+                Self::execute_test_command_with_environment(&command, install_path, environment)
             }
-            Err(_) => Ok(Vec::new()),
+            TestCommand::List(arguments) if !arguments.is_empty() => {
+                std::process::Command::new(&arguments[0])
+                    .args(&arguments[1..])
+                    .current_dir(install_path)
+                    .env_clear()
+                    .envs(environment)
+                    .output()
+            }
+            TestCommand::List(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "package test command cannot be empty",
+            )),
         }
     }
 
-    /// Execute a single test command (cross-platform)
-    fn execute_test_command(
+    fn execute_test_command_with_environment(
         cmd: &str,
         install_path: &Path,
+        environment: &std::collections::HashMap<String, String>,
     ) -> Result<std::process::Output, std::io::Error> {
-        // Detect platform and use appropriate shell
-        #[cfg(windows)]
-        {
-            std::process::Command::new("cmd")
-                .arg("/c")
-                .arg(cmd)
-                .current_dir(install_path)
-                .output()
-        }
-        #[cfg(not(windows))]
-        {
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(install_path)
-                .output()
+        rez_next_package::shell_command(cmd)
+            .current_dir(install_path)
+            .env_clear()
+            .envs(environment)
+            .output()
+    }
+}
+
+/// Expand the supported release VCS tag placeholders for a package.
+fn format_release_tag(package: &Package, tag_format: &str) -> String {
+    let version = package
+        .version
+        .as_ref()
+        .map(|value| value.as_str())
+        .unwrap_or("unknown");
+    let qualified_name = package.qualified_name();
+
+    tag_format
+        .replace("{name}", &package.name)
+        .replace("{version}", version)
+        .replace("{qualified_name}", &qualified_name)
+}
+
+fn truncate_changelog(changelog: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return changelog.to_string();
+    }
+    changelog.chars().take(max_chars).collect()
+}
+
+fn package_timestamp() -> i64 {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs() as i64)
+        })
+        .unwrap_or_default()
+}
+
+fn append_python_release_metadata(
+    content: &str,
+    package: &Package,
+) -> Result<String, RezCoreError> {
+    let string_literal = |value: Option<&str>| {
+        value
+            .map(serde_json::to_string)
+            .transpose()
+            .map(|value| value.unwrap_or_else(|| "None".to_string()))
+            .map_err(|error| {
+                RezCoreError::PackageParse(format!("Failed to serialize release metadata: {error}"))
+            })
+    };
+    let release_message = string_literal(package.release_message.as_deref())?;
+    let changelog = string_literal(package.changelog.as_deref())?;
+    let revision = string_literal(package.revision.as_deref())?;
+    let previous_version = string_literal(
+        package
+            .previous_version
+            .as_ref()
+            .map(|version| version.as_str()),
+    )?;
+    let previous_revision = string_literal(package.previous_revision.as_deref())?;
+    let vcs = string_literal(package.vcs.as_deref())?;
+
+    Ok(format!(
+        "{content}\n\n# Release metadata written by rez-next\n\
+timestamp = {}\n\
+revision = {revision}\n\
+changelog = {changelog}\n\
+release_message = {release_message}\n\
+previous_version = {previous_version}\n\
+previous_revision = {previous_revision}\n\
+vcs = {vcs}\n",
+        package.timestamp.unwrap_or_default()
+    ))
+}
+
+/// Resolve the environment required to build one package variant.
+///
+/// Release, CLI build, and Python bindings all use the same repository and
+/// solver path through this function. An empty requirement set intentionally
+/// returns `None`, allowing build systems that do not need a Rez context to
+/// start without touching package repositories.
+pub fn resolve_build_context(
+    package: &Package,
+    variant_requires: Option<&[String]>,
+) -> Result<Option<rez_next_context::ResolvedContext>, RezCoreError> {
+    let mut requirement_strings = Vec::new();
+    for requirement in package
+        .requires
+        .iter()
+        .chain(package.build_requires.iter())
+        .chain(package.private_build_requires.iter())
+        .chain(variant_requires.unwrap_or(&[]).iter())
+    {
+        if !requirement_strings.contains(requirement) {
+            requirement_strings.push(requirement.clone());
         }
     }
+
+    if requirement_strings.is_empty() {
+        return Ok(None);
+    }
+
+    let config = RezCoreConfig::load();
+    let repository_manager = RepositoryManager::from_package_paths(
+        config.packages_path.iter().map(|path| expand_home(path)),
+    )?;
+
+    let requirements = requirement_strings
+        .iter()
+        .map(|requirement| {
+            requirement.parse::<Requirement>().map_err(|error| {
+                RezCoreError::RequirementParse(format!(
+                    "Failed to parse build requirement '{}': {}",
+                    requirement, error
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let context_requirements = requirement_strings
+        .iter()
+        .map(|requirement| {
+            PackageRequirement::parse(requirement).map_err(|error| {
+                RezCoreError::RequirementParse(format!(
+                    "Failed to parse build context requirement '{}': {}",
+                    requirement, error
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+        RezCoreError::BuildError(format!("Failed to create build context runtime: {error}"))
+    })?;
+    let mut resolver = DependencyResolver::new(
+        Arc::new(repository_manager),
+        SolverConfig {
+            strict_mode: true,
+            ..SolverConfig::default()
+        },
+    );
+    let resolution = runtime.block_on(resolver.resolve_build(requirements))?;
+
+    let mut context = rez_next_context::ResolvedContext::from_requirements(context_requirements);
+    context.resolved_packages = resolution
+        .resolved_packages
+        .into_iter()
+        .map(|info| info.try_materialized_package())
+        .collect::<Result<Vec<_>, _>>()?;
+    context.status = rez_next_context::ContextStatus::Resolved;
+
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
+    let environment_manager = EnvironmentManager::new(context_config);
+    context.environment_vars =
+        runtime.block_on(environment_manager.generate_environment(&context.resolved_packages))?;
+
+    Ok(Some(context))
 }
 
 /// Expand `~` in path to the user's home directory
@@ -954,8 +1517,10 @@ fn expand_home(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::vcs::{StubVCS, VCSMetadata};
+    use rez_next_release_hook::{ReleaseHook, ReleaseHookError};
     use std::fs::File;
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     fn create_test_package(dir: &Path, name: &str, version: &str) -> PathBuf {
@@ -990,8 +1555,55 @@ version = "{}"
 
     #[test]
     fn test_release_manager_new() {
-        let _manager = ReleaseManager::new(ReleaseMode::Release, false, false);
-        // Just verify it creates without error
+        let manager = ReleaseManager::new(ReleaseMode::Release, false, false);
+        assert!(manager.ensure_latest);
+    }
+
+    #[test]
+    fn test_skip_repo_errors_only_suppresses_release_vcs_errors() {
+        let mut manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
+        manager.set_skip_repo_errors(true);
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.skip_repo_error(
+            "validate",
+            &RezCoreError::ReleaseVCSError("repository unavailable".to_string()),
+            &mut result
+        ));
+        assert!(!manager.skip_repo_error(
+            "validate",
+            &RezCoreError::BuildError("build unavailable".to_string()),
+            &mut result
+        ));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("repository unavailable"));
+    }
+
+    #[test]
+    fn test_release_manager_can_disable_latest_version_check() {
+        let mut manager = ReleaseManager::new(ReleaseMode::Release, false, false);
+        manager.set_ensure_latest(false);
+        assert!(!manager.ensure_latest);
+    }
+
+    #[test]
+    fn test_release_tag_format_expands_supported_placeholders() {
+        let mut package = Package::new("test_pkg".to_string());
+        package.version = Some(rez_next_version::Version::parse("1.0.0").unwrap());
+
+        assert_eq!(
+            format_release_tag(&package, "{qualified_name}"),
+            "test_pkg-1.0.0"
+        );
+        assert_eq!(
+            format_release_tag(&package, "release-{name}"),
+            "release-test_pkg"
+        );
+        assert_eq!(format_release_tag(&package, "v{version}"), "v1.0.0");
+        assert_eq!(
+            format_release_tag(&package, "{name}/{version}/{qualified_name}"),
+            "test_pkg/1.0.0/test_pkg-1.0.0"
+        );
     }
 
     #[test]
@@ -1006,6 +1618,216 @@ version = "{}"
         assert!(pkg.is_ok());
         assert_eq!(result.package_name, "test_pkg");
         assert_eq!(result.version, "1.0.0");
+    }
+
+    #[test]
+    fn test_run_tests_uses_declared_package_test_definitions() {
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package_file = source_dir.path().join("package.py");
+        std::fs::write(&package_file, "name = 'release_test'\nversion = '1.0.0'\n").unwrap();
+
+        let mut package = Package::new("release_test".to_string());
+        package.version = Some(rez_next_version::Version::parse("1.0.0").unwrap());
+        package.filepath = Some(package_file.to_string_lossy().into_owned());
+        package.tests.insert(
+            "pre-release".to_string(),
+            rez_next_package::PackageTestDefinition {
+                command: TestCommand::List(vec![
+                    "python".to_string(),
+                    "-c".to_string(),
+                    "import os,sys; sys.exit(0 if os.environ.get('RELEASE_TEST_ROOT') else 7)"
+                        .to_string(),
+                ]),
+                requires: Vec::new(),
+                run_on: vec!["pre_release".to_string()],
+                on_variants: None,
+            },
+        );
+
+        let manager = ReleaseManager::new(ReleaseMode::Local, true, false);
+        let mut result = ReleaseResult::default();
+        manager
+            .run_tests(&package, install_dir.path(), &mut result)
+            .unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "package test failed: {:?}",
+            result.errors
+        );
+    }
+
+    struct CountingReleaseHook {
+        calls: std::sync::Arc<AtomicUsize>,
+        cancel: bool,
+        fail: bool,
+    }
+
+    impl ReleaseHook for CountingReleaseHook {
+        fn name() -> String {
+            "counting-release-hook".to_string()
+        }
+
+        fn new(_source_path: PathBuf) -> std::result::Result<Self, ReleaseHookError> {
+            unreachable!("the test registry factory constructs this hook")
+        }
+
+        fn pre_release(
+            &self,
+            _user: &str,
+            _install_path: &Path,
+            _variants: Option<&[usize]>,
+            _release_message: Option<&str>,
+            _changelog: Option<&[String]>,
+            _previous_version: Option<&str>,
+            _previous_revision: Option<&str>,
+        ) -> std::result::Result<(), ReleaseHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.cancel {
+                Err(ReleaseHookError::Cancelled("test cancellation".to_string()))
+            } else if self.fail {
+                Err(ReleaseHookError::Error("test failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn post_release(
+            &self,
+            _user: &str,
+            _install_path: &Path,
+            _variants: &[String],
+            _release_message: Option<&str>,
+            _changelog: Option<&[String]>,
+            _previous_version: Option<&str>,
+            _previous_revision: Option<&str>,
+        ) -> std::result::Result<(), ReleaseHookError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(ReleaseHookError::Error("test failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn test_release_hooks_run_for_pre_and_post_release() {
+        let hook_name = "counting-release-hook-lifecycle";
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        rez_next_release_hook::get_registry().register(hook_name, move |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: factory_calls.clone(),
+                cancel: false,
+                fail: false,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("hooked-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            Some("release"),
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PostRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            Some("release"),
+            None,
+            None,
+            &mut result,
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_release_hook_cancellation_becomes_release_error() {
+        let hook_name = "counting-release-hook-cancel";
+        rez_next_release_hook::get_registry().register(hook_name, |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                cancel: true,
+                fail: false,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("cancelled-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(!manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            None,
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("cancelled release"))
+        );
+    }
+
+    #[test]
+    fn test_release_hook_failure_is_a_warning() {
+        let hook_name = "counting-release-hook-error";
+        rez_next_release_hook::get_registry().register(hook_name, |_path| {
+            Ok(Box::new(CountingReleaseHook {
+                calls: std::sync::Arc::new(AtomicUsize::new(0)),
+                cancel: false,
+                fail: true,
+            }) as Box<dyn ReleaseHook>)
+        });
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_release_hooks(Some(vec![hook_name.to_string()]));
+        let source_dir = TempDir::new().unwrap();
+        let install_dir = TempDir::new().unwrap();
+        let package = Package::new("hook-warning-package".to_string());
+        let mut result = ReleaseResult::default();
+
+        assert!(manager.run_release_hooks(
+            ReleaseHookEvent::PreRelease,
+            source_dir.path(),
+            &package,
+            install_dir.path(),
+            None,
+            None,
+            None,
+            &mut result,
+        ));
+        assert!(result.errors.is_empty());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("test failure"))
+        );
     }
 
     #[test]
@@ -1027,7 +1849,7 @@ version = "{}"
     }
 
     #[test]
-    fn test_write_release_metadata_creates_file() {
+    fn test_write_vcs_metadata_creates_file() {
         // Create temp dirs
         let source_dir = TempDir::new().unwrap();
         let install_dir = TempDir::new().unwrap();
@@ -1052,16 +1874,11 @@ version = "1.0.0"
         // Create ReleaseManager (dry-run mode)
         let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
 
-        // Create a Package for the test
-        let pkg = rez_next_package::Package::new("test_pkg".to_string());
-        let mut pkg = pkg;
-        pkg.version = Some(rez_next_version::Version::new(Some("1.0.0")).unwrap());
-
-        // Manually call write_release_metadata
+        // Manually call write_vcs_metadata
         let mut result = ReleaseResult::default();
         let vcs: std::sync::Arc<dyn ReleaseVCS + Send + Sync> = std::sync::Arc::new(vcs);
         manager
-            .write_release_metadata(&pkg, install_dir.path(), &Some(vcs), &mut result)
+            .write_vcs_metadata(install_dir.path(), &Some(vcs), &mut result)
             .unwrap();
 
         // Verify vcs_metadata.json was created
@@ -1088,16 +1905,8 @@ version = "1.0.0"
     }
 
     #[test]
-    fn test_write_release_metadata_no_vcs() {
-        let source_dir = TempDir::new().unwrap();
+    fn test_write_vcs_metadata_no_vcs() {
         let install_dir = TempDir::new().unwrap();
-
-        // Create package.py
-        let pkg_file = source_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
 
         // No VCS
         let vcs: Option<std::sync::Arc<dyn ReleaseVCS + Send + Sync>> = None;
@@ -1105,13 +1914,10 @@ version = "1.0.0"
         // Create ReleaseManager
         let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
 
-        // Create a Package for the test
-        let pkg = rez_next_package::Package::new("test_pkg".to_string());
-
-        // Call write_release_metadata with no VCS
+        // Call write_vcs_metadata with no VCS
         let mut result = ReleaseResult::default();
         manager
-            .write_release_metadata(&pkg, install_dir.path(), &vcs, &mut result)
+            .write_vcs_metadata(install_dir.path(), &vcs, &mut result)
             .unwrap();
 
         // Verify vcs_metadata.json was NOT created
@@ -1124,87 +1930,6 @@ version = "1.0.0"
         // Verify warning was added
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].contains("No VCS detected"));
-    }
-
-    // ── Tests for run_tests() functionality ─────────────────────────────
-
-    #[test]
-    fn test_get_test_commands_with_tests_function() {
-        // Create a temp directory with package.py that has tests() function
-        let temp_dir = TempDir::new().unwrap();
-        let pkg_file = temp_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-
-def tests():
-    return ["echo 'test1'", "echo 'test2'"]
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return the two test commands
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0], "echo 'test1'");
-        assert_eq!(commands[1], "echo 'test2'");
-    }
-
-    #[test]
-    fn test_get_test_commands_without_tests_function() {
-        // Create a temp directory with package.py that does NOT have tests() function
-        let temp_dir = TempDir::new().unwrap();
-        let pkg_file = temp_dir.path().join("package.py");
-        let content = r#"name = "test_pkg"
-version = "1.0.0"
-"#;
-        std::fs::write(&pkg_file, content).unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return empty vec (no tests() function)
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn test_get_test_commands_no_package_py() {
-        // Create an empty temp directory (no package.py)
-        let temp_dir = TempDir::new().unwrap();
-
-        // Call get_test_commands
-        let commands = ReleaseManager::get_test_commands(temp_dir.path()).unwrap();
-
-        // Should return empty vec (no package.py)
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn test_execute_test_command_success() {
-        // Execute a simple command that succeeds
-        #[cfg(windows)]
-        let cmd = "echo test_passed";
-        #[cfg(not(windows))]
-        let cmd = "echo test_passed";
-
-        let result = ReleaseManager::execute_test_command(cmd, std::path::Path::new("."));
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(output.status.success());
-    }
-
-    #[test]
-    fn test_execute_test_command_failure() {
-        // Execute a command that fails
-        #[cfg(windows)]
-        let cmd = "exit 1";
-        #[cfg(not(windows))]
-        let cmd = "false";
-
-        let result = ReleaseManager::execute_test_command(cmd, std::path::Path::new("."));
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        assert!(!output.status.success());
     }
 
     /// A VCS whose tags can be forced to exist, so `create_vcs_tag` can be
@@ -1239,8 +1964,8 @@ version = "1.0.0"
         }
         fn get_changelog(
             &self,
-            _from: Option<&str>,
-            _to: Option<&str>,
+            _previous_revision: Option<&str>,
+            _max_revisions: Option<usize>,
         ) -> Result<String, RezCoreError> {
             Ok(String::new())
         }
@@ -1346,7 +2071,7 @@ version = "1.0.0"
         }
         fn create_tag(&self, tag: &str, _message: &str) -> Result<(), RezCoreError> {
             if self.refuse_existing && self.tag_exists {
-                return Err(RezCoreError::BuildError(format!(
+                return Err(RezCoreError::ReleaseVCSError(format!(
                     "tag '{}' already exists",
                     tag
                 )));
@@ -1356,8 +2081,8 @@ version = "1.0.0"
         }
         fn get_changelog(
             &self,
-            _from: Option<&str>,
-            _to: Option<&str>,
+            _previous_revision: Option<&str>,
+            _max_revisions: Option<usize>,
         ) -> Result<String, RezCoreError> {
             Ok(String::new())
         }
@@ -1450,11 +2175,11 @@ version = "1.0.0"
             .expect("release() must not propagate an error");
 
         assert!(
-            result
-                .errors
-                .iter()
-                .any(|e| e.contains("Failed to create variant directory")),
-            "an uncreatable variant directory must fail the release, got {:?}",
+            result.errors.iter().any(|e| {
+                e.contains("Failed to create variant directory")
+                    || e.contains("Failed to resolve build context")
+            }),
+            "a failed build or build-context resolution must fail the release, got {:?}",
             result.errors
         );
         assert!(
@@ -1493,6 +2218,62 @@ version = "1.0.0"
             vec!["fresh_pkg-2.0.0".to_string()],
             "a successful release must create its tag exactly once"
         );
+    }
+
+    #[test]
+    fn test_release_installs_release_provenance() {
+        let temp_dir = TempDir::new().unwrap();
+        let source = temp_dir.path().join("src");
+        fs::create_dir_all(&source).unwrap();
+        init_git_repo(&source);
+        create_test_package(&source, "provenance_pkg", "3.0.0");
+        fs::create_dir_all(install_dir_for("provenance_pkg", "3.0.0")).unwrap();
+
+        let mut manager = ReleaseManager::new(ReleaseMode::Local, true, true);
+        manager.set_skip_vcs_validation(true);
+        manager.set_ignore_existing_tag(Some(false));
+        let vcs = std::sync::Arc::new(CountingTagVCS {
+            tag_exists: false,
+            refuse_existing: true,
+            created: std::sync::Mutex::new(Vec::new()),
+        });
+        let vcs_for_release: std::sync::Arc<dyn crate::vcs::ReleaseVCS + Send + Sync> = vcs;
+
+        let result = manager
+            .release_with_vcs(&source, Some("publish provenance"), Some(vcs_for_release))
+            .expect("release() must not propagate an error");
+
+        assert!(result.success, "release failed: {:?}", result.errors);
+        let installed = PackageSerializer::load_from_file(
+            &install_dir_for("provenance_pkg", "3.0.0").join("package.py"),
+        )
+        .expect("installed package definition should remain parseable");
+        assert!(installed.timestamp.is_some());
+        assert_eq!(installed.revision.as_deref(), Some("stub-commit"));
+        assert_eq!(installed.changelog.as_deref(), Some(""));
+        assert_eq!(
+            installed.release_message.as_deref(),
+            Some("publish provenance")
+        );
+        assert_eq!(installed.vcs.as_deref(), Some("counting-stub"));
+    }
+
+    #[test]
+    fn test_release_preserves_declared_timestamp() {
+        let manager = ReleaseManager::new(ReleaseMode::DryRun, true, true);
+        let mut package = Package::new("timestamped_pkg".to_string());
+        package.timestamp = Some(1_234);
+        let mut result = ReleaseResult::default();
+
+        manager.populate_release_metadata(&mut package, &None, None, &mut result);
+
+        assert_eq!(package.timestamp, Some(1_234));
+    }
+
+    #[test]
+    fn test_truncate_changelog_zero_keeps_full_content() {
+        assert_eq!(truncate_changelog("first\nsecond", 0), "first\nsecond");
+        assert_eq!(truncate_changelog("first\nsecond", 5), "first");
     }
 
     /// `--ignore-existing-tag` over an existing tag: the package is installed

@@ -4,29 +4,19 @@ use crate::package_bindings::PyPackage;
 use crate::package_functions::expand_home;
 use crate::runtime::get_runtime;
 use pyo3::prelude::*;
-use rez_next_repository::package_repository::FilesystemPackageRepository;
-use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
 use rez_next_repository::simple_repository::RepositoryManager;
-use std::path::PathBuf;
 
 /// Python-accessible RepositoryManager class
 #[pyclass(name = "RepositoryManager")]
 pub struct PyRepositoryManager {
-    paths: Vec<PathBuf>,
+    paths: Vec<String>,
 }
 
 impl PyRepositoryManager {
     /// Build a `RepositoryManager` containing only the paths that currently exist on disk.
-    fn build_repo_manager(&self) -> RepositoryManager {
-        let mut manager = RepositoryManager::new();
-        for (i, path) in self.paths.iter().enumerate() {
-            if path.exists() {
-                let repository =
-                    FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-                manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-            }
-        }
-        manager
+    fn build_repo_manager(&self) -> PyResult<RepositoryManager> {
+        RepositoryManager::from_package_paths(self.paths.iter().map(String::as_str))
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
     }
 }
 
@@ -39,15 +29,18 @@ impl PyRepositoryManager {
         use rez_next_common::config::RezCoreConfig;
 
         let config = RezCoreConfig::load();
-        let repo_paths: Vec<PathBuf> = paths
-            .map(|p| p.into_iter().map(PathBuf::from).collect())
+        let repo_paths: Vec<String> = paths
+            .map(|p| p.into_iter().map(|p| expand_home(&p)).collect())
             .unwrap_or_else(|| {
                 config
                     .packages_path
                     .iter()
-                    .map(|p| PathBuf::from(expand_home(p)))
+                    .map(|p| expand_home(p))
                     .collect()
             });
+
+        RepositoryManager::from_package_paths(repo_paths.iter().map(String::as_str))
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         Ok(PyRepositoryManager { paths: repo_paths })
     }
@@ -59,7 +52,7 @@ impl PyRepositoryManager {
     /// Find all packages matching a name (exact family name lookup).
     fn find_packages(&self, name: &str) -> PyResult<Vec<PyPackage>> {
         let rt = get_runtime();
-        let repo_manager = self.build_repo_manager();
+        let repo_manager = self.build_repo_manager()?;
 
         let packages = rt
             .block_on(repo_manager.find_packages(name))
@@ -77,7 +70,7 @@ impl PyRepositoryManager {
     /// Returns all discovered versions in descending semantic version order.
     fn iter_packages(&self, name: &str) -> PyResult<Vec<PyPackage>> {
         let rt = get_runtime();
-        let repo_manager = self.build_repo_manager();
+        let repo_manager = self.build_repo_manager()?;
 
         let mut packages: Vec<_> = rt
             .block_on(repo_manager.find_packages(name))
@@ -110,7 +103,7 @@ impl PyRepositoryManager {
     /// Get the latest version of a package.
     fn get_latest_package(&self, name: &str) -> PyResult<Option<PyPackage>> {
         let rt = get_runtime();
-        let repo_manager = self.build_repo_manager();
+        let repo_manager = self.build_repo_manager()?;
 
         // Use get_package(name, None) which applies semantic Version comparison,
         // ensuring "3.11.0" beats "3.9.0" correctly (not lexicographic).
@@ -124,7 +117,7 @@ impl PyRepositoryManager {
     /// List all package family names across all repositories, sorted and deduplicated.
     fn get_package_family_names(&self) -> PyResult<Vec<String>> {
         let rt = get_runtime();
-        let repo_manager = self.build_repo_manager();
+        let repo_manager = self.build_repo_manager()?;
 
         // Use list_packages() which enumerates all cache keys after scanning,
         // instead of find_packages("") which looks for the empty-string key and

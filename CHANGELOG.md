@@ -545,8 +545,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **python:** fix config/system submodule overwrite causing ModuleNotFoundError ([a8b67bb](https://github.com/loonghao/rez-next/commit/a8b67bb27643edd4ce668b9f3dbf9352eb798ba9))
 * **python:** register all submodules in sys.modules to fix dotted imports ([93b2eea](https://github.com/loonghao/rez-next/commit/93b2eea36825c8719d830f3d10d5dddf2ca5c6f2))
 
-=======
->>>>>>> origin/auto-improve
 ## [0.2.0] - 2026-03-30
 
 ### Added

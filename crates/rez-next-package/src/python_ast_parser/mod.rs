@@ -9,6 +9,7 @@
 mod commands;
 mod eval;
 mod extract;
+mod metadata;
 mod types;
 
 use crate::Package;
@@ -33,7 +34,7 @@ impl PythonAstParser {
         }
     }
 
-    /// Parse a package.py file using Python AST
+    /// Parse a package.py file using Python AST.
     pub fn parse_package_py(content: &str) -> Result<Package, RezCoreError> {
         let mut parser = Self::new();
         parser.parse_package_py_with_context(content)
@@ -150,13 +151,18 @@ impl PythonAstParser {
                 self.process_commands_function(&func_def.body, package_data)?;
             }
             "pre_commands" => {
-                self.process_pre_commands_function(&func_def.body, package_data)?;
+                if !Self::function_has_decorator(func_def, "include") {
+                    self.process_pre_commands_function(&func_def.body, package_data)?;
+                }
             }
             "post_commands" => {
                 self.process_post_commands_function(&func_def.body, package_data)?;
             }
             "pre_test_commands" => {
                 self.process_pre_test_commands_function(&func_def.body, package_data)?;
+            }
+            "requires" => {
+                self.process_late_requires_function(func_def, package_data)?;
             }
             _ => {
                 return Err(RezCoreError::PackageParse(format!(
@@ -166,6 +172,19 @@ impl PythonAstParser {
             }
         }
         Ok(())
+    }
+
+    fn function_has_decorator(
+        function: &rustpython_ast::StmtFunctionDef,
+        decorator_name: &str,
+    ) -> bool {
+        function.decorator_list.iter().any(|decorator| {
+            matches!(
+                decorator,
+                Expr::Call(call)
+                    if matches!(&*call.func, Expr::Name(name) if name.id.as_str() == decorator_name)
+            )
+        })
     }
 
     /// Process conditional statements
@@ -204,7 +223,7 @@ impl PythonAstParser {
         let python_value = self.evaluate_expression(value)?;
         self.context
             .variables
-            .insert(var_name.to_string(), python_value);
+            .insert(var_name.to_string(), python_value.clone());
 
         match var_name {
             "name" => {
@@ -293,10 +312,35 @@ impl PythonAstParser {
             "preprocess" => {
                 package_data.preprocess = Some(self.extract_string_value(value)?);
             }
+            "timestamp" => {
+                package_data.timestamp = if matches!(python_value, types::PythonValue::None) {
+                    None
+                } else {
+                    Some(self.extract_i64_value(value)?)
+                };
+            }
+            "revision" => {
+                package_data.revision = self.extract_optional_string(value)?;
+            }
+            "changelog" => {
+                package_data.changelog = self.extract_optional_string(value)?;
+            }
+            "release_message" => {
+                package_data.release_message = self.extract_optional_string(value)?;
+            }
+            "previous_version" => {
+                package_data.previous_version = self.extract_optional_string(value)?;
+            }
+            "previous_revision" => {
+                package_data.previous_revision = self.extract_optional_string(value)?;
+            }
+            "vcs" => {
+                package_data.vcs = self.extract_optional_string(value)?;
+            }
             _ => {
                 package_data
                     .extra_fields
-                    .insert(var_name.to_string(), format!("{:?}", value));
+                    .insert(var_name.to_string(), python_value.into_json_value());
             }
         }
         Ok(())
@@ -396,12 +440,27 @@ impl PythonAstParser {
         package.cachable = data.cachable;
         package.commands = data.commands_function.clone();
         package.commands_function = data.commands_function;
+        package.set_arbitrary_fields(data.extra_fields);
         package.base = data.base;
         package.hashed_variants = data.hashed_variants;
         package.has_plugins = data.has_plugins;
         package.plugin_for = data.plugin_for;
         package.format_version = data.format_version;
         package.preprocess = data.preprocess;
+        package.timestamp = data.timestamp;
+        package.revision = data.revision;
+        package.changelog = data.changelog;
+        package.release_message = data.release_message;
+        package.previous_version = data
+            .previous_version
+            .map(|version| {
+                Version::parse(&version).map_err(|error| {
+                    RezCoreError::PackageParse(format!("Invalid previous version: {error}"))
+                })
+            })
+            .transpose()?;
+        package.previous_revision = data.previous_revision;
+        package.vcs = data.vcs;
 
         package.validate()?;
 
@@ -412,6 +471,7 @@ impl PythonAstParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{TestCommand, TestVariantFilter};
 
     #[test]
     fn test_parse_package_with_new_fields() {
@@ -445,6 +505,66 @@ preprocess = "some_preprocess_function"
             package.preprocess,
             Some("some_preprocess_function".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_package_preserves_arbitrary_fields() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "metadata_package"
+version = "1.0.0"
+vx_upstream_sha256 = "abc123"
+vx_build_options = {"lto": True, "jobs": 8}
+vx_targets = ["linux", "windows"]
+"#,
+        )
+        .expect("arbitrary package attributes should parse");
+
+        assert_eq!(
+            package.arbitrary_value("vx_upstream_sha256"),
+            Some(serde_json::json!("abc123"))
+        );
+        assert_eq!(
+            package.arbitrary_value("vx_build_options"),
+            Some(serde_json::json!({"lto": true, "jobs": 8}))
+        );
+        assert_eq!(
+            package.arbitrary_keys(),
+            vec![
+                "vx_build_options".to_string(),
+                "vx_targets".to_string(),
+                "vx_upstream_sha256".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_package_release_metadata() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "released_package"
+version = "2.0.0"
+timestamp = 1700000000
+revision = "abc123"
+changelog = "Changes"
+release_message = "Release 2.0.0"
+previous_version = "1.9.0"
+previous_revision = "def456"
+vcs = "git"
+"#,
+        )
+        .expect("release metadata should parse");
+
+        assert_eq!(package.timestamp, Some(1_700_000_000));
+        assert_eq!(package.revision.as_deref(), Some("abc123"));
+        assert_eq!(package.changelog.as_deref(), Some("Changes"));
+        assert_eq!(package.release_message.as_deref(), Some("Release 2.0.0"));
+        assert_eq!(
+            package.previous_version.as_ref().map(ToString::to_string),
+            Some("1.9.0".to_string())
+        );
+        assert_eq!(package.previous_revision.as_deref(), Some("def456"));
+        assert_eq!(package.vcs.as_deref(), Some("git"));
     }
 
     #[test]
@@ -543,6 +663,29 @@ def commands():
     }
 
     #[test]
+    fn test_commands_use_imports_declared_inside_the_function() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "python"
+version = "3.9.13"
+def commands():
+    from platform import system
+    if system() == "Windows":
+        env.PLATFORM_MODE = "windows"
+    else:
+        env.PLATFORM_MODE = "posix"
+"#,
+        )
+        .expect("safe command-scope imports should be available to conditions");
+
+        let expected = if cfg!(windows) { "windows" } else { "posix" };
+        assert_eq!(
+            package.commands.as_deref(),
+            Some(format!("env.setenv('PLATFORM_MODE', '{expected}')").as_str())
+        );
+    }
+
+    #[test]
     fn test_commands_evaluate_platform_alias_with_local_variables() {
         let package = PythonAstParser::parse_package_py(
             r#"
@@ -604,6 +747,29 @@ def commands():
     }
 
     #[test]
+    fn test_included_dynamic_pre_commands_do_not_block_environment_commands() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "pywin32"
+version = "306"
+def commands():
+    env.PYTHONPATH.prepend("{this.root}/site-packages")
+@include("pkg_shared")
+def pre_commands():
+    for dll in discover_system_dlls():
+        copy_to_system(dll)
+"#,
+        )
+        .expect("external pre-command extensions should not block package environments");
+
+        assert!(package.pre_commands.is_none());
+        assert_eq!(
+            package.commands.as_deref(),
+            Some("env.prepend_path('PYTHONPATH', '{this.root}/site-packages')")
+        );
+    }
+
+    #[test]
     fn test_dynamic_metadata_function_is_rejected() {
         let error = PythonAstParser::parse_package_py(
             r#"
@@ -620,6 +786,30 @@ def version():
                 .to_string()
                 .contains("Unsupported package.py function"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_late_bound_requires_function_is_evaluated() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "blender"
+version = "4.5.5"
+
+@late()
+def requires():
+    requires_ = ["~python-3.11", "~msvc-14.0", "python_embedded-1"]
+    import os
+    if "__REZ_NEXT_TEST_LATE_REQUIRES_SHOULD_NOT_EXIST__" in os.environ:
+        requires_ = []
+    return requires_
+"#,
+        )
+        .expect("supported late-bound requirements should be evaluated safely");
+
+        assert_eq!(
+            package.requires,
+            ["~python-3.11", "~msvc-14.0", "python_embedded-1"]
         );
     }
 
@@ -644,8 +834,8 @@ for requirement in discover_requirements():
     }
 
     #[test]
-    fn test_structured_package_test_is_rejected_until_supported() {
-        let error = PythonAstParser::parse_package_py(
+    fn test_structured_package_test_command_is_supported() {
+        let package = PythonAstParser::parse_package_py(
             r#"
 name = "test_package"
 version = "1.0.0"
@@ -657,11 +847,72 @@ tests = {
 }
 "#,
         )
-        .expect_err("structured test metadata must not be flattened into debug text");
+        .expect("structured test metadata should preserve its command");
 
-        assert!(
-            error.to_string().contains("Unsupported test definition"),
-            "unexpected error: {error}"
+        assert_eq!(
+            package
+                .tests
+                .get("unit")
+                .map(|test| test.command.as_string()),
+            Some("python -m pytest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_package_test_definitions_preserve_all_supported_shapes() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "test_package"
+version = "1.0.0"
+tests = {
+    "shell": "python -m unittest",
+    "argv": ["python", "-m", "pytest"],
+    "structured": {
+        "command": ["python", "-m", "coverage"],
+        "requires": ["coverage-7"],
+        "run_on": ["ci", "nightly"],
+        "on_variants": {"type": "requires", "value": ["python-3.11"]},
+    },
+}
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            package.tests["shell"].command,
+            TestCommand::String(ref command) if command == "python -m unittest"
+        ));
+        assert!(matches!(
+            package.tests["argv"].command,
+            TestCommand::List(ref command) if command == &["python", "-m", "pytest"]
+        ));
+        let structured = &package.tests["structured"];
+        assert_eq!(structured.requires, vec!["coverage-7"]);
+        assert_eq!(structured.run_on, vec!["ci", "nightly"]);
+        assert_eq!(
+            structured.on_variants,
+            Some(TestVariantFilter::Requires(vec!["python-3.11".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_package_test_run_on_accepts_a_single_tag() {
+        let package = PythonAstParser::parse_package_py(
+            r#"
+name = "test_package"
+tests = {
+    "release": {
+        "command": "python -m pytest",
+        "run_on": "pre_release",
+    },
+}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            package.tests["release"].run_on,
+            vec!["pre_release".to_string()]
         );
     }
 
@@ -679,8 +930,11 @@ tests = {
         .unwrap();
 
         assert_eq!(
-            package.tests.get("import").map(String::as_str),
-            Some(r#"python -c "import test_package; print(test_package.VALUE)""#)
+            package
+                .tests
+                .get("import")
+                .map(|test| test.command.as_string()),
+            Some(r#"python -c "import test_package; print(test_package.VALUE)""#.to_string())
         );
     }
 }

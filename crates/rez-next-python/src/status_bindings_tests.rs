@@ -80,17 +80,16 @@ fn test_detect_current_shell_returns_valid_shell() {
     // On Windows, PSModulePath is always present so powershell is detected.
     // On Linux/macOS, SHELL governs. Either way, the result must be a known shell name.
     let shell = detect_current_shell();
-    let known = ["bash", "zsh", "fish", "powershell", "cmd"];
+    let known = ["bash", "zsh", "fish", "powershell", "pwsh", "cmd"];
     assert!(
         known.iter().any(|k| shell.contains(k)),
         "unexpected shell: {shell}"
     );
-    // On Windows CI, PSModulePath is always set, so we get exactly "powershell".
+    // On Windows CI, PSModulePath is always set, so we get a PowerShell shell.
     #[cfg(target_os = "windows")]
-    assert_eq!(
-        shell.as_str(),
-        "powershell",
-        "expected powershell on Windows, got: {shell}"
+    assert!(
+        matches!(shell.as_str(), "powershell" | "pwsh"),
+        "expected a PowerShell shell on Windows, got: {shell}"
     );
 }
 

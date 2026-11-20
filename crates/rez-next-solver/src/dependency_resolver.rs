@@ -5,8 +5,8 @@ use crate::resolution_state::ResolutionState;
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, PackageInstallLayout, Requirement, VersionConstraint};
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_version::Version;
-use std::collections::HashMap;
+use rez_next_version::{Version, VersionRange};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,6 +36,44 @@ pub struct DetailedResolutionResult {
 
     /// Resolution statistics
     pub stats: ResolutionStats,
+}
+
+/// Resolution result with ephemeral requirements retained for context setup.
+///
+/// The original [`DetailedResolutionResult`] remains constructible with its
+/// historical fields. Callers that need Rez's ephemeral metadata can opt into
+/// this extended result through [`DependencyResolver::resolve_with_ephemerals`].
+#[derive(Debug, Clone)]
+pub struct ResolutionResultWithEphemerals {
+    /// The historical detailed resolution result.
+    pub result: DetailedResolutionResult,
+    /// Ephemeral requirements selected during resolution.
+    pub resolved_ephemerals: Vec<ResolvedEphemeral>,
+}
+
+/// A resolved ephemeral feature range, which has no repository package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEphemeral {
+    pub name: String,
+    pub range: VersionRange,
+}
+
+impl ResolvedEphemeral {
+    /// Convert to the package-request representation used by resolved contexts.
+    #[must_use]
+    pub fn as_package_requirement(&self) -> rez_next_package::PackageRequirement {
+        let version_spec = if self.range.is_any() {
+            None
+        } else {
+            Some(self.range.as_str().to_string())
+        };
+        rez_next_package::PackageRequirement {
+            name: self.name.clone(),
+            version_spec,
+            weak: false,
+            conflict: false,
+        }
+    }
 }
 
 /// Information about a resolved package
@@ -127,6 +165,71 @@ pub struct ResolutionStats {
     pub backtrack_steps: usize,
 }
 
+#[derive(Default)]
+struct EphemeralRanges {
+    positive: Option<VersionRange>,
+    excluded: Vec<VersionRange>,
+}
+
+fn resolve_ephemerals(
+    requirements: Vec<Requirement>,
+) -> Result<(Vec<Requirement>, Vec<ResolvedEphemeral>), RezCoreError> {
+    let mut regular = Vec::new();
+    let mut grouped: BTreeMap<String, EphemeralRanges> = BTreeMap::new();
+
+    for requirement in requirements {
+        if !requirement.name.starts_with('.') {
+            regular.push(requirement);
+            continue;
+        }
+
+        let range = requirement_range(&requirement)?;
+        let ranges = grouped.entry(requirement.name.clone()).or_default();
+        if requirement.conflict {
+            ranges.excluded.push(range);
+        } else {
+            ranges.positive = Some(match ranges.positive.take() {
+                Some(current) => current.intersect(&range).ok_or_else(|| {
+                    RezCoreError::Solver(format!(
+                        "Ephemeral request '{}' has incompatible ranges",
+                        requirement.name
+                    ))
+                })?,
+                None => range,
+            });
+        }
+    }
+
+    let mut resolved = Vec::new();
+    for (name, ranges) in grouped {
+        let Some(mut range) = ranges.positive else {
+            continue;
+        };
+        for excluded in ranges.excluded {
+            range = range.subtract(&excluded).ok_or_else(|| {
+                RezCoreError::Solver(format!("Ephemeral request '{name}' is fully excluded"))
+            })?;
+        }
+        resolved.push(ResolvedEphemeral { name, range });
+    }
+
+    Ok((regular, resolved))
+}
+
+fn requirement_range(requirement: &Requirement) -> Result<VersionRange, RezCoreError> {
+    let range = match &requirement.version_constraint {
+        None | Some(VersionConstraint::Any) => return Ok(VersionRange::any()),
+        Some(VersionConstraint::Prefix(version)) => version.as_str().to_string(),
+        Some(constraint) => constraint.to_string(),
+    };
+    VersionRange::parse(&range).map_err(|error| {
+        RezCoreError::RequirementParse(format!(
+            "Invalid ephemeral request '{}': {error}",
+            requirement
+        ))
+    })
+}
+
 impl DependencyResolver {
     /// Create a new dependency resolver
     pub fn new(repository_manager: Arc<RepositoryManager>, config: SolverConfig) -> Self {
@@ -142,13 +245,54 @@ impl DependencyResolver {
         &mut self,
         requirements: Vec<Requirement>,
     ) -> Result<DetailedResolutionResult, RezCoreError> {
+        Ok(self.resolve_with_mode(requirements, false).await?.result)
+    }
+
+    /// Resolve requirements and retain the ephemeral metadata selected by the solver.
+    pub async fn resolve_with_ephemerals(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
+        self.resolve_with_mode(requirements, false).await
+    }
+
+    /// Resolve a build environment, propagating public `build_requires`.
+    ///
+    /// Private build requirements are intentionally absent here. The caller
+    /// adds the package currently being built's private requirements to the
+    /// root request, while dependencies contribute only their public build
+    /// requirements.
+    pub async fn resolve_build(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<DetailedResolutionResult, RezCoreError> {
+        Ok(self.resolve_with_mode(requirements, true).await?.result)
+    }
+
+    /// Resolve a build environment and retain ephemeral metadata.
+    pub async fn resolve_build_with_ephemerals(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
+        self.resolve_with_mode(requirements, true).await
+    }
+
+    async fn resolve_with_mode(
+        &mut self,
+        requirements: Vec<Requirement>,
+        include_build_requires: bool,
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
         let start_time = std::time::Instant::now();
+
+        let (requirements, resolved_ephemerals) = resolve_ephemerals(requirements)?;
 
         // Initialize resolution state
         let mut resolution_state = ResolutionState::new(requirements.clone());
 
         // Perform resolution
-        let result = self.resolve_recursive(&mut resolution_state).await?;
+        let result = self
+            .resolve_recursive(&mut resolution_state, include_build_requires)
+            .await?;
 
         // Check for cyclic dependencies after full resolution
         if let Some(cycle) = resolution_state.detect_cycle() {
@@ -169,15 +313,17 @@ impl DependencyResolver {
         };
 
         let failed_requirements = std::mem::take(&mut resolution_state.failed_requirements);
-        let failed: Vec<_> = failed_requirements
-            .into_iter()
-            .filter(|requirement| {
-                resolution_state.is_requirement_active(requirement)
-                    && resolution_state
-                        .find_satisfying_package(requirement)
-                        .is_none()
-            })
-            .collect();
+        let mut failed = Vec::new();
+        for requirement in failed_requirements {
+            if resolution_state.is_requirement_active(&requirement)
+                && resolution_state
+                    .find_satisfying_package(&requirement)
+                    .is_none()
+                && !failed.contains(&requirement)
+            {
+                failed.push(requirement);
+            }
+        }
 
         // Strict mode: any unsatisfied requirement is a hard error
         if self.config.strict_mode && !failed.is_empty() {
@@ -188,11 +334,14 @@ impl DependencyResolver {
             )));
         }
 
-        Ok(DetailedResolutionResult {
-            resolved_packages: result,
-            failed_requirements: failed,
-            conflicts: resolution_state.conflicts,
-            stats,
+        Ok(ResolutionResultWithEphemerals {
+            result: DetailedResolutionResult {
+                resolved_packages: result,
+                failed_requirements: failed,
+                conflicts: resolution_state.conflicts,
+                stats,
+            },
+            resolved_ephemerals,
         })
     }
 
@@ -200,6 +349,7 @@ impl DependencyResolver {
     async fn resolve_recursive(
         &mut self,
         state: &mut ResolutionState,
+        include_build_requires: bool,
     ) -> Result<Vec<ResolvedPackageInfo>, RezCoreError> {
         // Get next requirement to resolve
         while let Some(requirement) = state.get_next_requirement() {
@@ -238,9 +388,6 @@ impl DependencyResolver {
             let mut resolved = false;
             let mut best_effort_candidate = None;
             for candidate in candidates {
-                if state.is_package_rejected(&candidate) {
-                    continue;
-                }
                 if best_effort_candidate.is_none()
                     && state.check_explicit_conflicts(&candidate).is_none()
                 {
@@ -254,9 +401,17 @@ impl DependencyResolver {
 
                 // Try to resolve with this candidate
                 if let Ok((resolved_info, dependencies, conflicts)) = self
-                    .try_resolve_with_candidate(state, &candidate, &requirement)
+                    .try_resolve_with_candidate(
+                        state,
+                        &candidate,
+                        &requirement,
+                        include_build_requires,
+                    )
                     .await
                 {
+                    if state.is_resolution_rejected(&resolved_info) {
+                        continue;
+                    }
                     let package_name = resolved_info.package.name.clone();
                     state.add_resolved_package(resolved_info);
                     state.set_package_requirements(package_name, dependencies, conflicts);
@@ -270,7 +425,12 @@ impl DependencyResolver {
                 && !has_resolved_package
                 && let Some(candidate) = best_effort_candidate
                 && let Ok((resolved_info, dependencies, conflicts)) = self
-                    .try_resolve_with_candidate(state, &candidate, &requirement)
+                    .try_resolve_with_candidate(
+                        state,
+                        &candidate,
+                        &requirement,
+                        include_build_requires,
+                    )
                     .await
             {
                 let package_name = resolved_info.package.name.clone();
@@ -282,7 +442,7 @@ impl DependencyResolver {
             if !resolved
                 && self.config.strict_mode
                 && self
-                    .backtrack_dependency_source(state, &requirement)
+                    .backtrack_dependency_source(state, &requirement, include_build_requires)
                     .await?
             {
                 continue;
@@ -300,6 +460,7 @@ impl DependencyResolver {
         &mut self,
         state: &mut ResolutionState,
         failed_requirement: &Requirement,
+        include_build_requires: bool,
     ) -> Result<bool, RezCoreError> {
         let target_candidates = self.find_candidate_packages(failed_requirement).await?;
         let mut exact_sources = Vec::new();
@@ -338,7 +499,10 @@ impl DependencyResolver {
         exact_sources.extend(incompatible_sources);
         exact_sources.extend(other_sources);
         for source in exact_sources {
-            if self.backtrack_package(state, &source).await? {
+            if self
+                .backtrack_package(state, &source, include_build_requires)
+                .await?
+            {
                 return Ok(true);
             }
         }
@@ -350,6 +514,7 @@ impl DependencyResolver {
         &mut self,
         state: &mut ResolutionState,
         package_name: &str,
+        include_build_requires: bool,
     ) -> Result<bool, RezCoreError> {
         let Some(current) = state
             .resolved_packages
@@ -366,32 +531,47 @@ impl DependencyResolver {
             return Ok(false);
         };
 
-        state.reject_package(&current.package);
+        let mut state_without_current = state.clone();
+        state_without_current.reject_resolution(&current);
+        state_without_current.remove_resolved_package(package_name);
         let candidates = self.find_candidate_packages(primary_requirement).await?;
         for candidate in candidates {
-            if state.is_package_rejected(&candidate)
-                || candidate.version == current.package.version
-                || candidate.version.as_ref().is_some_and(|version| {
-                    requirements
-                        .iter()
-                        .any(|requirement| !requirement.is_satisfied_by(version))
-                })
-                || state.check_explicit_conflicts(&candidate).is_some()
+            if candidate.version.as_ref().is_some_and(|version| {
+                requirements
+                    .iter()
+                    .any(|requirement| !requirement.is_satisfied_by(version))
+            }) || state_without_current
+                .check_explicit_conflicts(&candidate)
+                .is_some()
             {
                 continue;
             }
 
+            let mut trial_state = state_without_current.clone();
             let requirement = current
                 .satisfying_requirement
                 .as_ref()
                 .unwrap_or(primary_requirement);
             if let Ok((resolved_info, dependencies, conflicts)) = self
-                .try_resolve_with_candidate(state, &candidate, requirement)
+                .try_resolve_with_candidate(
+                    &mut trial_state,
+                    &candidate,
+                    requirement,
+                    include_build_requires,
+                )
                 .await
             {
-                state.add_resolved_package(resolved_info);
-                state.set_package_requirements(package_name.to_string(), dependencies, conflicts);
-                state.backtrack_steps += 1;
+                if trial_state.is_resolution_rejected(&resolved_info) {
+                    continue;
+                }
+                trial_state.add_resolved_package(resolved_info);
+                trial_state.set_package_requirements(
+                    package_name.to_string(),
+                    dependencies,
+                    conflicts,
+                );
+                trial_state.backtrack_steps += 1;
+                *state = trial_state;
                 return Ok(true);
             }
         }
@@ -471,6 +651,7 @@ impl DependencyResolver {
         state: &mut ResolutionState,
         candidate: &Arc<Package>,
         requirement: &Requirement,
+        include_build_requires: bool,
     ) -> Result<(ResolvedPackageInfo, Vec<Requirement>, Vec<Requirement>), RezCoreError> {
         // Determine which variant to use (if package has variants)
         let variant_index = self.select_variant(candidate, state);
@@ -483,7 +664,8 @@ impl DependencyResolver {
         }
 
         // Get the effective requires list (base + variant-specific)
-        let effective_requires = self.get_effective_requires(candidate, variant_index);
+        let effective_requires =
+            self.get_effective_requires(candidate, variant_index, include_build_requires);
 
         // Create resolved package info
         let resolved_info = ResolvedPackageInfo {
@@ -609,23 +791,50 @@ impl DependencyResolver {
             let Ok((conflict, requirement)) = Self::parse_variant_requirement(raw) else {
                 return false;
             };
+
             let resolved = state
                 .resolved_packages
                 .iter()
                 .find(|resolved| resolved.package.name == requirement.name);
-            match (conflict, resolved) {
-                (true, Some(resolved)) => resolved
-                    .package
-                    .version
-                    .as_ref()
-                    .is_some_and(|version| !requirement.is_satisfied_by(version)),
-                // A later positive constraint may legitimately narrow an already
-                // selected package. The queue will replace it with a candidate
-                // satisfying every active constraint.
-                (false, Some(_)) => true,
-                _ => true,
+            if let Some(version) = resolved.and_then(|resolved| resolved.package.version.as_ref()) {
+                let satisfies = requirement.is_satisfied_by(version);
+                if conflict || satisfies {
+                    return conflict != satisfies;
+                }
             }
+
+            if !conflict
+                && state
+                    .active_requirements
+                    .get(&requirement.name)
+                    .is_some_and(|active| {
+                        active.iter().any(|active_requirement| {
+                            !Self::requirements_may_intersect(&requirement, active_requirement)
+                        })
+                    })
+            {
+                return false;
+            }
+
+            true
         })
+    }
+
+    fn requirements_may_intersect(left: &Requirement, right: &Requirement) -> bool {
+        let left_floor = left
+            .version_constraint
+            .as_ref()
+            .and_then(Self::constraint_version_floor);
+        let right_floor = right
+            .version_constraint
+            .as_ref()
+            .and_then(Self::constraint_version_floor);
+        match (left_floor, right_floor) {
+            (Some(left_floor), Some(right_floor)) => {
+                left.is_satisfied_by(&right_floor) || right.is_satisfied_by(&left_floor)
+            }
+            _ => true,
+        }
     }
 
     fn parse_variant_requirement(raw: &str) -> Result<(bool, Requirement), String> {
@@ -642,8 +851,17 @@ impl DependencyResolver {
         &self,
         package: &Package,
         variant_index: Option<usize>,
+        include_build_requires: bool,
     ) -> Vec<String> {
         let mut requires = package.requires.clone();
+
+        if include_build_requires {
+            for build_requirement in &package.build_requires {
+                if !requires.contains(build_requirement) {
+                    requires.push(build_requirement.clone());
+                }
+            }
+        }
 
         if let Some(idx) = variant_index
             && let Some(variant_reqs) = package.variants.get(idx)

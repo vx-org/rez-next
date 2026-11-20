@@ -62,6 +62,7 @@ from . import (
 )
 from .config import Config, config  # noqa: F401
 from .exceptions import *  # noqa: F401,F403
+from .version import Requirement  # noqa: F401
 
 # Package maker — programmatic package creation
 from .package_maker import (  # noqa: F401

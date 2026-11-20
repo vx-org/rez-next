@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::SystemInfo;
 
 /// Configuration for rez-core components
 ///
@@ -46,6 +49,9 @@ pub struct RezCoreConfig {
     /// Release packages path
     pub release_packages_path: String,
 
+    /// Weak package requests appended to every resolve unless disabled.
+    pub implicit_packages: Vec<String>,
+
     /// Default shell
     pub default_shell: String,
 
@@ -54,6 +60,17 @@ pub struct RezCoreConfig {
 
     /// Plugin paths
     pub plugin_path: Vec<String>,
+
+    /// Plugin-specific configuration, including `plugins.release_vcs`.
+    ///
+    /// Plugin settings are intentionally kept as JSON values because plugins
+    /// own their schemas. Keeping the mapping here preserves those settings
+    /// for native consumers without making the core config depend on a
+    /// particular plugin implementation.
+    pub plugins: BTreeMap<String, serde_json::Value>,
+
+    /// Release hooks run during package releases.
+    pub release_hooks: Vec<String>,
 
     /// Package cache paths
     pub package_cache_path: Vec<String>,
@@ -76,19 +93,12 @@ pub struct RezCoreConfig {
     /// Terminal type
     pub terminal_emulator_command: String,
 
-    /// Packages implicitly added to every resolve (`implicit_packages`)
-    ///
-    /// Deliberate divergence: upstream rez 3.4.0 defaults this to
-    /// `["~platform=={system.platform}", "~arch=={system.arch}", "~os=={system.os}"]`,
-    /// but those are implicit-package request strings that rez-next cannot
-    /// parse yet. Defaulting to empty keeps the setting inert rather than
-    /// feeding unparseable requests into the solver; align with upstream once
-    /// that syntax is supported.
-    pub implicit_packages: Vec<String>,
-
     /// Environment variables treated as path-like and joined rather than
     /// replaced (`parent_variables`)
     pub parent_variables: Vec<String>,
+
+    /// Preserve the parent value for every variable touched by prepend/append.
+    pub all_parent_variables: bool,
 
     /// Environment variables replaced rather than appended to
     /// (`resetting_variables`)
@@ -107,8 +117,25 @@ pub struct RezCoreConfig {
     /// Directory packages are built in (`build_directory`)
     pub build_directory: String,
 
+    /// Candidate custom build script names, in detection order.
+    ///
+    /// This is a rez-next compatibility extension. Upstream rez selects
+    /// custom builds through `build_command` and has no equivalent setting.
+    pub build_script_names: Vec<String>,
+
     /// Directory contexts are written to (`context_tmpdir`)
     pub context_tmpdir: String,
+
+    /// Maximum number of changelog characters stored on a released package.
+    pub max_package_changelog_chars: usize,
+
+    /// Registry-backed settings that do not yet have a dedicated Rust field.
+    ///
+    /// Keeping these values makes the shared configuration contract lossless.
+    /// Consumers can read them through [`RezCoreConfig::get_field`] while a
+    /// subsystem is being migrated to a typed field.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Nested keys accepted by [`CacheConfig`], used to reject unknown overrides
@@ -118,6 +145,17 @@ const CACHE_KEYS: [&str; 4] = [
     "enable_disk_cache",
     "memory_cache_size",
     "cache_ttl_seconds",
+];
+
+/// Rez settings for the optional Memcached backend, which rez-next does not
+/// implement yet. They remain in the generic configuration map so callers can
+/// inspect them, but no native cache operation consumes them.
+const UNSUPPORTED_MEMCACHED_KEYS: [&str; 5] = [
+    "memcached_uri",
+    "memcached_package_file_min_compress_len",
+    "memcached_context_file_min_compress_len",
+    "memcached_listdir_min_compress_len",
+    "memcached_resolve_min_compress_len",
 ];
 
 /// Cache configuration
@@ -146,6 +184,7 @@ impl RezCoreConfig {
 
 impl Default for RezCoreConfig {
     fn default() -> Self {
+        let system = SystemInfo::detect();
         Self {
             use_rust_version: true,
             use_rust_solver: true,
@@ -160,9 +199,12 @@ impl Default for RezCoreConfig {
             ],
             local_packages_path: "~/packages".to_string(),
             release_packages_path: "~/.rez/packages/int".to_string(),
+            implicit_packages: system.implicit_packages().into_iter().collect(),
             default_shell: if cfg!(windows) { "cmd" } else { "bash" }.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             plugin_path: vec![],
+            plugins: BTreeMap::new(),
+            release_hooks: vec![],
             package_cache_path: vec!["~/.rez/cache".to_string()],
             tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
             editor: if cfg!(windows) { "notepad" } else { "vi" }.to_string(),
@@ -175,16 +217,22 @@ impl Default for RezCoreConfig {
                 "xterm"
             }
             .to_string(),
-            // Upstream rez 3.4.0 defaults for the settings that were inert,
-            // except implicit_packages - see the note on that field.
-            implicit_packages: vec![],
             parent_variables: vec![],
+            all_parent_variables: false,
             resetting_variables: vec![],
             env_var_separators: default_env_var_separators(),
             platform_map: BTreeMap::new(),
             default_relocatable: true,
             build_directory: "build".to_string(),
+            build_script_names: vec![
+                "build.sh".to_string(),
+                "build.bat".to_string(),
+                "build.py".to_string(),
+                "build".to_string(),
+            ],
             context_tmpdir: std::env::temp_dir().to_string_lossy().to_string(),
+            max_package_changelog_chars: 65536,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -270,62 +318,76 @@ impl RezCoreConfig {
     /// Get the list of configuration file paths that are searched
     #[must_use]
     pub fn get_search_paths() -> Vec<PathBuf> {
-        let mut paths = Vec::new();
+        Self::search_path_groups().into_iter().flatten().collect()
+    }
 
-        // 1. Built-in config (if exists)
+    /// Return logical configuration locations and their format preference.
+    ///
+    /// Rez treats a Python file as the preferred representation for each
+    /// logical location. The fallback file is then parsed as YAML/JSON. A
+    /// group is selected at most once, so a stale `.rezconfig` cannot override
+    /// the adjacent `.rezconfig.py` file.
+    fn search_path_groups() -> Vec<Vec<PathBuf>> {
+        let mut groups = Vec::new();
+
         if let Ok(exe_path) = env::current_exe()
             && let Some(exe_dir) = exe_path.parent()
         {
-            paths.push(exe_dir.join("rezconfig.yaml"));
-            paths.push(exe_dir.join("rezconfig.json"));
+            groups.push(vec![
+                exe_dir.join("rezconfig.py"),
+                exe_dir.join("rezconfig.yaml"),
+                exe_dir.join("rezconfig.json"),
+            ]);
         }
 
-        // 2. Environment variable REZ_CONFIG_FILE
         if let Ok(config_file) = env::var("REZ_CONFIG_FILE") {
-            for path in config_file.split(path_list_separator()) {
-                paths.push(PathBuf::from(path));
+            for path in config_file
+                .split(path_list_separator())
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                groups.push(config_path_variants(PathBuf::from(path)));
             }
         }
 
-        // 3. System-wide config
         if cfg!(unix) {
-            paths.push(PathBuf::from("/etc/rez/config.yaml"));
-            paths.push(PathBuf::from("/usr/local/etc/rez/config.yaml"));
+            groups.push(config_path_variants(PathBuf::from("/etc/rez/config.yaml")));
+            groups.push(config_path_variants(PathBuf::from(
+                "/usr/local/etc/rez/config.yaml",
+            )));
         } else if cfg!(windows)
             && let Ok(program_data) = env::var("PROGRAMDATA")
         {
-            paths.push(PathBuf::from(program_data).join("rez").join("config.yaml"));
+            groups.push(config_path_variants(
+                PathBuf::from(program_data).join("rez").join("config.yaml"),
+            ));
         }
 
-        // 4. User home config (unless disabled)
         if env::var("REZ_DISABLE_HOME_CONFIG")
             .unwrap_or_default()
             .to_lowercase()
             != "1"
         {
-            if let Ok(home) = env::var("HOME") {
-                let home_path = PathBuf::from(&home);
-                paths.push(home_path.join(".rezconfig"));
-                paths.push(home_path.join(".rezconfig.yaml"));
-                paths.push(home_path.join(".rez").join("config.yaml"));
-            } else if cfg!(windows)
-                && let Ok(userprofile) = env::var("USERPROFILE")
-            {
-                let user_path = PathBuf::from(&userprofile);
-                paths.push(user_path.join(".rezconfig"));
-                paths.push(user_path.join(".rezconfig.yaml"));
-                paths.push(user_path.join(".rez").join("config.yaml"));
+            let home = env::var("HOME")
+                .or_else(|_| env::var("USERPROFILE"))
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from);
+
+            if let Some(home_path) = home {
+                groups.push(config_path_variants(home_path.join(".rezconfig")));
+                groups.push(config_path_variants(home_path.join(".rezconfig.yaml")));
+                groups.push(config_path_variants(
+                    home_path.join(".rez").join("config.yaml"),
+                ));
             }
         }
 
-        // 5. Project config (rez-next extension, see `find_project_config_file`).
-        // Ordered after the user layer so a project overrides a user setting,
-        // and before `REZ_*` overrides so the environment still wins.
         if let Some(project) = Self::find_project_config_file(&cwd()) {
-            paths.push(project);
+            groups.push(config_path_variants(project));
         }
 
-        paths
+        groups
     }
 
     /// Find the project configuration file by walking up from `from`.
@@ -354,7 +416,7 @@ impl RezCoreConfig {
     pub fn load_layers() -> Result<Vec<ConfigLayer>, RezCoreError> {
         let mut layers = Vec::new();
 
-        for path in Self::get_search_paths() {
+        for path in existing_config_paths() {
             if !path.exists() {
                 continue;
             }
@@ -445,10 +507,7 @@ impl RezCoreConfig {
     /// Get the list of configuration files that actually exist and are sourced
     #[must_use]
     pub fn get_sourced_paths() -> Vec<PathBuf> {
-        Self::get_search_paths()
-            .into_iter()
-            .filter(|path| path.exists())
-            .collect()
+        existing_config_paths()
     }
 
     /// Report configuration keys that rez-next does not know about.
@@ -486,17 +545,22 @@ impl RezCoreConfig {
     pub fn try_load() -> Result<Self, RezCoreError> {
         let mut merged = serde_json::Map::new();
 
-        for path in Self::get_search_paths() {
-            if !path.exists() {
-                continue;
-            }
+        for path in existing_config_paths() {
             let content = std::fs::read_to_string(&path).map_err(RezCoreError::Io)?;
             let layer = parse_config_layer(&path, &content)?;
             deep_merge_json_object(&mut merged, layer);
         }
 
         for key in Self::unknown_keys(&merged) {
-            eprintln!("rez-next: ignoring unknown config key {key:?} (not in the key registry)");
+            eprintln!("rez-next: preserving unknown config key {key:?} for generic consumers");
+        }
+        for key in UNSUPPORTED_MEMCACHED_KEYS {
+            if merged.contains_key(key) {
+                eprintln!(
+                    "rez-next: config key {key:?} is retained but unsupported; \
+                     the native cache has no Memcached backend"
+                );
+            }
         }
 
         let mut config: Self = serde_json::from_value(serde_json::Value::Object(merged))?;
@@ -615,6 +679,7 @@ impl RezCoreConfig {
             "default_shell" => assign(&mut self.default_shell, &value),
             "version" => assign(&mut self.version, &value),
             "plugin_path" => assign_path_list(&mut self.plugin_path, &value),
+            "release_hooks" => assign_str_list(&mut self.release_hooks, &value),
             "package_cache_path" => assign_path_list(&mut self.package_cache_path, &value),
             "tmpdir" => assign(&mut self.tmpdir, &value),
             "editor" => assign(&mut self.editor, &value),
@@ -625,25 +690,34 @@ impl RezCoreConfig {
             // Settings that were declared but never read; now overridable too.
             "implicit_packages" => assign_str_list(&mut self.implicit_packages, &value),
             "parent_variables" => assign_str_list(&mut self.parent_variables, &value),
+            "all_parent_variables" => assign(&mut self.all_parent_variables, &value),
             "resetting_variables" => assign_str_list(&mut self.resetting_variables, &value),
             "env_var_separators" => assign(&mut self.env_var_separators, &value),
             "platform_map" => assign(&mut self.platform_map, &value),
             "default_relocatable" => assign(&mut self.default_relocatable, &value),
             "build_directory" => assign(&mut self.build_directory, &value),
+            "build_script_names" => assign_str_list(&mut self.build_script_names, &value),
             "context_tmpdir" => assign(&mut self.context_tmpdir, &value),
+            "max_package_changelog_chars" => assign(&mut self.max_package_changelog_chars, &value),
             // Nested cache.* keys: merge into the existing cache so sibling
             // keys set by a config file survive a partial env object.
             "cache" => assign_cache(&mut self.cache, &value),
-            other => {
-                // An override for a key rez-next does not model is as invisible
-                // as one in a config file, so report it the same way rather
-                // than letting REZ_<KEY> fail silently.
-                if rez_next_config::keys::find(other).is_none() {
+            "plugins" => assign(&mut self.plugins, &value),
+            other if rez_next_config::keys::find(other).is_some() => {
+                if UNSUPPORTED_MEMCACHED_KEYS.contains(&other) {
                     eprintln!(
-                        "rez-next: ignoring unknown config key {other:?} \
-                         (not in the key registry)"
+                        "rez-next: environment setting {other:?} is retained but unsupported; \
+                         the native cache has no Memcached backend"
                     );
                 }
+                self.extra.insert(other.to_string(), value);
+                Ok(())
+            }
+            other => {
+                eprintln!(
+                    "rez-next: ignoring unknown config key {other:?} \
+                     (not in the key registry)"
+                );
                 Ok(())
             }
         }
@@ -702,7 +776,10 @@ fn lookup_dotted<'v>(
 fn classify_layer_path(path: &Path) -> LayerSource {
     if let Ok(config_file) = env::var("REZ_CONFIG_FILE") {
         for entry in config_file.split(path_list_separator()) {
-            if paths_equal(path, Path::new(entry)) {
+            let configured = Path::new(entry);
+            if paths_equal(path, configured)
+                || paths_equal(&path.with_extension(""), &configured.with_extension(""))
+            {
                 return LayerSource::ConfigFileEnv;
             }
         }
@@ -733,6 +810,35 @@ fn classify_layer_path(path: &Path) -> LayerSource {
 /// The current working directory, falling back to an empty path.
 fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_default()
+}
+
+/// Build the candidates for one logical Rez configuration location.
+fn config_path_variants(path: PathBuf) -> Vec<PathBuf> {
+    if path.extension().is_some_and(|extension| extension == "py") {
+        return vec![path];
+    }
+
+    let python_path = path.with_extension("py");
+    if paths_equal(&python_path, &path) {
+        vec![path]
+    } else {
+        vec![python_path, path]
+    }
+}
+
+/// Resolve each logical location to its highest-priority existing file.
+fn existing_config_paths() -> Vec<PathBuf> {
+    let mut selected: Vec<PathBuf> = Vec::new();
+
+    for group in RezCoreConfig::search_path_groups() {
+        if let Some(path) = group.into_iter().find(|path| path.is_file())
+            && !selected.iter().any(|current| paths_equal(current, &path))
+        {
+            selected.push(path);
+        }
+    }
+
+    selected
 }
 
 /// The user's home directory, honouring both `HOME` and `USERPROFILE`.
@@ -782,12 +888,19 @@ pub const fn path_list_separator() -> char {
     if cfg!(windows) { ';' } else { ':' }
 }
 
-/// Parse a single config file body (YAML or JSON) into a JSON object.
+/// Parse a single config file body into a JSON object.
 fn parse_config_layer(
     path: &std::path::Path,
     content: &str,
 ) -> Result<serde_json::Value, RezCoreError> {
     let display = path.display().to_string();
+
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+    {
+        return load_python_config(path);
+    }
 
     // YAML is a superset of JSON, so one parse handles both formats.
     let value = serde_yaml::from_str::<serde_json::Value>(content)
@@ -806,6 +919,110 @@ fn parse_config_layer(
     }
 
     Ok(value)
+}
+
+/// Execute a Rez-style Python config file and convert JSON-compatible globals.
+///
+/// A subprocess keeps the Rust binary independent from a particular Python ABI
+/// while preserving the upstream contract that config files are executable
+/// Python. Values such as functions and imported modules cannot cross the JSON
+/// boundary and are omitted because native consumers cannot call them.
+fn load_python_config(path: &Path) -> Result<serde_json::Value, RezCoreError> {
+    const LOADER: &str = r#"
+import json
+import os
+import sys
+import types
+
+path = os.path.abspath(sys.argv[1])
+sys.path.insert(0, os.path.dirname(path))
+namespace = {
+    "__file__": path,
+    "__name__": "__rezconfig__",
+}
+if os.path.basename(os.path.dirname(path)) == "rez_next":
+    namespace["__package__"] = "rez_next"
+
+with open(path, encoding="utf-8") as stream:
+    code = compile(stream.read(), path, "exec")
+    exec(code, namespace)
+
+def json_value(value):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_value(item) for item in value]
+    raise TypeError(type(value).__name__)
+
+result = {}
+for key, value in namespace.items():
+    if key.startswith("_") or isinstance(value, types.ModuleType):
+        continue
+    try:
+        result[key] = json_value(value)
+    except TypeError:
+        pass
+
+print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+"#;
+
+    let mut candidates = Vec::new();
+    if let Ok(python) = env::var("REZ_PYTHON")
+        && !python.trim().is_empty()
+    {
+        candidates.push(python);
+    }
+    if cfg!(windows) {
+        candidates.extend(["python".to_string(), "py".to_string()]);
+    } else {
+        candidates.extend(["python3".to_string(), "python".to_string()]);
+    }
+
+    let mut not_found = Vec::new();
+    for executable in candidates {
+        let output = match Command::new(&executable)
+            .arg("-c")
+            .arg(LOADER)
+            .arg(path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                not_found.push(executable);
+                continue;
+            }
+            Err(error) => {
+                return Err(RezCoreError::ConfigError(format!(
+                    "{}: failed to start Python ({error})",
+                    path.display()
+                )));
+            }
+        };
+
+        if !output.status.success() {
+            let details = String::from_utf8_lossy(&output.stderr);
+            return Err(RezCoreError::ConfigError(format!(
+                "{}: Python execution failed: {}",
+                path.display(),
+                details.trim()
+            )));
+        }
+
+        return serde_json::from_slice(&output.stdout).map_err(|error| {
+            RezCoreError::ConfigError(format!(
+                "{}: Python config did not produce a JSON object: {error}",
+                path.display()
+            ))
+        });
+    }
+
+    Err(RezCoreError::ConfigError(format!(
+        "{}: no Python interpreter found (tried {})",
+        path.display(),
+        not_found.join(", ")
+    )))
 }
 
 /// Deep-merge `patch` into `base`: objects merge recursively, everything else
@@ -868,7 +1085,7 @@ fn coerce_env_value(key: &str, raw: &str) -> serde_json::Value {
                     .collect(),
             )
         }
-        "default_relocatable" => parse_env_bool(raw),
+        "all_parent_variables" | "default_relocatable" => parse_env_bool(raw),
         "use_rust_version" | "use_rust_solver" | "use_rust_repository" | "rust_fallback" => {
             parse_env_bool(raw)
         }
@@ -1170,6 +1387,47 @@ mod tests {
             let cfg = RezCoreConfig::try_load().expect("multi-file config must load");
             assert_eq!(cfg.editor, "/bin/first");
             assert_eq!(cfg.browser, "/bin/second");
+        });
+    }
+
+    #[test]
+    fn test_python_config_file_is_executed_and_merged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "rezconfig.py",
+            "build_directory = '_python_build'\npackage_filter = {'name': 'maya'}\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("Python config must load");
+            assert_eq!(cfg.build_directory, "_python_build");
+            assert_eq!(
+                cfg.get_field("package_filter"),
+                Some(serde_json::json!({"name": "maya"}))
+            );
+        });
+    }
+
+    #[test]
+    fn test_registry_settings_are_retained_in_extra_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "registry.yaml",
+            "package_filter:\n  - name: maya\npackage_orderers:\n  - name: version\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("registry settings must load");
+            assert_eq!(
+                cfg.get_field("package_filter"),
+                Some(serde_json::json!([{"name": "maya"}]))
+            );
+            assert_eq!(
+                cfg.get_field("package_orderers"),
+                Some(serde_json::json!([{"name": "version"}]))
+            );
         });
     }
 
@@ -1686,6 +1944,7 @@ mod tests {
              resetting_variables:\n  - REZ_USED\n\
              default_relocatable: true\n\
              build_directory: _build\n\
+             build_script_names:\n  - custom-build\n  - build.py\n\
              context_tmpdir: /tmp/ctx\n\
              platform_map:\n  centos: linux\n\
              env_var_separators:\n  MYVAR: \";\"\n",
@@ -1698,6 +1957,10 @@ mod tests {
             assert_eq!(cfg.resetting_variables, vec!["REZ_USED".to_string()]);
             assert!(cfg.default_relocatable);
             assert_eq!(cfg.build_directory, "_build");
+            assert_eq!(
+                cfg.build_script_names,
+                vec!["custom-build".to_string(), "build.py".to_string()]
+            );
             assert_eq!(cfg.context_tmpdir, "/tmp/ctx");
             assert_eq!(
                 cfg.platform_map.get("centos").map(String::as_str),
@@ -1713,13 +1976,26 @@ mod tests {
     #[test]
     fn test_previously_inert_settings_have_upstream_defaults() {
         let cfg = RezCoreConfig::default();
-        // implicit_packages stays empty by design; see the field's doc comment.
-        assert!(cfg.implicit_packages.is_empty());
+        let system = SystemInfo::detect();
+        assert_eq!(
+            cfg.implicit_packages,
+            system.implicit_packages().into_iter().collect::<Vec<_>>()
+        );
         assert!(cfg.parent_variables.is_empty());
+        assert!(!cfg.all_parent_variables);
         assert!(cfg.resetting_variables.is_empty());
         assert!(cfg.platform_map.is_empty());
         assert!(cfg.default_relocatable);
         assert_eq!(cfg.build_directory, "build");
+        assert_eq!(
+            cfg.build_script_names,
+            vec![
+                "build.sh".to_string(),
+                "build.bat".to_string(),
+                "build.py".to_string(),
+                "build".to_string()
+            ]
+        );
         assert_eq!(
             cfg.context_tmpdir,
             std::env::temp_dir().to_string_lossy().to_string()
@@ -1792,6 +2068,28 @@ mod tests {
             // Unknown keys warn but never fail the load.
             let cfg = RezCoreConfig::try_load().expect("unknown key must not be fatal");
             assert!(!cfg.packages_path.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_plugin_release_vcs_config_is_preserved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_config(
+            dir.path(),
+            "release-vcs.yaml",
+            "plugins:\n  release_vcs:\n    releasable_branches:\n      - '^release/'\n    git:\n      allow_no_upstream: true\n",
+        );
+
+        with_config_files(&[&file], || {
+            let cfg = RezCoreConfig::try_load().expect("plugin config must load");
+            assert_eq!(
+                cfg.get_field("plugins.release_vcs.releasable_branches"),
+                Some(serde_json::json!(["^release/"]))
+            );
+            assert_eq!(
+                cfg.get_field("plugins.release_vcs.git.allow_no_upstream"),
+                Some(serde_json::json!(true))
+            );
         });
     }
 

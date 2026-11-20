@@ -6,6 +6,12 @@ one suite. `package_benchmark` uses `package_full_*` groups;
 `simple_package_benchmark` retains the existing `package_*` groups. Both use
 the same sampling policy in `benches/support/package_criterion.rs`.
 
+The full benchmark workflow writes the normalized results for each main commit
+to [`history.json`](./history.json). The file is a versioned JSON timeseries,
+so a later run can compare the same benchmark ID across commits without
+depending on a runner-local Criterion directory. Re-running a commit replaces
+that commit's entry instead of creating duplicate history.
+
 The output parser rejects duplicate IDs with exit code 2, even without
 `--fail-on-regression`. This prevents ambiguous results from being published
 or counted as distinct measurements. The renamed full-harness IDs start new
@@ -17,6 +23,11 @@ Run the lightweight identity and parser checks with:
 ```sh
 python -m unittest discover -s metrics/benchmarking/scripts -p 'test_*.py' -v
 ```
+
+The `python-binding` workflow job builds the PyO3 module in an isolated virtual
+environment and records binding overhead in a retained JSON artifact. The
+`heuristic_benchmark` target measures the public solver heuristic strategies
+alongside the full dependency-resolution suite.
 
 A Criterion change flag compares measurements, not necessarily commits.
 Claims about a code regression additionally require a known baseline commit,

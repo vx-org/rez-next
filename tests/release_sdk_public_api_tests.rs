@@ -83,7 +83,7 @@ impl ReleaseVCS for DownstreamVCS {
 
     fn create_tag(&self, tag: &str, _message: &str) -> Result<(), RezCoreError> {
         if self.tag_exists {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "tag '{}' already exists",
                 tag
             )));
@@ -97,8 +97,8 @@ impl ReleaseVCS for DownstreamVCS {
 
     fn get_changelog(
         &self,
-        _from_rev: Option<&str>,
-        _to_rev: Option<&str>,
+        _previous_revision: Option<&str>,
+        _max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
         Ok("downstream changelog".to_string())
     }
@@ -160,6 +160,26 @@ impl Drop for InstallRootGuard<'_> {
         let _ = self.dir;
         // SAFETY: see `new`.
         unsafe { std::env::remove_var("REZ_LOCAL_PACKAGES_PATH") };
+    }
+}
+
+struct ConfigPathGuard {
+    name: &'static str,
+}
+
+impl ConfigPathGuard {
+    fn new(name: &'static str, path: &Path) -> Self {
+        // SAFETY: callers hold `paths_lock`, so the process-global override is
+        // isolated to this test and removed before the lock is released.
+        unsafe { std::env::set_var(name, path) };
+        Self { name }
+    }
+}
+
+impl Drop for ConfigPathGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `new`.
+        unsafe { std::env::remove_var(self.name) };
     }
 }
 
@@ -228,6 +248,70 @@ fn downstream_can_release_with_its_own_vcs() {
         Some("downstream-vcs"),
         "the metadata comes from the injected VCS"
     );
+}
+
+#[test]
+fn downstream_latest_version_policy_is_enforced_and_configurable() {
+    let _lock = paths_lock().lock().unwrap_or_else(PoisonError::into_inner);
+    let install_root = TempDir::new().unwrap();
+    let package_repo = TempDir::new().unwrap();
+    let source = TempDir::new().unwrap();
+    let published = package_repo.path().join("sdk_latest").join("2.0.0");
+    fs::create_dir_all(&published).unwrap();
+    write_package(&published, "sdk_latest", "2.0.0");
+    write_package(source.path(), "sdk_latest", "1.0.0");
+
+    let _local = InstallRootGuard::new(install_root.path());
+    let _packages = ConfigPathGuard::new("REZ_PACKAGES_PATH", package_repo.path());
+
+    let vcs = Arc::new(DownstreamVCS::new(false));
+    let result = manager(ReleaseMode::Local, Some(false))
+        .release_with_vcs(source.path(), None, Some(vcs.clone()))
+        .expect("latest-version rejection must return a result");
+    assert!(!result.success);
+    assert!(result.errors.iter().any(|error| {
+        error.contains("Newer published version exists") && error.contains("2.0.0")
+    }));
+    assert!(vcs.created_tags().is_empty());
+
+    let mut bypass = manager(ReleaseMode::Local, Some(false));
+    bypass.set_ensure_latest(false);
+    let result = bypass
+        .release_with_vcs(
+            source.path(),
+            None,
+            Some(Arc::new(DownstreamVCS::new(false))),
+        )
+        .expect("disabled latest-version check must return a result");
+    assert!(result.success, "bypass should release: {:?}", result.errors);
+}
+
+#[test]
+fn downstream_release_mode_requires_an_existing_release_repository() {
+    let _lock = paths_lock().lock().unwrap_or_else(PoisonError::into_inner);
+    let install_root = TempDir::new().unwrap();
+    let missing_release_root = install_root.path().join("missing-release");
+    let source = TempDir::new().unwrap();
+    write_package(source.path(), "sdk_release_path", "1.0.0");
+
+    let _local = InstallRootGuard::new(install_root.path());
+    let _release = ConfigPathGuard::new("REZ_RELEASE_PACKAGES_PATH", &missing_release_root);
+    let result = manager(ReleaseMode::Release, Some(false))
+        .release_with_vcs(
+            source.path(),
+            None,
+            Some(Arc::new(DownstreamVCS::new(false))),
+        )
+        .expect("missing release path must return a result");
+
+    assert!(!result.success);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| { error.contains("Release path does not exist or is not a directory") })
+    );
+    assert!(!missing_release_root.exists());
 }
 
 /// The result a caller reads back is enough to find the installed package:

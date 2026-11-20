@@ -216,35 +216,24 @@ pub fn convert_pip_to_rez(
 /// Helper: create a RepositoryManager from given paths or config default.
 fn make_pip_repo_manager(
     paths: Option<Vec<String>>,
-) -> rez_next_repository::simple_repository::RepositoryManager {
+) -> PyResult<rez_next_repository::simple_repository::RepositoryManager> {
     use rez_next_common::config::RezCoreConfig;
-    use rez_next_repository::package_repository::FilesystemPackageRepository;
-    use rez_next_repository::package_repository::bridge::AsyncRepositoryAdapter;
     use rez_next_repository::simple_repository::RepositoryManager;
-    use std::path::PathBuf;
 
     let config = RezCoreConfig::load();
-    let mut repo_manager = RepositoryManager::new();
 
-    let pkg_paths: Vec<PathBuf> = paths
-        .map(|p| p.into_iter().map(PathBuf::from).collect())
+    let pkg_paths: Vec<String> = paths
+        .map(|p| p.into_iter().map(|path| expand_home(&path)).collect())
         .unwrap_or_else(|| {
             config
                 .packages_path
                 .iter()
-                .map(|p| PathBuf::from(expand_home(p)))
+                .map(|p| expand_home(p))
                 .collect()
         });
 
-    for (i, path) in pkg_paths.iter().enumerate() {
-        if path.exists() {
-            let repository =
-                FilesystemPackageRepository::with_name(path.clone(), format!("repo_{i}"));
-            repo_manager.add_repository(Box::new(AsyncRepositoryAdapter::new(repository)));
-        }
-    }
-
-    repo_manager
+    RepositoryManager::from_package_paths(pkg_paths)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Get a list of packages that depend on a given pip package.
@@ -259,7 +248,7 @@ pub fn get_pip_dependencies(
     paths: Option<Vec<String>>,
 ) -> PyResult<Vec<String>> {
     let rt = get_runtime();
-    let repo_manager = make_pip_repo_manager(paths);
+    let repo_manager = make_pip_repo_manager(paths)?;
 
     // Get all package families
     let families = rt

@@ -23,6 +23,7 @@ import copy
 import os
 import re
 import sys as _sys
+import warnings
 from contextlib import contextmanager
 from functools import cached_property, lru_cache
 from inspect import ismodule
@@ -46,6 +47,16 @@ except ImportError:
 
 
 T = TypeVar("T")
+
+_UNSUPPORTED_MEMCACHED_KEYS = frozenset(
+    {
+        "memcached_uri",
+        "memcached_package_file_min_compress_len",
+        "memcached_context_file_min_compress_len",
+        "memcached_listdir_min_compress_len",
+        "memcached_resolve_min_compress_len",
+    }
+)
 
 
 # ====================================================================
@@ -183,10 +194,13 @@ class Setting:
         try:
             data = self._validate(data)
             data = self.schema.validate(data)
-            data = expand_system_vars(data)
+            data = self._expand_value(data)
         except _SchemaError as e:
             raise ConfigurationError(f"Misconfigured setting {self.key!r}: {str(e)}")
         return data
+
+    def _expand_value(self, data):
+        return expand_system_vars(data)
 
     def _validate(self, data):
         if self.key in self.config.overrides:
@@ -236,6 +250,12 @@ class StrList(Setting):
     schema = _Schema(list, lambda x: all(isinstance(i, str) for i in x))
     sep = ","
 
+    def _expand_value(self, data):
+        # A leading ``~`` is a Rez weak-request marker for settings such as
+        # ``implicit_packages``. Expanding it as a Windows user home turns
+        # ``~platform==windows`` into ``C:\\Users\\platform==windows``.
+        return expand_environment_vars(data)
+
     def _parse_env_var(self, v):
         return [x for x in v.replace(self.sep, " ").split() if x]
 
@@ -248,6 +268,9 @@ class OptionalStrList(StrList):
 
 class PathList(StrList):
     sep = os.pathsep
+
+    def _expand_value(self, data):
+        return expand_system_vars(data)
 
     def _parse_env_var(self, v):
         return [x for x in v.split(self.sep) if x]
@@ -1125,6 +1148,14 @@ def _load_config_from_filepaths(filepaths):
                             pre_formatted=True,
                             filename=f,
                         )
+                unsupported = sorted(_UNSUPPORTED_MEMCACHED_KEYS.intersection(d))
+                if unsupported:
+                    warnings.warn(
+                        "Memcached settings are retained but unsupported by rez-next: "
+                        + ", ".join(unsupported),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
             deep_update(data, d)
             sourced.append(f)
             break
@@ -1181,6 +1212,16 @@ class Config:
     def __getattr__(self, key):
         schema_cls = self.schema.get(key)
         if schema_cls is not None:
+            if key == "memcached_uri":
+                configured = self._data.get(key)
+                if isinstance(configured, list):
+                    result = list(configured)
+                elif isinstance(configured, str):
+                    result = [configured]
+                else:
+                    result = list(self._module_defaults().get(key, []))
+                object.__setattr__(self, key, result)
+                return result
             validator = schema_cls(self, key)
             try:
                 result = validator.validate(self._data.get(key))
@@ -1272,14 +1313,20 @@ class Config:
         return other
 
     def override(self, key, value):
+        previous_overrides = copy.deepcopy(self.overrides)
         keys = key.split(".")
         if len(keys) > 1:
             if keys[0] != "plugins":
                 raise AttributeError(f"no such setting: {key!r}")
-            self.plugins.override(keys[1:], value)
+            target = self.overrides.setdefault("plugins", {})
+            for part in keys[1:-1]:
+                target = target.setdefault(part, {})
+            target[keys[-1]] = value
+            self._uncache()
         else:
             self.overrides[key] = value
             self._uncache(key)
+        return _OverrideContext(self, previous_overrides)
 
     def is_overridden(self, key):
         return key in self.overrides
@@ -1314,6 +1361,7 @@ class Config:
         for setting in keys:
             self.__dict__.pop(setting, None)
         self.__dict__.pop("_data", None)
+        self.__dict__.pop("_data_without_overrides", None)
         self.__dict__.pop("plugins", None)
 
     def _swap(self, other):
@@ -1425,6 +1473,27 @@ class _PluginConfigs:
         return f"{self.__class__.__name__}({str(self)})"
 
 
+class _OverrideContext:
+    """Restore a config override when a ``with`` block exits.
+
+    ``Config.override`` has historically applied changes immediately. Returning
+    a context manager keeps that behavior for callers that ignore the return
+    value while also supporting the scoped form used by Rez integrations.
+    """
+
+    def __init__(self, config, previous_overrides):
+        self._config = config
+        self._previous_overrides = previous_overrides
+
+    def __enter__(self):
+        return self._config
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._config.overrides = self._previous_overrides
+        self._config._uncache()
+        return False
+
+
 class _DebugPrinter:
     def __init__(self, enabled):
         self.enabled = enabled
@@ -1441,6 +1510,16 @@ def expand_system_vars(data):
         return [expand_system_vars(x) for x in data]
     elif isinstance(data, dict):
         return {k: expand_system_vars(v) for k, v in data.items()}
+    return data
+
+
+def expand_environment_vars(data):
+    if isinstance(data, str):
+        return os.path.expandvars(data)
+    elif isinstance(data, (list, tuple, set)):
+        return [expand_environment_vars(x) for x in data]
+    elif isinstance(data, dict):
+        return {k: expand_environment_vars(v) for k, v in data.items()}
     return data
 
 

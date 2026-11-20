@@ -6,7 +6,18 @@ mod test_shell_type_parse {
 
     #[test]
     fn test_known_shell_types_parse() {
-        for name in &["bash", "zsh", "fish", "cmd", "powershell"] {
+        for name in &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ] {
             assert!(
                 ShellType::parse(name).is_some(),
                 "ShellType::parse('{}') should succeed",
@@ -19,7 +30,6 @@ mod test_shell_type_parse {
     fn test_unknown_shell_type_returns_none() {
         assert!(ShellType::parse("ksh").is_none());
         assert!(ShellType::parse("").is_none());
-        assert!(ShellType::parse("tcsh").is_none());
     }
 }
 
@@ -67,13 +77,8 @@ mod test_shell_script_generation {
     #[test]
     fn test_empty_env_generates_non_panic_script() {
         let env = RexEnvironment::new();
-        for st in &[
-            ShellType::Bash,
-            ShellType::Zsh,
-            ShellType::Fish,
-            ShellType::Cmd,
-            ShellType::PowerShell,
-        ] {
+        let shells = ShellType::builtins();
+        for st in &shells {
             let _ = generate_shell_script(&env, st);
         }
     }
@@ -97,7 +102,18 @@ mod test_get_available_shells {
     #[test]
     fn test_available_shells_contains_all_types() {
         let shells = get_available_shells();
-        for expected in &["bash", "zsh", "fish", "cmd", "powershell"] {
+        for expected in &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ] {
             assert!(
                 shells.contains(expected),
                 "get_available_shells() should contain '{}'",
@@ -108,7 +124,7 @@ mod test_get_available_shells {
 
     #[test]
     fn test_available_shells_count() {
-        assert_eq!(get_available_shells().len(), 5);
+        assert_eq!(get_available_shells().len(), ShellType::builtins().len());
     }
 }
 
@@ -118,7 +134,18 @@ mod test_get_current_shell {
     #[test]
     fn test_current_shell_returns_known_type() {
         let shell = get_current_shell();
-        let known = ["bash", "zsh", "fish", "cmd", "powershell"];
+        let known = [
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ];
         assert!(
             known.contains(&shell.as_str()),
             "get_current_shell() returned unknown shell: '{}'",
@@ -132,7 +159,18 @@ mod test_py_shell {
 
     #[test]
     fn test_pyshell_name_matches_input() {
-        for name in &["bash", "zsh", "fish", "cmd", "powershell"] {
+        for name in &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ] {
             let shell = PyShell::new(name).unwrap();
             assert_eq!(shell.name(), *name, "name() should return '{}'", name);
         }
@@ -204,13 +242,24 @@ mod test_create_shell_script {
 
     #[test]
     fn test_create_shell_script_unknown_shell_errors() {
-        let result = create_shell_script("tcsh", None, None, None);
-        assert!(result.is_err(), "unknown shell 'tcsh' should return Err");
+        let result = create_shell_script("ksh", None, None, None);
+        assert!(result.is_err(), "unknown shell 'ksh' should return Err");
     }
 
     #[test]
     fn test_create_shell_script_all_known_shells_ok() {
-        for name in &["bash", "zsh", "fish", "cmd", "powershell"] {
+        for name in &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ] {
             let result = create_shell_script(name, None, None, None);
             assert!(
                 result.is_ok(),
@@ -369,7 +418,18 @@ mod test_shell_cy114 {
 
     #[test]
     fn test_pyshell_repr_all_shells() {
-        for name in &["bash", "zsh", "fish", "cmd", "powershell"] {
+        for name in &[
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "csh",
+            "tcsh",
+            "gitbash",
+            "cmd",
+            "powershell",
+            "pwsh",
+        ] {
             let shell = PyShell::new(name).unwrap();
             let repr = shell.__repr__();
             assert!(
@@ -444,11 +504,11 @@ mod test_shell_cy120 {
     use std::collections::HashMap;
 
     #[test]
-    fn test_available_shells_len_is_five() {
+    fn test_available_shells_len_matches_builtin_contract() {
         assert_eq!(
             get_available_shells().len(),
-            5,
-            "exactly 5 shell types must be available"
+            ShellType::builtins().len(),
+            "all built-in shell types must be available"
         );
     }
 

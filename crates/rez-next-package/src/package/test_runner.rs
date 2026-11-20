@@ -8,7 +8,8 @@
 //! See the Python bindings (`rez_next._native.test`) for usage examples.
 
 use crate::serialization::PackageSerializer;
-use crate::types::Package;
+pub use crate::types::TestCommand;
+use crate::types::{Package, TestVariantFilter, shell_command};
 use rez_next_common::{RezCoreResult, error::RezCoreError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,17 +32,6 @@ pub enum TestStatus {
     Error,
 }
 
-// ── Test Command ───────────────────────────────────────────────────────────
-
-/// Test command format.
-#[derive(Debug, Clone)]
-pub enum TestCommand {
-    /// Simple string command (will be executed via shell).
-    String(String),
-    /// List of arguments (will be executed directly without shell).
-    List(Vec<String>),
-}
-
 // ── Test Definition ────────────────────────────────────────────────────────
 
 /// Test definition loaded from `package.py` `tests` field.
@@ -56,7 +46,7 @@ pub struct TestDefinition {
     /// Run tags for this test (e.g., "default", "ci", "nightly").
     pub run_on: Vec<String>,
     /// Whether to run on variants (False = once on preferred variant).
-    pub on_variants: Option<bool>,
+    pub on_variants: Option<TestVariantFilter>,
 }
 
 // ── Test Result ────────────────────────────────────────────────────────────
@@ -99,6 +89,10 @@ pub struct PackageTestRunner {
     pub test_results: Vec<TestResult>,
     /// Loaded test definitions from package.
     test_definitions: HashMap<String, TestDefinition>,
+    /// Resolved environments keyed by test name.
+    test_environments: HashMap<String, HashMap<String, String>>,
+    /// Resolution failures keyed by test name.
+    test_environment_errors: HashMap<String, String>,
 }
 
 impl PackageTestRunner {
@@ -122,12 +116,52 @@ impl PackageTestRunner {
             stop_on_fail: false,
             test_results: Vec::new(),
             test_definitions: HashMap::new(),
+            test_environments: HashMap::new(),
+            test_environment_errors: HashMap::new(),
         };
 
         // Load test definitions from package file in working directory
         runner.load_test_definitions(&working_dir, &package_spec)?;
 
         Ok(runner)
+    }
+
+    /// Replace the package loaded by the constructor with a resolved package.
+    ///
+    /// This is used by bindings that resolve package requests through the
+    /// configured repository manager before creating the runner.
+    #[must_use]
+    pub fn with_package(mut self, package: Package, package_root: PathBuf) -> Self {
+        self.package_name = package.qualified_name();
+        self.working_dir = package_root;
+        self.test_definitions.clear();
+        self.test_environments.clear();
+        self.test_environment_errors.clear();
+        self.extract_tests_from_package(&package);
+        self
+    }
+
+    /// Attach the resolved environment used to execute a test.
+    pub fn set_test_environment(
+        &mut self,
+        test_name: String,
+        environment: HashMap<String, String>,
+    ) {
+        self.test_environment_errors.remove(&test_name);
+        self.test_environments.insert(test_name, environment);
+    }
+
+    /// Record a test environment resolution failure for deferred reporting.
+    pub fn set_test_environment_error(&mut self, test_name: String, error: String) {
+        self.test_environments.remove(&test_name);
+        self.test_environment_errors.insert(test_name, error);
+    }
+
+    /// Return the loaded test definitions for environment resolution.
+    pub fn test_definitions(&self) -> Vec<TestDefinition> {
+        let mut definitions: Vec<_> = self.test_definitions.values().cloned().collect();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        definitions
     }
 
     /// Set the working directory for test execution.
@@ -189,27 +223,15 @@ impl PackageTestRunner {
 
     /// Extract test definitions from a loaded package.
     fn extract_tests_from_package(&mut self, package: &Package) {
-        // Package.tests is HashMap<String, String> where value is the command
-        for (test_name, command_str) in &package.tests {
-            let cmd = if command_str.contains(' ') {
-                // Multi-word command, split it
-                let parts: Vec<String> = command_str
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-                TestCommand::List(parts)
-            } else {
-                TestCommand::String(command_str.clone())
-            };
-
+        for (test_name, definition) in &package.tests {
             self.test_definitions.insert(
                 test_name.clone(),
                 TestDefinition {
                     name: test_name.clone(),
-                    command: cmd,
-                    requires: vec![],
-                    run_on: vec!["default".to_string()],
-                    on_variants: None,
+                    command: definition.command.clone(),
+                    requires: definition.requires.clone(),
+                    run_on: definition.run_on.clone(),
+                    on_variants: definition.on_variants.clone(),
                 },
             );
         }
@@ -243,7 +265,14 @@ impl PackageTestRunner {
         let available_tests = self.get_test_names()?;
 
         if requested.is_empty() {
-            return Ok(available_tests);
+            return Ok(available_tests
+                .into_iter()
+                .filter(|name| {
+                    self.test_definitions.get(name).is_some_and(|definition| {
+                        definition.run_on.iter().any(|tag| tag == "default")
+                    })
+                })
+                .collect());
         }
 
         let mut matched_tests = Vec::new();
@@ -269,45 +298,57 @@ impl PackageTestRunner {
         Ok(matched_tests)
     }
 
-    /// Run a specific test by name.
-    ///
-    /// # Arguments
-    ///
-    /// * `test_name` - Name of the test to run.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the test cannot be run.
+    /// Run a specific test by name without extra command-line arguments.
     pub fn run_test(&mut self, test_name: &str) -> RezCoreResult<i32> {
+        self.run_test_with_args(test_name, &[])
+    }
+
+    /// Run a specific test and append command-line arguments to its command.
+    ///
+    /// String commands receive shell-quoted arguments. List commands receive
+    /// the arguments as direct argv values.
+    pub fn run_test_with_args(
+        &mut self,
+        test_name: &str,
+        extra_test_args: &[String],
+    ) -> RezCoreResult<i32> {
         if self.verbose > 0 {
             tracing::info!("Running test: {}", test_name);
         }
 
         let start_time = Instant::now();
 
-        let (status, output, error, exit_code) = if self.dry_run {
-            (
-                TestStatus::Skipped,
-                "Dry run - test not executed".to_string(),
-                None,
-                0,
-            )
-        } else {
-            // Look up the test definition
-            if let Some(test_def) = self.test_definitions.get(test_name) {
-                self.execute_test_command(test_def)
-            } else {
+        let (status, output, error, exit_code) =
+            if let Some(error) = self.test_environment_errors.get(test_name) {
                 (
                     TestStatus::Error,
                     String::new(),
-                    Some(format!(
-                        "Test '{}' not found in package definition",
-                        test_name
-                    )),
+                    Some(format!("Failed to resolve test environment: {error}")),
                     -1,
                 )
-            }
-        };
+            } else if self.dry_run {
+                (
+                    TestStatus::Skipped,
+                    "Dry run - test not executed".to_string(),
+                    None,
+                    0,
+                )
+            } else {
+                // Look up the test definition
+                if let Some(test_def) = self.test_definitions.get(test_name) {
+                    self.execute_test_command(test_name, test_def, extra_test_args)
+                } else {
+                    (
+                        TestStatus::Error,
+                        String::new(),
+                        Some(format!(
+                            "Test '{}' not found in package definition",
+                            test_name
+                        )),
+                        -1,
+                    )
+                }
+            };
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
@@ -365,19 +406,24 @@ impl PackageTestRunner {
     /// Execute a test command and return (status, stdout, stderr, exit_code).
     fn execute_test_command(
         &self,
+        test_name: &str,
         test_def: &TestDefinition,
+        extra_test_args: &[String],
     ) -> (TestStatus, String, Option<String>, i32) {
-        let (program, args) = match &test_def.command {
+        let command = test_def
+            .command
+            .expanded_for_root(&self.working_dir)
+            .with_extra_args(extra_test_args);
+        let (mut command, command_display) = match command {
             TestCommand::String(cmd) => {
-                // Shell-execute the string command
-                if cfg!(windows) {
-                    ("cmd".to_string(), vec!["/c".to_string(), cmd.clone()])
-                } else {
-                    ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
-                }
+                let display = format!("shell: {cmd}");
+                (shell_command(&cmd), display)
             }
             TestCommand::List(parts) if !parts.is_empty() => {
-                (parts[0].clone(), parts[1..].to_vec())
+                let display = parts.join(" ");
+                let mut command = Command::new(&parts[0]);
+                command.args(&parts[1..]);
+                (command, display)
             }
             _ => {
                 return (
@@ -390,15 +436,17 @@ impl PackageTestRunner {
         };
 
         if self.verbose > 0 {
-            tracing::debug!("Executing: {} {}", program, args.join(" "));
+            tracing::debug!("Executing: {}", command_display);
         }
 
-        let result = Command::new(&program)
-            .args(&args)
+        command
             .current_dir(&self.working_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+            .stderr(Stdio::piped());
+        if let Some(environment) = self.test_environments.get(test_name) {
+            command.env_clear().envs(environment);
+        }
+        let result = command.output();
 
         match result {
             Ok(output) => {

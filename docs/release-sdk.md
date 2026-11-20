@@ -46,7 +46,7 @@ impl ReleaseVCS for MyVCS {
     fn get_latest_commit(&self) -> Result<String, RezCoreError> { todo!() }
     fn tag_exists(&self, tag: &str) -> Result<bool, RezCoreError> { todo!() }
     fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError> { todo!() }
-    fn get_changelog(&self, from: Option<&str>, to: Option<&str>)
+    fn get_changelog(&self, previous_revision: Option<&str>, max_revisions: Option<usize>)
         -> Result<String, RezCoreError> { todo!() }
     fn get_metadata(&self) -> Result<VCSMetadata, RezCoreError> { todo!() }
 }
@@ -60,8 +60,12 @@ let result = manager.release_with_vcs(
 # Ok::<(), RezCoreError>(())
 ```
 
-Nine methods are required. `validate_repo_state()`, `is_releasable_branch()`,
-`get_current_revision()`, and `export()` have default implementations.
+The core Rust metadata and workflow methods remain required. `validate_repostate()`,
+`create_release_tag()`, `is_releasable_branch()`, `get_current_revision()`, and
+`export()` have compatibility defaults. `find_vcs_root()` preserves the `(root, levels_up)`
+result used by Rez, and `find_executable()` provides the upstream executable
+lookup hook. `export_revision()` is the class-level export hook for providers
+whose revision contains all information needed to export without an instance.
 
 Three behaviours the release flow relies on:
 
@@ -74,9 +78,17 @@ Three behaviours the release flow relies on:
 - **`validate_repo_state()` failing aborts the release**, but only while VCS
   validation is enabled.
 
-An injected VCS is validated in step 2 **unless** you call
-`set_skip_vcs_validation(true)`, in which case supplying one does bypass the
-repository-state check.
+An injected VCS is validated in step 2. `set_skip_repo_errors(true)` keeps that
+validation enabled and downgrades only `RezCoreError::ReleaseVCSError` values
+to warnings. `set_skip_vcs_validation(true)` remains available as a legacy
+explicit validation bypass for embedders that need the older behavior.
+
+The Rust trait keeps its instance `export()` method because a trait object owns
+the repository backend. Providers ported from Rez can implement the additive
+`export_revision()` hook for the upstream class-level shape.
+
+VCS operations return `RezCoreError::ReleaseVCSError`, which lets callers
+distinguish repository failures from build failures.
 
 ## Reading the result
 

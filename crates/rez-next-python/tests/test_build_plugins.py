@@ -4,7 +4,36 @@ import os
 import zipfile
 
 import pytest
-from rez_next.build_plugins import copy_tree_contents, extract_archive
+from rez_next.build_plugins import BuildContext, copy_tree_contents, extract_archive
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("amd64", "x86_64"),
+        ("x64", "x86_64"),
+        ("aarch64", "arm_64"),
+        ("arm64", "arm_64"),
+    ],
+)
+def test_build_context_normalizes_architecture(value, expected, monkeypatch, tmp_path):
+    monkeypatch.setenv("REZ_BUILD_SOURCE_PATH", str(tmp_path))
+    monkeypatch.setenv("REZ_BUILD_TARGET_ARCH", value)
+    context = BuildContext.from_env()
+
+    assert context.target_arch == expected
+
+
+def test_build_context_uses_explicit_target_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("REZ_BUILD_SOURCE_PATH", str(tmp_path))
+    monkeypatch.setenv("REZ_BUILD_TARGET_PLATFORM", "windows-amd64")
+    monkeypatch.setenv("REZ_BUILD_TARGET_ARCH", "amd64")
+    monkeypatch.setenv("REZ_BUILD_TARGET_OS", "windows-10")
+    context = BuildContext.from_env()
+
+    assert context.target_platform == "windows-x86_64"
+    assert context.target_arch == "x86_64"
+    assert context.target_os == "windows-10"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Unix executable permissions only")

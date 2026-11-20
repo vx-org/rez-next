@@ -19,8 +19,8 @@ mod test_repository_manager_construction {
         ]))
         .unwrap();
         assert_eq!(mgr.paths.len(), 2);
-        assert_eq!(mgr.paths[0], PathBuf::from("/tmp/pkgs1"));
-        assert_eq!(mgr.paths[1], PathBuf::from("/tmp/pkgs2"));
+        assert_eq!(mgr.paths[0], "/tmp/pkgs1");
+        assert_eq!(mgr.paths[1], "/tmp/pkgs2");
     }
 
     #[test]
@@ -31,9 +31,9 @@ mod test_repository_manager_construction {
             "/third".to_string(),
         ];
         let mgr = PyRepositoryManager::new(Some(paths)).unwrap();
-        assert_eq!(mgr.paths[0], PathBuf::from("/first"));
-        assert_eq!(mgr.paths[1], PathBuf::from("/second"));
-        assert_eq!(mgr.paths[2], PathBuf::from("/third"));
+        assert_eq!(mgr.paths[0], "/first");
+        assert_eq!(mgr.paths[1], "/second");
+        assert_eq!(mgr.paths[2], "/third");
     }
 
     #[test]

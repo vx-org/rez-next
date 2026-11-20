@@ -15,6 +15,56 @@ use super::utils::{
 };
 use super::{detect, parse_package_spec};
 
+#[test]
+fn missing_tool_does_not_create_a_fabricated_version() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let args = super::BindArgs {
+        package: Some("__nonexistent_tool_xyz__".to_string()),
+        version: None,
+        quickstart: false,
+        release: false,
+        install_path: Some(temp_dir.path().to_path_buf()),
+        no_deps: true,
+        list: false,
+        search: false,
+        verbose: false,
+        bind_args: Vec::new(),
+    };
+
+    let result =
+        super::bind_single_package("__nonexistent_tool_xyz__", temp_dir.path(), true, &args);
+
+    assert!(matches!(
+        result,
+        Err(rez_next_common::RezCoreError::ExecutionError(_))
+    ));
+    assert!(!temp_dir.path().join("__nonexistent_tool_xyz__").exists());
+}
+
+#[test]
+fn explicit_version_allows_binding_without_host_detection() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let args = super::BindArgs {
+        package: Some("__nonexistent_tool_xyz__".to_string()),
+        version: Some("9.8.7".to_string()),
+        quickstart: false,
+        release: false,
+        install_path: Some(temp_dir.path().to_path_buf()),
+        no_deps: true,
+        list: false,
+        search: false,
+        verbose: false,
+        bind_args: Vec::new(),
+    };
+
+    let result =
+        super::bind_single_package("__nonexistent_tool_xyz__", temp_dir.path(), true, &args)
+            .unwrap();
+
+    assert_eq!(result.package.version.unwrap().to_string(), "9.8.7");
+    assert!(result.install_path.join("package.py").exists());
+}
+
 // ─── test_parse ──────────────────────────────────────────────────────────────
 
 mod test_parse {
@@ -181,6 +231,25 @@ mod test_utils {
         sorted.sort();
         assert_eq!(names, sorted, "results should be lexicographically sorted");
     }
+
+    #[test]
+    fn cli_modules_include_every_builtin_binder() {
+        let modules = get_bind_modules().unwrap();
+        for binder in rez_next_bind::builtin_binders() {
+            assert!(
+                modules.contains_key(binder.name),
+                "CLI module list is missing crate binder '{}'",
+                binder.name
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_modules_use_descriptor_marker() {
+        let modules = get_bind_modules().unwrap();
+        let python = modules.get("python").unwrap();
+        assert_eq!(python.path.to_string_lossy(), "<built-in>");
+    }
 }
 
 // ─── test_package_gen ────────────────────────────────────────────────────────
@@ -315,6 +384,19 @@ mod test_detect {
     #[test]
     fn detect_unknown_returns_none() {
         assert!(detect::detect_system_tool("nonexistent_tool_xyz").is_none());
+    }
+
+    #[test]
+    fn executable_detector_names_match_builtin_binders() {
+        for binder in rez_next_bind::builtin_binders() {
+            let detected = detect::detect_system_tool(binder.name);
+            assert_eq!(
+                detected.is_some(),
+                rez_next_bind::detect_builtin_tool(binder.name).is_ok(),
+                "CLI and crate detectors disagree for '{}'",
+                binder.name
+            );
+        }
     }
 
     #[test]

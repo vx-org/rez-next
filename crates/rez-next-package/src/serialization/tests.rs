@@ -63,6 +63,23 @@ mod serialization_tests {
     }
 
     #[test]
+    fn test_arbitrary_fields_survive_json_roundtrip() {
+        let mut package = make_test_package();
+        package.set_arbitrary_value(
+            "vx_upstream_sha256".to_string(),
+            serde_json::json!("abc123"),
+        );
+        package.set_arbitrary_value(
+            "vx_metadata".to_string(),
+            serde_json::json!({"channel": "stable", "priority": 2}),
+        );
+
+        let json = PackageSerializer::save_to_json(&package).unwrap();
+        let restored = PackageSerializer::load_from_json(&json).unwrap();
+        assert_eq!(restored.arbitrary_fields(), package.arbitrary_fields());
+    }
+
+    #[test]
     fn test_write_yaml_and_read_back() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
@@ -487,6 +504,7 @@ requires = ["python>=3.7"]
         let mut pkg = Package::new("py_build_pkg".to_string());
         pkg.version = Some(Version::parse("1.0.0").unwrap());
         pkg.build_requires = vec!["cmake-3".to_string()];
+        pkg.private_build_requires = vec!["internal_compiler-1".to_string()];
 
         let py = PackageSerializer::save_to_python(&pkg).unwrap();
         assert!(
@@ -494,6 +512,39 @@ requires = ["python>=3.7"]
             "Python output should have build_requires"
         );
         assert!(py.contains("cmake-3"), "Python output should list cmake-3");
+        assert!(
+            py.contains("private_build_requires"),
+            "Python output should preserve private build requirements"
+        );
+        assert!(
+            py.contains("internal_compiler-1"),
+            "Python output should list private build requirements"
+        );
+    }
+
+    #[test]
+    fn test_yaml_to_python_preserves_rez_metadata() {
+        let yaml = r#"
+name: maya_plugin
+version: '1.2.3'
+plugin_for: ['maya']
+requires: ['python-3.11']
+variants:
+  - ['linux-x86_64']
+commands: |
+  env.setenv('MAYA_PLUGIN_ROOT', '{root}')
+"#;
+
+        let package = PackageSerializer::load_from_yaml(yaml).unwrap();
+        let python = PackageSerializer::save_to_python(&package).unwrap();
+        let converted = PackageSerializer::load_from_python(&python).unwrap();
+
+        assert_eq!(converted.name, "maya_plugin");
+        assert_eq!(converted.version.unwrap().as_str(), "1.2.3");
+        assert_eq!(converted.plugin_for, vec!["maya"]);
+        assert_eq!(converted.requires, vec!["python-3.11"]);
+        assert_eq!(converted.variants, vec![vec!["linux-x86_64".to_string()]]);
+        assert!(converted.commands.unwrap().contains("MAYA_PLUGIN_ROOT"));
     }
 
     #[test]

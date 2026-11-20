@@ -5,14 +5,14 @@ Validates that the test module API matches rez.package_test.
 """
 
 import pytest
-import rez_next as rez
+from rez_next.exceptions import RezError
 from rez_next.test import (
-    PackageTestRunner,
-    PackageTestResults,
-    SUCCESS,
+    ERROR,
     FAILED,
     SKIPPED,
-    ERROR,
+    SUCCESS,
+    PackageTestResults,
+    PackageTestRunner,
 )
 
 
@@ -46,8 +46,54 @@ class TestPackageTestModule:
             runner = PackageTestRunner("python")
             assert runner is not None
             assert hasattr(runner, "package_name")
-        except Exception as e:
+        except (RezError, RuntimeError) as e:
             pytest.skip(f"PackageTestRunner creation failed: {e}")
+
+    def test_package_test_runner_resolves_configured_package(self, tmp_path, monkeypatch):
+        """A package request is resolved and tests receive its environment."""
+        package_root = tmp_path / "packages" / "contract_pkg" / "1.0.0"
+        package_root.mkdir(parents=True)
+        (package_root / "package.py").write_text(
+            "name = 'contract_pkg'\n"
+            "version = '1.0.0'\n"
+            "tests = {'environment': ['python', '-c', "
+            "\"import os, sys; sys.exit(0 if os.environ.get('CONTRACT_PKG_VERSION') == '1.0.0' else 7)\"]}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("REZ_PACKAGES_PATH", str(tmp_path / "packages"))
+
+        runner = PackageTestRunner("contract_pkg")
+
+        assert runner.package_name == "contract_pkg-1.0.0"
+        assert runner.run_test("environment") == 0
+
+    def test_package_test_runner_raises_for_missing_package(self):
+        """A missing package raises the Rez-compatible exception."""
+        from rez_next.exceptions import PackageNotFoundError
+
+        with pytest.raises(PackageNotFoundError):
+            PackageTestRunner("definitely_missing_contract_pkg")
+
+    def test_package_test_runner_expands_root_and_forwards_extra_args(
+        self, tmp_path, monkeypatch
+    ):
+        """Package tests receive the package root and argv passthrough."""
+        package_root = tmp_path / "packages" / "argv_pkg" / "1.0.0"
+        package_root.mkdir(parents=True)
+        (package_root / "package.py").write_text(
+            "name = 'argv_pkg'\n"
+            "version = '1.0.0'\n"
+            "tests = {'argv': ['python', '-c', "
+            "\"import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])\", "
+            "'{root}/argv-result.txt']}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("REZ_PACKAGES_PATH", str(tmp_path / "packages"))
+
+        runner = PackageTestRunner("argv_pkg")
+
+        assert runner.run_test("argv", ["value with spaces"]) == 0
+        assert (package_root / "argv-result.txt").read_text() == "value with spaces"
 
     def test_package_test_results_creation(self):
         """Test PackageTestResults can be created."""

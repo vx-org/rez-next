@@ -14,11 +14,31 @@ pub struct SvnVCS {
 }
 
 impl SvnVCS {
+    /// Return whether `path` contains an SVN working copy.
+    pub fn is_valid_root(path: &std::path::Path) -> bool {
+        path.join(".svn").exists()
+    }
+
+    /// SVN working copies may be discovered in parent directories.
+    pub fn search_parents_for_root() -> bool {
+        true
+    }
+
+    /// Find the nearest SVN root and preserve its parent distance.
+    pub fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)> {
+        super::find_vcs_root(path, Self::search_parents_for_root(), Self::is_valid_root)
+    }
+
+    /// Find the SVN executable in `PATH`.
+    pub fn find_executable(name: &str) -> Result<PathBuf, RezCoreError> {
+        super::find_vcs_executable(name)
+    }
+
     /// Create a new SvnVCS
     pub fn new(repo_root: PathBuf) -> Result<Self, RezCoreError> {
         // Verify this is an SVN working copy
         if !repo_root.join(".svn").exists() {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "Not an SVN working copy".to_string(),
             ));
         }
@@ -33,7 +53,7 @@ impl SvnVCS {
             .current_dir(&self.repo_root)
             .output()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "SvnVCS: failed to run svn command '{:?}' in repository at '{}': {}",
                     args,
                     self.repo_root.display(),
@@ -43,7 +63,7 @@ impl SvnVCS {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "SvnVCS: svn command '{:?}' failed in repository at '{}': {}",
                 args,
                 self.repo_root.display(),
@@ -70,6 +90,34 @@ impl SvnVCS {
 }
 
 impl super::ReleaseVCS for SvnVCS {
+    fn is_valid_root(path: &std::path::Path) -> bool
+    where
+        Self: Sized,
+    {
+        SvnVCS::is_valid_root(path)
+    }
+
+    fn search_parents_for_root() -> bool
+    where
+        Self: Sized,
+    {
+        SvnVCS::search_parents_for_root()
+    }
+
+    fn find_vcs_root(path: &std::path::Path) -> Option<(PathBuf, usize)>
+    where
+        Self: Sized,
+    {
+        SvnVCS::find_vcs_root(path)
+    }
+
+    fn find_executable(name: &str) -> Result<PathBuf, RezCoreError>
+    where
+        Self: Sized,
+    {
+        SvnVCS::find_executable(name)
+    }
+
     fn get_type_name(&self) -> &str {
         "svn"
     }
@@ -105,7 +153,7 @@ impl super::ReleaseVCS for SvnVCS {
         // Check if tags/<tag> exists in the repository
         let info = self.get_svn_info()?;
         let repo_url = info.get("Repository Root").ok_or_else(|| {
-            RezCoreError::BuildError("Could not get repository root URL".to_string())
+            RezCoreError::ReleaseVCSError("Could not get repository root URL".to_string())
         })?;
 
         let tags_url = format!("{}/tags/{}", repo_url, tag);
@@ -117,7 +165,7 @@ impl super::ReleaseVCS for SvnVCS {
     fn create_tag(&self, tag: &str, message: &str) -> Result<(), RezCoreError> {
         let info = self.get_svn_info()?;
         let repo_url = info.get("Repository Root").ok_or_else(|| {
-            RezCoreError::BuildError("Could not get repository root URL".to_string())
+            RezCoreError::ReleaseVCSError("Could not get repository root URL".to_string())
         })?;
 
         let trunk_url = format!("{}/trunk", repo_url);
@@ -127,11 +175,11 @@ impl super::ReleaseVCS for SvnVCS {
         let output = std::process::Command::new("svn")
             .args(["copy", &trunk_url, &tags_url, "-m", message])
             .output()
-            .map_err(|e| RezCoreError::BuildError(format!("Failed to run svn copy: {}", e)))?;
+            .map_err(|e| RezCoreError::ReleaseVCSError(format!("Failed to run svn copy: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "svn copy failed: {}",
                 stderr
             )));
@@ -141,25 +189,33 @@ impl super::ReleaseVCS for SvnVCS {
         Ok(())
     }
 
+    fn create_release_tag(&self, tag: &str, message: Option<&str>) -> Result<(), RezCoreError> {
+        self.create_tag(tag, message.unwrap_or_default())
+    }
+
     fn get_changelog(
         &self,
-        from_rev: Option<&str>,
-        to_rev: Option<&str>,
+        previous_revision: Option<&str>,
+        max_revisions: Option<usize>,
     ) -> Result<String, RezCoreError> {
         let info = self.get_svn_info()?;
         // Validate that URL exists (but don't store it)
-        let _repo_url = info
-            .get("URL")
-            .ok_or_else(|| RezCoreError::BuildError("Could not get repository URL".to_string()))?;
+        let _repo_url = info.get("URL").ok_or_else(|| {
+            RezCoreError::ReleaseVCSError("Could not get repository URL".to_string())
+        })?;
 
-        let from = from_rev.unwrap_or("BASE");
-        let to = to_rev.unwrap_or("HEAD");
-
-        // `svn log -r <from>:<to>`
-        let changelog = self.run_svn(&["log", "-r", &format!("{}:{}", from, to)])?;
+        let from = previous_revision.unwrap_or("1");
+        let to = "HEAD";
+        let revision_range = format!("{}:{}", from, to);
+        let limit = max_revisions.map(|value| value.to_string());
+        let mut args = vec!["log", "-r", revision_range.as_str()];
+        if let Some(limit) = limit.as_deref() {
+            args.extend(["-l", limit]);
+        }
+        let changelog = self.run_svn(&args)?;
 
         Ok(format!(
-            "Changelog from {} to {}:\n{}\n",
+            "Changelog since {} (to {}):\n{}\n",
             from, to, changelog
         ))
     }
@@ -249,7 +305,7 @@ impl super::ReleaseVCS for SvnVCS {
     ) -> Result<(), RezCoreError> {
         // Validate target path
         if path.exists() {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Export path '{}' already exists",
                 path.display()
             )));
@@ -259,7 +315,7 @@ impl super::ReleaseVCS for SvnVCS {
         if let Some(parent) = path.parent()
             && !parent.exists()
         {
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Parent directory '{}' does not exist",
                 parent.display()
             )));
@@ -268,7 +324,7 @@ impl super::ReleaseVCS for SvnVCS {
         // Get the repository URL
         let info = self.get_svn_info()?;
         let repo_url = info.get("Repository Root").ok_or_else(|| {
-            RezCoreError::BuildError("Could not get repository root URL".to_string())
+            RezCoreError::ReleaseVCSError("Could not get repository root URL".to_string())
         })?;
 
         // Use `svn export -r <rev> <url> <path>`
@@ -277,7 +333,7 @@ impl super::ReleaseVCS for SvnVCS {
             .args(["export", &revision_spec, repo_url, &path.to_string_lossy()])
             .output()
             .map_err(|e| {
-                RezCoreError::BuildError(format!(
+                RezCoreError::ReleaseVCSError(format!(
                     "Failed to run `svn export` for repository at '{}': {}",
                     self.repo_root.display(),
                     e
@@ -286,7 +342,7 @@ impl super::ReleaseVCS for SvnVCS {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(RezCoreError::BuildError(format!(
+            return Err(RezCoreError::ReleaseVCSError(format!(
                 "Failed to export SVN repository at '{}' to '{}': {}",
                 self.repo_root.display(),
                 path.display(),
@@ -306,7 +362,7 @@ impl super::ReleaseVCS for SvnVCS {
     fn validate_repo_state(&self) -> Result<(), RezCoreError> {
         // Check if working copy is clean
         if !self.is_clean()? {
-            return Err(RezCoreError::BuildError(
+            return Err(RezCoreError::ReleaseVCSError(
                 "SVN working copy is not clean".to_string(),
             ));
         }

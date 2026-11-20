@@ -53,7 +53,16 @@ def get_buildsys_types() -> list[str]:
     """
     from rez_next.plugin_managers import plugin_manager
 
-    return sorted(plugin_manager.get_plugins("build_system"))
+    registered = set(plugin_manager.get_plugins("build_system"))
+    try:
+        from rez_next.build_ import get_buildsys_types as get_native_buildsys_types
+
+        registered.update(get_native_buildsys_types())
+    except (ImportError, RuntimeError):
+        # A source checkout may be used without the optional native extension.
+        # In that case the Python plugin registry remains the source of truth.
+        pass
+    return sorted(registered)
 
 
 def get_valid_build_systems(
@@ -88,8 +97,10 @@ def get_valid_build_systems(
             buildsys_name = getattr(package, "build_system", None)
 
         if buildsys_name:
-            cls = plugin_manager.get_plugin_class("build_system", buildsys_name)
-            return [cls]
+            try:
+                return [plugin_manager.get_plugin_class("build_system", buildsys_name)]
+            except Exception:
+                return [_native_build_system_class(buildsys_name)]
 
     clss: list[type[BuildSystem]] = []
     for name in get_buildsys_types():
@@ -100,7 +111,57 @@ def get_valid_build_systems(
     # Remove child build systems (e.g. if cmake generates make, remove make)
     child_cls: set = {x.child_build_system() for x in clss if x.child_build_system()}
     clss = [c for c in clss if c not in child_cls]
-    return clss
+    if clss:
+        return clss
+
+    try:
+        from rez_next.build_ import get_build_system as get_native_build_system
+
+        native_name = get_native_build_system(working_dir)
+    except (ImportError, RuntimeError):
+        native_name = "unknown"
+    if native_name == "unknown":
+        return []
+    return [_native_build_system_class(native_name)]
+
+
+_NATIVE_BUILD_SYSTEM_CLASSES: dict[str, type[BuildSystem]] = {}
+
+
+def _native_build_system_class(name: str) -> type[BuildSystem]:
+    """Return a BuildSystem adapter backed by the Rust build entry point."""
+    if name not in _NATIVE_BUILD_SYSTEM_CLASSES:
+        class NativeBuildSystem(BuildSystem):
+            @classmethod
+            def name(cls) -> str:
+                return name
+
+            @classmethod
+            def is_valid_root(cls, path: str, package: Any = None) -> bool:
+                try:
+                    from rez_next.build_ import get_build_system
+
+                    return get_build_system(path) == name
+                except (ImportError, RuntimeError):
+                    return False
+
+            def build(
+                self,
+                context: ResolvedContext,
+                variant: Any,
+                build_path: str,
+                install_path: str,
+                install: bool = False,
+                build_type: BuildType = None,
+            ) -> BuildResult:
+                from rez_next.build_ import build_package
+
+                build_package(self.working_dir, install, False, install_path)
+                return {"success": True, "extra_files": []}
+
+        NativeBuildSystem.__name__ = f"{name.title().replace('_', '')}BuildSystem"
+        _NATIVE_BUILD_SYSTEM_CLASSES[name] = NativeBuildSystem
+    return _NATIVE_BUILD_SYSTEM_CLASSES[name]
 
 
 def create_build_system(

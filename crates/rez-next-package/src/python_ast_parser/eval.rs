@@ -14,6 +14,8 @@ impl PythonAstParser {
             Expr::Name(name) => {
                 if let Some(value) = self.context.variables.get(name.id.as_str()) {
                     Ok(value.clone())
+                } else if name.id.as_str() == "ephemerals" {
+                    Ok(PythonValue::Ephemerals)
                 } else {
                     Err(RezCoreError::PackageParse(format!(
                         "Undefined variable: {}",
@@ -150,6 +152,24 @@ impl PythonAstParser {
                 (PythonValue::Boolean(l), CmpOp::Eq, PythonValue::Boolean(r)) => l == r,
                 (PythonValue::Integer(l), CmpOp::Lt, PythonValue::Integer(r)) => l < r,
                 (PythonValue::Integer(l), CmpOp::Gt, PythonValue::Integer(r)) => l > r,
+                (PythonValue::String(name), CmpOp::In, PythonValue::Environment) => {
+                    std::env::var_os(name).is_some()
+                }
+                (PythonValue::String(name), CmpOp::NotIn, PythonValue::Environment) => {
+                    std::env::var_os(name).is_none()
+                }
+                (PythonValue::String(name), CmpOp::In, PythonValue::Ephemerals) => {
+                    return Ok(PythonValue::EphemeralMembership {
+                        name: name.clone(),
+                        expected: true,
+                    });
+                }
+                (PythonValue::String(name), CmpOp::NotIn, PythonValue::Ephemerals) => {
+                    return Ok(PythonValue::EphemeralMembership {
+                        name: name.clone(),
+                        expected: false,
+                    });
+                }
                 _ => {
                     return Err(RezCoreError::PackageParse(format!(
                         "Unsupported comparison: {left:?} {op:?} {right:?}"
@@ -238,6 +258,25 @@ impl PythonAstParser {
         &self,
         call: &rustpython_ast::ExprCall,
     ) -> Result<PythonValue, RezCoreError> {
+        if let Expr::Name(function) = &*call.func
+            && call.args.is_empty()
+            && call.keywords.is_empty()
+            && self
+                .context
+                .imports
+                .get(function.id.as_str())
+                .is_some_and(|import| import == "platform.system")
+        {
+            let system = if cfg!(windows) {
+                "Windows"
+            } else if cfg!(target_os = "macos") {
+                "Darwin"
+            } else {
+                "Linux"
+            };
+            return Ok(PythonValue::String(system.to_string()));
+        }
+
         if let Expr::Attribute(attribute) = &*call.func {
             if let Expr::Name(owner) = &*attribute.value
                 && owner.id.as_str() == "os"
@@ -321,6 +360,12 @@ impl PythonAstParser {
                     return Ok(PythonValue::String(
                         if cfg!(windows) { "nt" } else { "posix" }.to_string(),
                     ));
+                }
+                ("os", "environ") => {
+                    return Ok(PythonValue::Environment);
+                }
+                ("env", variable) => {
+                    return Ok(PythonValue::String(format!("${variable}")));
                 }
                 ("this", "version") => {
                     if let Some(version) = self.context.variables.get("version") {

@@ -7,8 +7,8 @@
 mod build_tests {
     use crate::*;
     use rez_next_context::{ContextConfig, ContextStatus, EnvironmentManager, ResolvedContext};
-    use rez_next_package::Package;
     use rez_next_package::PackageRequirement;
+    use rez_next_package::{Package, PackageTestDefinition, TestCommand};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::process::Command;
@@ -85,10 +85,11 @@ def commands():
         context.resolved_packages = vec![package];
         context.status = ContextStatus::Resolved;
 
-        let manager = EnvironmentManager::new(ContextConfig {
+        let context_config = ContextConfig {
             inherit_parent_env: false,
-            ..Default::default()
-        });
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::new(context_config);
         context.environment_vars = manager
             .generate_environment(&context.resolved_packages)
             .await
@@ -420,14 +421,14 @@ def commands():
         let pkg = make_package("mylib", "2.0.0");
         let tmp = TempDir::new().unwrap();
         let env = BuildEnvironment::new(&pkg, &tmp.path().to_path_buf(), None).unwrap();
-        // REZ_BUILD_PACKAGE_NAME should always be set
+        // Upstream exposes the project vocabulary for package identity.
         let vars = env.get_env_vars();
         assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_NAME"),
+            vars.get("REZ_BUILD_PROJECT_NAME"),
             Some(&"mylib".to_string())
         );
         assert_eq!(
-            vars.get("REZ_BUILD_PACKAGE_VERSION"),
+            vars.get("REZ_BUILD_PROJECT_VERSION"),
             Some(&"2.0.0".to_string())
         );
     }
@@ -545,6 +546,97 @@ if not source_path or not os.path.isdir(source_path):
         assert!(
             result.success,
             "rezbuild.py should receive REZ_BUILD_SOURCE_PATH: {}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn test_custom_script_uses_resolved_path_and_build_directory() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'contextpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("rezbuild.py"),
+            r#"
+import os
+import subprocess
+import sys
+
+expected = os.path.realpath(os.path.normcase(os.path.normpath(os.environ["REZ_BUILD_PATH"])))
+actual = os.path.realpath(os.path.normcase(os.path.normpath(os.getcwd())))
+if actual != expected:
+    print(f"unexpected build cwd: {actual!r} != {expected!r}", file=sys.stderr)
+    sys.exit(1)
+if not os.environ.get("PATH"):
+    print("resolved context did not provide PATH", file=sys.stderr)
+    sys.exit(1)
+try:
+    subprocess.run(["python", "--version"], check=True, stdout=subprocess.DEVNULL)
+except (OSError, subprocess.CalledProcessError) as error:
+    print(f"resolved PATH cannot execute python: {error}", file=sys.stderr)
+    sys.exit(1)
+"#,
+        )
+        .unwrap();
+
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
+        let mut manager = BuildManager::with_config(config);
+        let pkg = make_package("contextpkg", "1.0.0");
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "custom script should run in the resolved build context: {}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn test_custom_script_restores_host_path_without_context() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'hostpathpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source_dir.join("rezbuild.py"),
+            r#"
+import os
+import sys
+
+if not os.environ.get("PATH"):
+    print("custom script PATH was not restored", file=sys.stderr)
+    sys.exit(1)
+"#,
+        )
+        .unwrap();
+
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
+        let mut manager = BuildManager::with_config(config);
+        let pkg = make_package("hostpathpkg", "1.0.0");
+        let request = BuildRequest::new(pkg, None, source_dir);
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "custom script should receive the host PATH when no context exists: {}",
             result.errors
         );
     }
@@ -689,10 +781,16 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
 
     #[tokio::test]
     async fn test_custom_build_fails_when_package_test_fails() {
-        let mut manager = BuildManager::new();
         let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
+        let mut manager = BuildManager::with_config(config);
         std::fs::write(
-            tmp.path().join("package.py"),
+            source_dir.join("package.py"),
             "name = 'testedpkg'\nversion = '1.0.0'\n",
         )
         .unwrap();
@@ -703,14 +801,61 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
         } else {
             "echo package-test-failed >&2; exit 7"
         };
-        pkg.tests.insert("unit".to_string(), command.to_string());
-        let request = make_request_with_python_context(pkg, tmp.path().to_path_buf(), &tmp).await;
+        pkg.tests.insert(
+            "unit".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String(command.to_string())),
+        );
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
 
         let ids = manager.start_build(request).await.unwrap();
         let result = manager.wait_for_build(&ids[0]).await.unwrap();
 
         assert!(!result.success, "a failed package test must fail the build");
         assert!(result.errors.contains("package-test-failed"), "{result:?}");
+        assert!(
+            !tmp.path().join("build/testedpkg/install").exists(),
+            "a failed package test must roll back the installed payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_package_definition_is_published_after_package_tests_pass() {
+        let tmp = TempDir::new().unwrap();
+        let source_dir = tmp.path().join("source");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
+        let mut manager = BuildManager::with_config(config);
+        std::fs::write(
+            source_dir.join("package.py"),
+            "name = 'publishedpkg'\nversion = '1.0.0'\n",
+        )
+        .unwrap();
+
+        let mut pkg = make_package("publishedpkg", "1.0.0");
+        pkg.tests.insert(
+            "definition-order".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String(
+                "python -c \"import os,sys; sys.exit(os.path.exists(os.path.join(os.environ['REZ_BUILD_INSTALL_PATH'], 'package.py')))\""
+                    .to_string(),
+            )),
+        );
+        let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
+        let ids = manager.start_build(request).await.unwrap();
+        let result = manager.wait_for_build(&ids[0]).await.unwrap();
+
+        assert!(
+            result.success,
+            "package tests should run before definition publish: {}",
+            result.errors
+        );
+        assert!(
+            tmp.path()
+                .join("build/publishedpkg/install/package.py")
+                .is_file()
+        );
     }
 
     #[tokio::test]
@@ -725,7 +870,10 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
 
         let mut pkg = make_package("testedpkg", "1.0.0");
         pkg.commands = Some("unsupported_rex_operation()".to_string());
-        pkg.tests.insert("unit".to_string(), "echo ok".to_string());
+        pkg.tests.insert(
+            "unit".to_string(),
+            PackageTestDefinition::from_command(TestCommand::String("echo ok".to_string())),
+        );
         let request = make_request_with_python_context(pkg, tmp.path().to_path_buf(), &tmp).await;
 
         let ids = manager.start_build(request).await.unwrap();
@@ -1125,7 +1273,7 @@ if os.environ["REZ_BUILD_PROJECT_VERSION"] != "0.0.0":
 // ── New tests for BuildType, get_build_process_types, create_build_system ─────
 #[cfg(test)]
 mod build_type_tests {
-    use crate::{BuildType, create_build_system, get_build_process_types};
+    use crate::{BuildSystem, BuildType, create_build_system, get_build_process_types};
 
     #[test]
     fn build_type_name() {
@@ -1154,10 +1302,10 @@ mod build_type_tests {
     }
 
     #[test]
-    fn get_build_process_types_returns_local_and_central() {
+    fn get_build_process_types_returns_registered_processes() {
         let types = get_build_process_types();
         assert!(types.contains(&"local"));
-        assert!(types.contains(&"central"));
+        assert!(types.contains(&"remote"));
         assert_eq!(types.len(), 2);
     }
 
@@ -1172,6 +1320,13 @@ mod build_type_tests {
         assert!(create_build_system("pypi").is_some());
         assert!(create_build_system("rez_pip").is_some());
         assert!(create_build_system("custom").is_some());
+
+        match create_build_system("custom").unwrap() {
+            BuildSystem::Custom(custom) => {
+                assert_eq!(custom.script_name, "build_command")
+            }
+            other => panic!("Expected custom build system, got {other:?}"),
+        }
     }
 
     #[test]

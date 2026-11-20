@@ -23,6 +23,39 @@ def test_overrides_are_applied_and_can_be_changed():
     assert config.sourced_filepaths == []
 
 
+def test_override_is_a_scoped_context_manager():
+    config = Config([], overrides={"build_directory": "original"})
+
+    with config.override("build_directory", "scoped") as active:
+        assert active is config
+        assert config.build_directory == "scoped"
+
+    assert config.build_directory == "original"
+
+
+def test_plugin_override_is_restored_after_context():
+    config = Config([], overrides={"plugins": {"release_vcs": {"tag_name": "old"}}})
+
+    with config.override("plugins.release_vcs.tag_name", "new"):
+        assert config.plugins.data()["release_vcs"]["tag_name"] == "new"
+
+    assert config.plugins.data()["release_vcs"]["tag_name"] == "old"
+
+
+def test_memcached_settings_warn_when_loaded(tmp_path):
+    import pytest
+
+    path = tmp_path / "memcached.py"
+    path.write_text(
+        "memcached_uri = ['127.0.0.1:11211']\n"
+        "memcached_resolve_min_compress_len = 2\n"
+    )
+
+    with pytest.warns(RuntimeWarning, match="Memcached settings"):
+        config = Config([str(path)])
+        assert config.memcached_uri == ["127.0.0.1:11211"]
+
+
 def test_copied_overrides_do_not_change_original():
     original = Config([], overrides={"build_directory": "original"})
     assert original.build_directory == "original"
@@ -102,6 +135,21 @@ def test_configured_package_paths_expand_home(monkeypatch, tmp_path):
     config = Config([], overrides={"packages_path": ["~/packages"]})
     # expanduser retains the separator after '~', including on Windows.
     assert config.packages_path == [f"{tmp_path}/packages"]
+
+
+def test_implicit_package_requests_preserve_weak_marker():
+    config = Config(
+        [],
+        overrides={
+            "implicit_packages": ["~platform==windows", "~arch==x86_64", "~os==windows"]
+        },
+    )
+
+    assert config.implicit_packages == [
+        "~platform==windows",
+        "~arch==x86_64",
+        "~os==windows",
+    ]
 
 
 def test_top_level_and_module_share_config_singleton():
