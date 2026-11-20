@@ -16,13 +16,13 @@ fn ephemeral_requests_resolve_as_ranges_without_repository_packages() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
 
     let result = runtime
-        .block_on(resolver.resolve(vec![
+        .block_on(resolver.resolve_with_ephemerals(vec![
             ".feature>=1".parse().unwrap(),
             "!.feature==2".parse().unwrap(),
         ]))
         .unwrap();
 
-    assert!(result.resolved_packages.is_empty());
+    assert!(result.result.resolved_packages.is_empty());
     assert_eq!(result.resolved_ephemerals.len(), 1);
     let feature = &result.resolved_ephemerals[0];
     assert_eq!(feature.name, ".feature");

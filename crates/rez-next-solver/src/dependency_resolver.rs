@@ -28,9 +28,6 @@ pub struct DetailedResolutionResult {
     /// Successfully resolved packages
     pub resolved_packages: Vec<ResolvedPackageInfo>,
 
-    /// Final non-conflict ephemeral ranges from the request.
-    pub resolved_ephemerals: Vec<ResolvedEphemeral>,
-
     /// Requirements that couldn't be satisfied
     pub failed_requirements: Vec<Requirement>,
 
@@ -39,6 +36,19 @@ pub struct DetailedResolutionResult {
 
     /// Resolution statistics
     pub stats: ResolutionStats,
+}
+
+/// Resolution result with ephemeral requirements retained for context setup.
+///
+/// The original [`DetailedResolutionResult`] remains constructible with its
+/// historical fields. Callers that need Rez's ephemeral metadata can opt into
+/// this extended result through [`DependencyResolver::resolve_with_ephemerals`].
+#[derive(Debug, Clone)]
+pub struct ResolutionResultWithEphemerals {
+    /// The historical detailed resolution result.
+    pub result: DetailedResolutionResult,
+    /// Ephemeral requirements selected during resolution.
+    pub resolved_ephemerals: Vec<ResolvedEphemeral>,
 }
 
 /// A resolved ephemeral feature range, which has no repository package.
@@ -235,6 +245,14 @@ impl DependencyResolver {
         &mut self,
         requirements: Vec<Requirement>,
     ) -> Result<DetailedResolutionResult, RezCoreError> {
+        Ok(self.resolve_with_mode(requirements, false).await?.result)
+    }
+
+    /// Resolve requirements and retain the ephemeral metadata selected by the solver.
+    pub async fn resolve_with_ephemerals(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
         self.resolve_with_mode(requirements, false).await
     }
 
@@ -248,6 +266,14 @@ impl DependencyResolver {
         &mut self,
         requirements: Vec<Requirement>,
     ) -> Result<DetailedResolutionResult, RezCoreError> {
+        Ok(self.resolve_with_mode(requirements, true).await?.result)
+    }
+
+    /// Resolve a build environment and retain ephemeral metadata.
+    pub async fn resolve_build_with_ephemerals(
+        &mut self,
+        requirements: Vec<Requirement>,
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
         self.resolve_with_mode(requirements, true).await
     }
 
@@ -255,7 +281,7 @@ impl DependencyResolver {
         &mut self,
         requirements: Vec<Requirement>,
         include_build_requires: bool,
-    ) -> Result<DetailedResolutionResult, RezCoreError> {
+    ) -> Result<ResolutionResultWithEphemerals, RezCoreError> {
         let start_time = std::time::Instant::now();
 
         let (requirements, resolved_ephemerals) = resolve_ephemerals(requirements)?;
@@ -308,12 +334,14 @@ impl DependencyResolver {
             )));
         }
 
-        Ok(DetailedResolutionResult {
-            resolved_packages: result,
+        Ok(ResolutionResultWithEphemerals {
+            result: DetailedResolutionResult {
+                resolved_packages: result,
+                failed_requirements: failed,
+                conflicts: resolution_state.conflicts,
+                stats,
+            },
             resolved_ephemerals,
-            failed_requirements: failed,
-            conflicts: resolution_state.conflicts,
-            stats,
         })
     }
 

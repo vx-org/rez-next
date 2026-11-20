@@ -666,13 +666,11 @@ impl BuildProcess {
             };
             base_environment.insert(name, value);
         }
-        let manager = EnvironmentManager::with_base_environment(
-            ContextConfig {
-                inherit_parent_env: false,
-                ..ContextConfig::default()
-            },
-            base_environment,
-        );
+        let context_config = ContextConfig {
+            inherit_parent_env: false,
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::with_base_environment(context_config, base_environment);
         let mut tests: Vec<_> = request.package.tests.iter().collect();
         tests.sort_by_key(|(name, _)| *name);
         let mut output = String::new();

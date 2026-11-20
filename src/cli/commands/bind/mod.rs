@@ -19,7 +19,6 @@ use crate::cli::utils::expand_home_path;
 use clap::Args;
 use rez_next_common::{RezCoreError, config::RezCoreConfig, error::RezCoreResult};
 use rez_next_package::Package;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub use detect::{DetectedTool, detect_system_tool};
@@ -342,54 +341,22 @@ fn bind_single_package(
 
     let version = rez_next_version::Version::parse(&version_str)?;
 
-    let package = Package {
-        name: name.to_string(),
-        version: Some(version.clone()),
-        description: Some(description.clone()),
-        authors: vec!["System".to_string()],
-        requires: requires.clone(),
-        build_requires: vec![],
-        private_build_requires: vec![],
-        variants: vec![],
-        commands: commands.clone(),
-        commands_function: commands.clone(),
-        build_command: None,
-        build_system: None,
-        pre_commands: None,
-        post_commands: None,
-        pre_test_commands: None,
-        pre_build_commands: None,
-        tests: HashMap::new(),
-        requires_rez_version: None,
-        tools: tools.clone(),
-        help: None,
-        uuid: None,
-        config: HashMap::new(),
-        extra_fields: HashMap::new(),
-        plugin_for: vec![],
-        has_plugins: None,
-        relocatable: None,
-        cachable: None,
-        release_message: None,
-        changelog: None,
-        previous_version: None,
-        previous_revision: None,
-        revision: None,
-        timestamp: Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-        ),
-        format_version: Some(2),
-        base: None,
-        hashed_variants: None,
-        vcs: None,
-        preprocess: None,
-        is_dev_package: None,
-        filepath: None,
-        includes: None,
-    };
+    let mut package = Package::new(name.to_string());
+    package.version = Some(version.clone());
+    package.description = Some(description.clone());
+    package.authors = vec!["System".to_string()];
+    package.requires = requires.clone();
+    package.variants = vec![];
+    package.commands = commands.clone();
+    package.commands_function = commands.clone();
+    package.tools = tools.clone();
+    package.timestamp = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    );
+    package.format_version = Some(2);
 
     let pkg_dir = install_path.join(name).join(&version_str);
     std::fs::create_dir_all(&pkg_dir).map_err(RezCoreError::Io)?;

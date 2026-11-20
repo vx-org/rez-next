@@ -372,11 +372,10 @@ impl ReleaseManager {
             Some(vcs_impl) => {
                 if !self.skip_vcs_validation
                     && let Err(e) = vcs_impl.validate_repo_state()
+                    && !self.skip_repo_error("validate repository state", &e, &mut result)
                 {
-                    if !self.skip_repo_error("validate repository state", &e, &mut result) {
-                        result.errors.push(format!("VCS validation failed: {}", e));
-                        return Ok(result);
-                    }
+                    result.errors.push(format!("VCS validation failed: {}", e));
+                    return Ok(result);
                 }
                 match vcs_impl.get_metadata() {
                     Ok(metadata) => result.vcs_metadata = Some(metadata),
@@ -576,13 +575,12 @@ impl ReleaseManager {
     /// Get the repository root used for the selected release mode.
     fn get_install_base(&self) -> PathBuf {
         let config = RezCoreConfig::load();
-        let install_base = match self.mode {
+        match self.mode {
             ReleaseMode::Local | ReleaseMode::DryRun => {
                 PathBuf::from(expand_home(&config.local_packages_path))
             }
             ReleaseMode::Release => PathBuf::from(expand_home(&config.release_packages_path)),
-        };
-        install_base
+        }
     }
 
     /// Validate VCS repository state
@@ -601,11 +599,11 @@ impl ReleaseManager {
             }
             Ok(Some(vcs_impl)) => {
                 // Validate repo state
-                if let Err(e) = vcs_impl.validate_repo_state() {
-                    if !self.skip_repo_error("validate repository state", &e, result) {
-                        result.errors.push(format!("VCS validation failed: {}", e));
-                        return Ok(None);
-                    }
+                if let Err(e) = vcs_impl.validate_repo_state()
+                    && !self.skip_repo_error("validate repository state", &e, result)
+                {
+                    result.errors.push(format!("VCS validation failed: {}", e));
+                    return Ok(None);
                 }
 
                 // Get metadata
@@ -1253,13 +1251,11 @@ impl ReleaseManager {
 
         let mut base_environment = std::env::vars().collect();
         normalize_environment_paths(&mut base_environment);
-        let manager = EnvironmentManager::with_base_environment(
-            ContextConfig {
-                inherit_parent_env: true,
-                ..ContextConfig::default()
-            },
-            base_environment,
-        );
+        let context_config = ContextConfig {
+            inherit_parent_env: true,
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::with_base_environment(context_config, base_environment);
         let runtime = tokio::runtime::Runtime::new().map_err(|error| {
             RezCoreError::BuildError(format!("Failed to create test runtime: {error}"))
         })?;
@@ -1492,10 +1488,11 @@ pub fn resolve_build_context(
         .collect::<Result<Vec<_>, _>>()?;
     context.status = rez_next_context::ContextStatus::Resolved;
 
-    let environment_manager = EnvironmentManager::new(ContextConfig {
+    let context_config = ContextConfig {
         inherit_parent_env: false,
-        ..Default::default()
-    });
+        ..ContextConfig::default()
+    };
+    let environment_manager = EnvironmentManager::new(context_config);
     context.environment_vars =
         runtime.block_on(environment_manager.generate_environment(&context.resolved_packages))?;
 

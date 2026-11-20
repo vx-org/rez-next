@@ -137,7 +137,7 @@ impl PyPackage {
     fn __getattr__<'py>(&self, name: &str, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.0
             .arbitrary_value(name)
-            .map(|value| json_value_to_python(py, value))
+            .map(|value| json_value_to_python(py, &value))
             .transpose()?
             .ok_or_else(|| {
                 pyo3::exceptions::PyAttributeError::new_err(format!(
@@ -260,7 +260,7 @@ impl PyPackage {
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
         self.0
             .arbitrary_value(key)
-            .map(|value| json_value_to_python(py, value))
+            .map(|value| json_value_to_python(py, &value))
             .transpose()
     }
 
@@ -715,7 +715,7 @@ impl PyPackage {
 
         for key in self.0.arbitrary_keys() {
             if let Some(value) = self.0.arbitrary_value(&key) {
-                dict.set_item(&key, json_value_to_python(py, value)?)?;
+                dict.set_item(&key, json_value_to_python(py, &value)?)?;
             }
         }
 
@@ -862,7 +862,7 @@ impl PyPackage {
 
         for key in self.0.arbitrary_keys() {
             if let Some(value) = self.0.arbitrary_value(&key) {
-                let value = rez_next_package::package::types::json_value_to_python(value);
+                let value = rez_next_package::package::types::json_value_to_python(&value);
                 lines.push(format!("{} = {}", key, value));
             }
         }

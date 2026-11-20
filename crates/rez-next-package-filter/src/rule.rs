@@ -616,12 +616,10 @@ mod tests {
     use rez_next_version::Version;
 
     fn create_test_package(name: &str, version: &str) -> Package {
-        Package {
-            name: name.to_string(),
-            version: Some(Version::parse(version).unwrap()),
-            description: Some("Test package".to_string()),
-            ..Default::default()
-        }
+        let mut package = Package::new(name.to_string());
+        package.version = Some(Version::parse(version).unwrap());
+        package.description = Some("Test package".to_string());
+        package
     }
 
     #[test]

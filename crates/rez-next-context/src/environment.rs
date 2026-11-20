@@ -1,6 +1,8 @@
 //! Environment variable generation and management
 
-use crate::{ContextConfig, PathStrategy};
+use crate::{
+    CONTEXT_ALL_PARENT_VARIABLES_KEY, CONTEXT_PARENT_VARIABLES_KEY, ContextConfig, PathStrategy,
+};
 use regex::{Captures, Regex};
 use rez_next_common::RezCoreError;
 use rez_next_package::{Package, deferred_commands::materialize_deferred_commands};
@@ -39,9 +41,9 @@ pub enum EnvOperation {
     Unset,
     /// Set a variable only when it is not already defined
     SetIfEmpty(String),
-    /// Restore a variable to its original parent value
-    Reset,
 }
+
+const RESET_OPERATION_MARKER: &str = "__rez_next_reset_operation__";
 
 /// Environment variable definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,11 +167,12 @@ impl EnvironmentManager {
             .iter()
             .map(|package| package.name.clone())
             .collect::<HashSet<_>>();
-        let building = self
-            .config
-            .additional_env_vars
-            .keys()
-            .any(|name| name.eq_ignore_ascii_case("REZ_BUILD_ENV"));
+        let building = self.config.additional_env_vars.keys().any(|name| {
+            !matches!(
+                name.as_str(),
+                CONTEXT_PARENT_VARIABLES_KEY | CONTEXT_ALL_PARENT_VARIABLES_KEY
+            ) && name.eq_ignore_ascii_case("REZ_BUILD_ENV")
+        });
 
         // Package metadata is available to every Rex phase.
         for package in packages {
@@ -206,6 +209,12 @@ impl EnvironmentManager {
 
         // Add additional environment variables from config
         for (name, value) in &self.config.additional_env_vars {
+            if matches!(
+                name.as_str(),
+                CONTEXT_PARENT_VARIABLES_KEY | CONTEXT_ALL_PARENT_VARIABLES_KEY
+            ) {
+                continue;
+            }
             env_definitions.push(EnvVarDefinition {
                 name: name.clone(),
                 operation: EnvOperation::Set(value.clone()),
@@ -375,7 +384,10 @@ impl EnvironmentManager {
                 RexActionType::SetenvIfEmpty { name, value } => {
                     Some((name.clone(), EnvOperation::SetIfEmpty(value.clone())))
                 }
-                RexActionType::Resetenv { name } => Some((name.clone(), EnvOperation::Reset)),
+                RexActionType::Resetenv { name } => Some((
+                    name.clone(),
+                    EnvOperation::Set(RESET_OPERATION_MARKER.to_string()),
+                )),
                 _ => None,
             };
             let Some((name, operation)) = definition else {
@@ -427,8 +439,19 @@ impl EnvironmentManager {
         let name = environment_key(&env_def.name);
         match &env_def.operation {
             EnvOperation::Set(value) => {
-                let value = self.expand_environment_value(value, env_vars);
-                env_vars.insert(name, value);
+                if value == RESET_OPERATION_MARKER {
+                    match self.parent_env.get(&name) {
+                        Some(value) => {
+                            env_vars.insert(name, value.clone());
+                        }
+                        None => {
+                            env_vars.remove(&name);
+                        }
+                    }
+                } else {
+                    let value = self.expand_environment_value(value, env_vars);
+                    env_vars.insert(name, value);
+                }
             }
             EnvOperation::Prepend(value, separator) => {
                 let value = self.expand_environment_value(value, env_vars);
@@ -459,14 +482,6 @@ impl EnvironmentManager {
                     env_vars.insert(name, value);
                 }
             }
-            EnvOperation::Reset => match self.parent_env.get(&name) {
-                Some(value) => {
-                    env_vars.insert(name, value.clone());
-                }
-                None => {
-                    env_vars.remove(&name);
-                }
-            },
         }
 
         Ok(())
@@ -505,10 +520,10 @@ impl EnvironmentManager {
         name: &str,
     ) -> String {
         environment.get(name).cloned().unwrap_or_else(|| {
-            let inherits_parent = self.config.all_parent_variables
+            let inherits_parent = self.config.all_parent_variables()
                 || self
                     .config
-                    .parent_variables
+                    .parent_variables()
                     .iter()
                     .any(|variable| environment_key(variable) == name);
             if inherits_parent {
@@ -590,9 +605,10 @@ impl EnvironmentManager {
             vars: env_vars.clone(),
             ..Default::default()
         };
+        let shell_type: rez_next_common::ShellType = self.config.shell_type.clone().into();
         Ok(rez_next_rex::generate_shell_script(
             &environment,
-            &self.config.shell_type,
+            &shell_type,
         ))
     }
 
@@ -695,6 +711,17 @@ pub fn normalize_environment_paths(env_vars: &mut HashMap<String, String>) {
                 (*entry).to_string()
             };
             seen.insert(identity)
+        })
+        .scan(0usize, |length, entry| {
+            let separator_length = usize::from(*length != 0) * separator.len();
+            let next_length = *length + separator_length + entry.len();
+            let limit = if cfg!(windows) { 8191 } else { usize::MAX };
+            if next_length > limit {
+                None
+            } else {
+                *length = next_length;
+                Some(entry)
+            }
         })
         .collect::<Vec<_>>();
     *path = entries.join(&separator);
@@ -827,6 +854,22 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_environment_paths_respects_cmd_length_limit() {
+        let mut environment = HashMap::from([("PATH".to_string(), {
+            let mut entries = vec!["C:\\package\\bin".to_string()];
+            entries.extend((0..512).map(|index| format!("C:\\long\\path\\entry-{index:04}")));
+            entries.join(";")
+        })]);
+
+        normalize_environment_paths(&mut environment);
+
+        let path = environment.get("PATH").unwrap();
+        assert!(path.len() <= 8191);
+        assert!(path.starts_with("C:\\package\\bin"));
+    }
+
     #[test]
     fn test_environment_manager_new_with_inherit() {
         let config = ContextConfig {
@@ -865,17 +908,14 @@ mod tests {
             "python"
         };
         std::fs::write(temp.path().join(tool), b"").unwrap();
-        let package = Package {
-            name: "python".to_string(),
-            tools: vec!["python".to_string()],
-            filepath: Some(
-                temp.path()
-                    .join("package.py")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            ..Default::default()
-        };
+        let mut package = Package::new("python".to_string());
+        package.tools = vec!["python".to_string()];
+        package.filepath = Some(
+            temp.path()
+                .join("package.py")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let manager = EnvironmentManager::new(ContextConfig {
             inherit_parent_env: false,
             ..Default::default()
@@ -899,14 +939,11 @@ mod tests {
             .map(|name| {
                 let root = temp.path().join(name);
                 std::fs::create_dir_all(&root).unwrap();
-                Package {
-                    name: name.to_string(),
-                    filepath: Some(root.join("package.py").to_string_lossy().into_owned()),
-                    commands: Some(
-                        "env.prepend_path('PYTHONPATH', '{this.root}/site-packages')".to_string(),
-                    ),
-                    ..Default::default()
-                }
+                let mut package = Package::new(name.to_string());
+                package.filepath = Some(root.join("package.py").to_string_lossy().into_owned());
+                package.commands =
+                    Some("env.prepend_path('PYTHONPATH', '{this.root}/site-packages')".to_string());
+                package
             })
             .collect();
         let manager = EnvironmentManager::new(ContextConfig {
@@ -927,32 +964,25 @@ mod tests {
     fn test_package_environment_uses_one_path_key_and_runs_pre_commands() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let temp = tempfile::TempDir::new().unwrap();
-        let first = Package {
-            name: "first".to_string(),
-            filepath: Some(
-                temp.path()
-                    .join("package.py")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            pre_commands: Some("unsetenv('PYTHONPATH')".to_string()),
-            commands: Some("env.prepend_path('PATH', '{this.root}/bin')".to_string()),
-            ..Default::default()
-        };
+        let mut first = Package::new("first".to_string());
+        first.filepath = Some(
+            temp.path()
+                .join("package.py")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        first.pre_commands = Some("unsetenv('PYTHONPATH')".to_string());
+        first.commands = Some("env.prepend_path('PATH', '{this.root}/bin')".to_string());
         let second_root = temp.path().join("second");
-        let second = Package {
-            name: "second".to_string(),
-            filepath: Some(
-                second_root
-                    .join("package.py")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            commands: Some(
-                "env.prepend_path('PYTHONPATH', '{this.root}/site-packages')".to_string(),
-            ),
-            ..Default::default()
-        };
+        let mut second = Package::new("second".to_string());
+        second.filepath = Some(
+            second_root
+                .join("package.py")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        second.commands =
+            Some("env.prepend_path('PYTHONPATH', '{this.root}/site-packages')".to_string());
         let manager = EnvironmentManager::new(ContextConfig {
             inherit_parent_env: true,
             ..Default::default()
@@ -982,18 +1012,15 @@ mod tests {
     fn test_explicit_base_environment_precedes_package_commands() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let temp = tempfile::TempDir::new().unwrap();
-        let package = Package {
-            name: "tool".to_string(),
-            filepath: Some(
-                temp.path()
-                    .join("package.py")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            commands: Some("env.prepend_path('PATH', '{root}/bin')".to_string()),
-            tools: vec!["tool".to_string()],
-            ..Default::default()
-        };
+        let mut package = Package::new("tool".to_string());
+        package.filepath = Some(
+            temp.path()
+                .join("package.py")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        package.commands = Some("env.prepend_path('PATH', '{root}/bin')".to_string());
+        package.tools = vec!["tool".to_string()];
         let separator = get_path_separator();
         let mut base =
             HashMap::from([("PATH".to_string(), format!("base-path{separator}base-path"))]);

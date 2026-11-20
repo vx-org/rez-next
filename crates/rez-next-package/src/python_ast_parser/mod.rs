@@ -440,7 +440,7 @@ impl PythonAstParser {
         package.cachable = data.cachable;
         package.commands = data.commands_function.clone();
         package.commands_function = data.commands_function;
-        package.extra_fields = data.extra_fields;
+        package.set_arbitrary_fields(data.extra_fields);
         package.base = data.base;
         package.hashed_variants = data.hashed_variants;
         package.has_plugins = data.has_plugins;
@@ -522,11 +522,11 @@ vx_targets = ["linux", "windows"]
 
         assert_eq!(
             package.arbitrary_value("vx_upstream_sha256"),
-            Some(&serde_json::json!("abc123"))
+            Some(serde_json::json!("abc123"))
         );
         assert_eq!(
             package.arbitrary_value("vx_build_options"),
-            Some(&serde_json::json!({"lto": true, "jobs": 8}))
+            Some(serde_json::json!({"lto": true, "jobs": 8}))
         );
         assert_eq!(
             package.arbitrary_keys(),

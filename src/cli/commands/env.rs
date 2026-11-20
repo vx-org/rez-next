@@ -5,11 +5,11 @@
 
 use clap::Args;
 use rez_next_common::{RezCoreError, SystemInfo, config::RezCoreConfig, error::RezCoreResult};
-use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext, ShellType};
+use rez_next_context::{ContextConfig, EnvironmentManager, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
 use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_rex::{RexEnvironment, generate_shell_script};
+use rez_next_rex::{RexEnvironment, ShellType, generate_shell_script};
 use rez_next_solver::{DependencyResolver, SolverConfig};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -213,13 +213,12 @@ fn resolve_environment(
 ) -> RezCoreResult<ResolvedContext> {
     // Rez environments extend the caller's process environment. Package
     // actions then prepend, append, set, or unset values on top of it.
-    let mut config = ContextConfig {
-        inherit_parent_env: true,
-        ..Default::default()
-    };
+    let mut config = ContextConfig::default();
+    config.inherit_parent_env = true;
 
     let rez_config = RezCoreConfig::load();
-    config.shell_type = resolve_shell_type(args.shell.as_deref(), &rez_config.default_shell)?;
+    config.shell_type =
+        resolve_shell_type(args.shell.as_deref(), &rez_config.default_shell)?.into();
 
     if args.build {
         config
@@ -228,8 +227,8 @@ fn resolve_environment(
     }
 
     // Setup repository manager from config or args
-    config.parent_variables = rez_config.parent_variables.clone();
-    config.all_parent_variables = rez_config.all_parent_variables;
+    config.set_parent_variables(rez_config.parent_variables.clone());
+    config.set_all_parent_variables(rez_config.all_parent_variables);
     let implicit_packages =
         configured_implicit_requirements(&rez_config, &SystemInfo::detect(), args.no_implicit)?;
 
@@ -277,22 +276,25 @@ fn resolve_environment(
         ..SolverConfig::default()
     };
     let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), solver_config);
-    let resolution = rt.block_on(resolver.resolve(resolver_reqs))?;
+    let resolution = rt.block_on(resolver.resolve_with_ephemerals(resolver_reqs))?;
 
     // Build context from resolution result
     let mut context = ResolvedContext::from_requirements(requirements.to_vec());
-    context.implicit_packages = implicit_packages;
+    context.set_implicit_packages(implicit_packages);
     context.config = config;
     context.resolved_packages = resolution
+        .result
         .resolved_packages
         .iter()
         .map(|package| package.try_materialized_package())
         .collect::<Result<Vec<_>, _>>()?;
-    context.resolved_ephemerals = resolution
-        .resolved_ephemerals
-        .iter()
-        .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
-        .collect();
+    context.set_resolved_ephemerals(
+        resolution
+            .resolved_ephemerals
+            .iter()
+            .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+            .collect(),
+    );
     context.status = rez_next_context::ContextStatus::Resolved;
 
     Ok(context)
@@ -411,7 +413,7 @@ fn context_environment(
         .vars
         .insert("REZ_USED_PACKAGES_NAMES".to_string(), resolved);
     let implicit_packages = context
-        .implicit_packages
+        .implicit_packages()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -422,7 +424,7 @@ fn context_environment(
             .insert("REZ_USED_IMPLICIT_PACKAGES".to_string(), implicit_packages);
     }
     let ephemeral_resolve = context
-        .resolved_ephemerals
+        .resolved_ephemerals()
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
@@ -909,13 +911,16 @@ mod tests {
     fn test_context_environment_exposes_resolve_metadata() {
         let requirements = parse_package_requirements(&["tool-1".to_string()]).unwrap();
         let mut context = ResolvedContext::from_requirements(requirements);
-        context.implicit_packages = parse_package_requirements(&[
-            "~platform==windows".to_string(),
-            "~arch==x86_64".to_string(),
-        ])
-        .unwrap();
-        context.resolved_ephemerals =
-            parse_package_requirements(&[".feature>=1".to_string()]).unwrap();
+        context.set_implicit_packages(
+            parse_package_requirements(&[
+                "~platform==windows".to_string(),
+                "~arch==x86_64".to_string(),
+            ])
+            .unwrap(),
+        );
+        context.set_resolved_ephemerals(
+            parse_package_requirements(&[".feature>=1".to_string()]).unwrap(),
+        );
         context.config.inherit_parent_env = false;
         let mut package = rez_next_package::Package::new("tool".to_string());
         package.version = Some(rez_next_version::Version::parse("1.2.0").unwrap());

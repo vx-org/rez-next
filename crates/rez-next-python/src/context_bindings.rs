@@ -4,6 +4,7 @@ use crate::package_bindings::{PyPackage, PyPackageRequirement};
 use crate::package_functions::expand_home;
 use crate::runtime::get_runtime;
 use crate::shell_utils::shell_type_from_str;
+use crate::solver_bindings::PySolverStatusMember;
 use crate::source_bindings::detect_current_shell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -11,7 +12,7 @@ use rez_next_context::{ContextStatus, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
 use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
 use rez_next_repository::simple_repository::RepositoryManager;
-use rez_next_solver::{DependencyResolver, SolverConfig};
+use rez_next_solver::{DependencyResolver, SolverConfig, SolverStatus};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -136,26 +137,33 @@ impl PyResolvedContext {
         let rt = get_runtime();
 
         let repo_arc = Arc::new(repo_manager);
-        let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), SolverConfig::default());
+        let mut solver_config = SolverConfig::default();
+        solver_config.strict_mode = true;
+        let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), solver_config);
         let resolution = rt
-            .block_on(resolver.resolve(resolver_reqs))
+            .block_on(resolver.resolve_with_ephemerals(resolver_reqs))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         let mut context = ResolvedContext::from_requirements(requirements);
-        context.implicit_packages = implicit_packages;
+        context.set_implicit_packages(implicit_packages);
         context.resolved_packages = resolution
+            .result
             .resolved_packages
             .into_iter()
             .map(|info| info.try_materialized_package())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?;
-        context.resolved_ephemerals = resolution
-            .resolved_ephemerals
-            .iter()
-            .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
-            .collect();
-        context.config.parent_variables = parent_variables;
-        context.config.all_parent_variables = all_parent_variables;
+        context.set_resolved_ephemerals(
+            resolution
+                .resolved_ephemerals
+                .iter()
+                .map(rez_next_solver::ResolvedEphemeral::as_package_requirement)
+                .collect(),
+        );
+        context.config.set_parent_variables(parent_variables);
+        context
+            .config
+            .set_all_parent_variables(all_parent_variables);
         let encoded_package_paths = std::env::join_paths(&pkg_paths)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
             .to_string_lossy()
@@ -194,6 +202,17 @@ impl PyResolvedContext {
     #[getter]
     fn success(&self) -> bool {
         self.inner.status == ContextStatus::Resolved
+    }
+
+    /// Return the Rez-compatible resolution status object.
+    #[getter]
+    fn status(&self) -> PySolverStatusMember {
+        let status = match self.inner.status {
+            ContextStatus::Resolving => SolverStatus::Pending,
+            ContextStatus::Resolved | ContextStatus::Cached => SolverStatus::Solved,
+            ContextStatus::Failed => SolverStatus::Failed,
+        };
+        PySolverStatusMember { inner: status }
     }
 
     /// List of resolved packages
@@ -277,7 +296,7 @@ impl PyResolvedContext {
             explicit
                 .chain(
                     self.inner
-                        .implicit_packages
+                        .implicit_packages()
                         .iter()
                         .cloned()
                         .map(PyPackageRequirement),
@@ -292,7 +311,7 @@ impl PyResolvedContext {
     #[getter]
     fn resolved_ephemerals(&self) -> Vec<PyPackageRequirement> {
         self.inner
-            .resolved_ephemerals
+            .resolved_ephemerals()
             .iter()
             .cloned()
             .map(PyPackageRequirement)

@@ -76,7 +76,7 @@ mod serialization_tests {
 
         let json = PackageSerializer::save_to_json(&package).unwrap();
         let restored = PackageSerializer::load_from_json(&json).unwrap();
-        assert_eq!(restored.extra_fields, package.extra_fields);
+        assert_eq!(restored.arbitrary_fields(), package.arbitrary_fields());
     }
 
     #[test]

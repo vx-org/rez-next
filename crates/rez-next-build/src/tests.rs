@@ -85,10 +85,11 @@ def commands():
         context.resolved_packages = vec![package];
         context.status = ContextStatus::Resolved;
 
-        let manager = EnvironmentManager::new(ContextConfig {
+        let context_config = ContextConfig {
             inherit_parent_env: false,
-            ..Default::default()
-        });
+            ..ContextConfig::default()
+        };
+        let manager = EnvironmentManager::new(context_config);
         context.environment_vars = manager
             .generate_environment(&context.resolved_packages)
             .await
@@ -583,8 +584,10 @@ except (OSError, subprocess.CalledProcessError) as error:
         )
         .unwrap();
 
-        let mut config = BuildConfig::default();
-        config.build_dir = tmp.path().join("build");
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
         let mut manager = BuildManager::with_config(config);
         let pkg = make_package("contextpkg", "1.0.0");
         let request = make_request_with_python_context(pkg, source_dir, &tmp).await;
@@ -621,8 +624,10 @@ if not os.environ.get("PATH"):
         )
         .unwrap();
 
-        let mut config = BuildConfig::default();
-        config.build_dir = tmp.path().join("build");
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
         let mut manager = BuildManager::with_config(config);
         let pkg = make_package("hostpathpkg", "1.0.0");
         let request = BuildRequest::new(pkg, None, source_dir);
@@ -779,8 +784,10 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
         let tmp = TempDir::new().unwrap();
         let source_dir = tmp.path().join("source");
         std::fs::create_dir_all(&source_dir).unwrap();
-        let mut config = BuildConfig::default();
-        config.build_dir = tmp.path().join("build");
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
         let mut manager = BuildManager::with_config(config);
         std::fs::write(
             source_dir.join("package.py"),
@@ -816,8 +823,10 @@ if os.environ.get("SELECTED_VARIANT") != "yes":
         let tmp = TempDir::new().unwrap();
         let source_dir = tmp.path().join("source");
         std::fs::create_dir_all(&source_dir).unwrap();
-        let mut config = BuildConfig::default();
-        config.build_dir = tmp.path().join("build");
+        let config = BuildConfig {
+            build_dir: tmp.path().join("build"),
+            ..BuildConfig::default()
+        };
         let mut manager = BuildManager::with_config(config);
         std::fs::write(
             source_dir.join("package.py"),

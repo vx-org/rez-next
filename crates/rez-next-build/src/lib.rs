@@ -31,9 +31,10 @@ pub use systems::*; // Re-export system types for backward compat
 pub use vcs::*;
 
 /// Build type enumeration (local or central build)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BuildType {
     /// Local build (installed to local packages path)
+    #[default]
     Local,
     /// Central build (installed to central release repository)
     Central,
@@ -73,12 +74,6 @@ impl BuildType {
     /// Create from string (returns Option for convenience)
     pub fn from_str_opt(s: &str) -> Option<Self> {
         s.parse::<BuildType>().ok()
-    }
-}
-
-impl Default for BuildType {
-    fn default() -> Self {
-        Self::Local
     }
 }
 

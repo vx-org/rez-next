@@ -164,7 +164,7 @@ pub fn dump_package_data<'py>(
     let json_module = PyModule::import(py, "json")?;
     for key in pkg.arbitrary_keys() {
         if let Some(value) = pkg.arbitrary_value(&key) {
-            let json = serde_json::to_string(value)
+            let json = serde_json::to_string(&value)
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
             dict.set_item(&key, json_module.getattr("loads")?.call1((json,))?)?;
         }

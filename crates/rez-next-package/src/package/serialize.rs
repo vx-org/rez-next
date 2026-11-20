@@ -52,7 +52,7 @@ impl Serialize for Package {
         state.serialize_field("hashed_variants", &self.hashed_variants)?;
         state.serialize_field("preprocess", &self.preprocess)?;
         state.serialize_field("is_dev_package", &self.is_dev_package)?;
-        state.serialize_field("extra_fields", &self.extra_fields)?;
+        state.serialize_field("extra_fields", &self.arbitrary_fields())?;
         state.end()
     }
 }
@@ -228,7 +228,7 @@ impl<'de> Deserialize<'de> for Package {
                 let is_dev_package = seq.next_element()?.unwrap_or(None);
                 let extra_fields = seq.next_element()?.unwrap_or_default();
 
-                Ok(Package {
+                let mut package = Package {
                     name,
                     version,
                     description,
@@ -267,10 +267,11 @@ impl<'de> Deserialize<'de> for Package {
                     hashed_variants,
                     preprocess,
                     is_dev_package,
-                    extra_fields,
                     filepath: None,
                     includes: None,
-                })
+                };
+                package.set_arbitrary_fields(extra_fields);
+                Ok(package)
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Package, V::Error>
@@ -543,7 +544,7 @@ impl<'de> Deserialize<'de> for Package {
                 }
 
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
-                Ok(Package {
+                let mut package = Package {
                     name,
                     version: version.unwrap_or(None),
                     description: description.unwrap_or(None),
@@ -582,10 +583,11 @@ impl<'de> Deserialize<'de> for Package {
                     hashed_variants: hashed_variants.unwrap_or(None),
                     preprocess: preprocess.unwrap_or(None),
                     is_dev_package: is_dev_package.unwrap_or(None),
-                    extra_fields: extra_fields.unwrap_or_default(),
                     filepath: None,
                     includes: None,
-                })
+                };
+                package.set_arbitrary_fields(extra_fields.unwrap_or_default());
+                Ok(package)
             }
         }
 

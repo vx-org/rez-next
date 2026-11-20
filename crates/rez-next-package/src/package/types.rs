@@ -463,12 +463,6 @@ pub struct Package {
     pub uuid: Option<String>,
     /// Package config
     pub config: HashMap<String, String>,
-    /// Arbitrary package attributes from package.py.
-    ///
-    /// Rez permits package definitions to carry metadata outside the standard
-    /// schema. JSON values preserve scalar, list, and mapping shapes across
-    /// Rust and Python APIs.
-    pub extra_fields: HashMap<String, serde_json::Value>,
     /// Package help
     pub help: Option<String>,
     /// Package relocatable flag

@@ -416,7 +416,7 @@ impl PackageSaver {
 
         for key in package.arbitrary_keys() {
             if let Some(value) = package.arbitrary_value(&key) {
-                content.push_str(&format!("{} = {}\n", key, json_value_to_python(value)));
+                content.push_str(&format!("{} = {}\n", key, json_value_to_python(&value)));
             }
         }
 

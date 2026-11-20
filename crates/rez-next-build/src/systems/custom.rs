@@ -154,7 +154,7 @@ impl CustomBuildSystem {
                 errors: String::new(),
                 duration_ms: 0,
             }),
-            _script_name => Ok(BuildStepResult {
+            _script_name if request.install_path.is_some() => Ok(BuildStepResult {
                 step: BuildStep::Installing,
                 success: true,
                 output: format!(
@@ -164,6 +164,10 @@ impl CustomBuildSystem {
                 errors: String::new(),
                 duration_ms: 0,
             }),
+            _ => {
+                self.execute_build_script(request, environment, "install")
+                    .await
+            }
         }
     }
 

@@ -5,18 +5,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn package_with_python_path(root: &str) -> Package {
-    Package {
-        name: "python_tools".to_string(),
-        version: Some(Version::parse("1.0.0").expect("valid test version")),
-        filepath: Some(
-            PathBuf::from(root)
-                .join("package.py")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        commands: Some("env.prepend_path('PYTHONPATH', '{root}/python')".to_string()),
-        ..Default::default()
-    }
+    let mut package = Package::new("python_tools".to_string());
+    package.version = Some(Version::parse("1.0.0").expect("valid test version"));
+    package.filepath = Some(
+        PathBuf::from(root)
+            .join("package.py")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    package.commands = Some("env.prepend_path('PYTHONPATH', '{root}/python')".to_string());
+    package
+}
+
+fn no_modify_config(inherit_parent_env: bool) -> ContextConfig {
+    let mut config = ContextConfig::default();
+    config.inherit_parent_env = inherit_parent_env;
+    config.path_strategy = PathStrategy::NoModify;
+    config
 }
 
 #[test]
@@ -31,15 +36,9 @@ fn selected_parent_variable_is_inherited_without_leaking_unselected_variables() 
     );
     parent_environment.insert("VX_INTERNAL_MARKER".to_string(), "do-not-leak".to_string());
 
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            parent_variables: vec!["PYTHONPATH".to_string()],
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        parent_environment,
-    );
+    let mut config = no_modify_config(false);
+    config.set_parent_variables(vec!["PYTHONPATH".to_string()]);
+    let manager = EnvironmentManager::with_parent_environment(config, parent_environment);
 
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
@@ -69,15 +68,9 @@ fn all_parent_variables_inherits_only_variables_touched_by_rex_actions() {
     );
     parent_environment.insert("UNTOUCHED_PARENT".to_string(), "private".to_string());
 
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            all_parent_variables: true,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        parent_environment,
-    );
+    let mut config = no_modify_config(false);
+    config.set_all_parent_variables(true);
+    let manager = EnvironmentManager::with_parent_environment(config, parent_environment);
 
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
@@ -99,14 +92,8 @@ fn set_if_empty_treats_a_parent_variable_as_already_defined() {
     let mut parent_environment = HashMap::new();
     parent_environment.insert("LICENSE_SERVER".to_string(), "parent-license".to_string());
 
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        parent_environment,
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), parent_environment);
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
         .block_on(manager.generate_environment(&[package]))
@@ -124,14 +111,8 @@ fn resetenv_restores_the_original_parent_value() {
     let mut parent_environment = HashMap::new();
     parent_environment.insert("LICENSE_SERVER".to_string(), "parent-license".to_string());
 
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        parent_environment,
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), parent_environment);
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
         .block_on(manager.generate_environment(&[package]))
@@ -150,14 +131,8 @@ fn rex_values_expand_variables_from_the_parent_environment() {
     let mut parent_environment = HashMap::new();
     parent_environment.insert("HOME".to_string(), "/parent/home".to_string());
 
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        parent_environment,
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), parent_environment);
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
         .block_on(manager.generate_environment(&[package]))
@@ -175,14 +150,8 @@ fn package_metadata_includes_official_rez_prefixed_variables() {
     let mut package = package_with_python_path(&package_root.to_string_lossy());
     package.name = "python.tools".to_string();
     package.version = Some(Version::parse("3-11-4").expect("valid test version"));
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), HashMap::new());
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
         .block_on(manager.generate_environment(&[package]))
@@ -229,14 +198,8 @@ fn package_metadata_includes_empty_version_components_for_unversioned_packages()
     let mut package = package_with_python_path(&package_root.to_string_lossy());
     package.name = "unversioned_tool".to_string();
     package.version = None;
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), HashMap::new());
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let environment = runtime
         .block_on(manager.generate_environment(&[package]))
@@ -274,14 +237,8 @@ def commands():
     )
     .expect("resolve membership should be deferred until context generation");
     let embedded = Package::new("python_embedded".to_string());
-    let manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), HashMap::new());
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
 
     let standalone_environment = runtime
@@ -303,15 +260,11 @@ def commands():
     );
     assert!(!embedded_environment.contains_key("PYTHON_BUILD_MODE"));
 
-    let build_manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            additional_env_vars: HashMap::from([("REZ_BUILD_ENV".to_string(), "1".to_string())]),
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let mut build_config = no_modify_config(false);
+    build_config
+        .additional_env_vars
+        .insert("REZ_BUILD_ENV".to_string(), "1".to_string());
+    let build_manager = EnvironmentManager::with_parent_environment(build_config, HashMap::new());
     let build_environment = runtime
         .block_on(
             build_manager.generate_environment(&[PythonAstParser::parse_package_py(
@@ -351,28 +304,18 @@ def commands():
     )
     .expect("build-only commands should be deferred at package load time");
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
-    let runtime_manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let runtime_manager =
+        EnvironmentManager::with_parent_environment(no_modify_config(false), HashMap::new());
     let environment = runtime
         .block_on(runtime_manager.generate_environment(std::slice::from_ref(&package)))
         .expect("runtime environment generation succeeds");
     assert!(!environment.contains_key("DISCOVERED_VALUE"));
 
-    let build_manager = EnvironmentManager::with_parent_environment(
-        ContextConfig {
-            inherit_parent_env: false,
-            additional_env_vars: HashMap::from([("REZ_BUILD_ENV".to_string(), "1".to_string())]),
-            path_strategy: PathStrategy::NoModify,
-            ..Default::default()
-        },
-        HashMap::new(),
-    );
+    let mut build_config = no_modify_config(false);
+    build_config
+        .additional_env_vars
+        .insert("REZ_BUILD_ENV".to_string(), "1".to_string());
+    let build_manager = EnvironmentManager::with_parent_environment(build_config, HashMap::new());
     let error = runtime
         .block_on(build_manager.generate_environment(&[package]))
         .expect_err("unsupported dynamic build commands must fail when activated");
@@ -403,7 +346,7 @@ def commands():
         .block_on(context.get_environ(Some(HashMap::new())))
         .expect("ordinary runtime contexts should skip the dynamic block");
 
-    context.resolved_ephemerals = vec![PackageRequirement::parse(".feature_build").unwrap()];
+    context.set_resolved_ephemerals(vec![PackageRequirement::parse(".feature_build").unwrap()]);
     let error = runtime
         .block_on(context.get_environ(Some(HashMap::new())))
         .expect_err("the resolved ephemeral should activate the guarded block");

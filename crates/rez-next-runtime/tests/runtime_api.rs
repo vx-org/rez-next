@@ -686,6 +686,6 @@ fn runtime_resolves_ephemeral_requests_without_repository_packages() {
         .expect("ephemeral request resolves without a package");
 
     assert!(resolved.context().resolved_packages.is_empty());
-    assert_eq!(resolved.context().resolved_ephemerals.len(), 1);
-    assert_eq!(resolved.context().resolved_ephemerals[0].name, ".feature");
+    assert_eq!(resolved.context().resolved_ephemerals().len(), 1);
+    assert_eq!(resolved.context().resolved_ephemerals()[0].name, ".feature");
 }

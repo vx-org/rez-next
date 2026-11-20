@@ -403,22 +403,25 @@ impl RezRuntime {
         }
         let resolution =
             DependencyResolver::new(Arc::new(repositories), self.solver_config.clone())
-                .resolve(solver_requirements)
+                .resolve_with_ephemerals(solver_requirements)
                 .await
                 .map_err(RezRuntimeError::Resolve)?;
 
         let mut context = ResolvedContext::from_requirements(package_requirements);
         context.config = self.context_config.clone();
         context.resolved_packages = resolution
+            .result
             .resolved_packages
             .iter()
             .map(|package| package.try_materialized_package())
             .collect::<Result<Vec<_>, _>>()
             .map_err(RezRuntimeError::Resolve)?;
-        context.resolved_ephemerals = resolved_ephemerals
-            .iter()
-            .map(ResolvedEphemeral::as_package_requirement)
-            .collect();
+        context.set_resolved_ephemerals(
+            resolved_ephemerals
+                .iter()
+                .map(ResolvedEphemeral::as_package_requirement)
+                .collect(),
+        );
         context.status = ContextStatus::Resolved;
         if let Some(target) = &self.target {
             for (family, expected) in [

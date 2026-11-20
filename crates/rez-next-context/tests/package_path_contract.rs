@@ -19,22 +19,16 @@ fn package_with_tools(root: &Path) -> Package {
         b"tool metadata must not add this path",
     )
     .unwrap();
-    Package {
-        name: "runtime".to_string(),
-        tools: vec!["runtime".to_string()],
-        filepath: Some(root.join("package.py").to_string_lossy().into_owned()),
-        ..Default::default()
-    }
+    let mut package = Package::new("runtime".to_string());
+    package.tools = vec!["runtime".to_string()];
+    package.filepath = Some(root.join("package.py").to_string_lossy().into_owned());
+    package
 }
 
 fn manager(strategy: PathStrategy, parent: HashMap<String, String>) -> EnvironmentManager {
-    EnvironmentManager::with_base_environment(
-        ContextConfig {
-            path_strategy: strategy,
-            ..Default::default()
-        },
-        parent,
-    )
+    let mut config = ContextConfig::default();
+    config.path_strategy = strategy;
+    EnvironmentManager::with_base_environment(config, parent)
 }
 
 fn paths(environment: &HashMap<String, String>) -> Vec<PathBuf> {

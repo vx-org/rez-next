@@ -429,7 +429,8 @@ impl BuildEnvironment {
             vars: self.env_vars.clone(),
             ..Default::default()
         };
-        rez_next_rex::generate_shell_script(&environment, shell_type)
+        let shell_type: rez_next_common::ShellType = shell_type.clone().into();
+        rez_next_rex::generate_shell_script(&environment, &shell_type)
     }
 
     /// Normalize build path to handle various path formats

@@ -1200,6 +1200,16 @@ class Config:
     def __getattr__(self, key):
         schema_cls = self.schema.get(key)
         if schema_cls is not None:
+            if key == "memcached_uri":
+                configured = self._data.get(key)
+                if isinstance(configured, list):
+                    result = list(configured)
+                elif isinstance(configured, str):
+                    result = [configured]
+                else:
+                    result = list(self._module_defaults().get(key, []))
+                object.__setattr__(self, key, result)
+                return result
             validator = schema_cls(self, key)
             try:
                 result = validator.validate(self._data.get(key))

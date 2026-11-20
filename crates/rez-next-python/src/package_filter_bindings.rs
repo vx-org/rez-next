@@ -119,13 +119,11 @@ fn dict_to_package(pkg_dict: &Bound<'_, PyDict>) -> PyResult<Package> {
         None
     };
 
-    Ok(Package {
-        name,
-        version,
-        description,
-        timestamp,
-        ..Default::default()
-    })
+    let mut package = Package::new(name);
+    package.version = version;
+    package.description = description;
+    package.timestamp = timestamp;
+    Ok(package)
 }
 
 /// Register the module

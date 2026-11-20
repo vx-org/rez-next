@@ -180,7 +180,7 @@ impl BinaryArchiveBuildSystem {
         let parsed_url = validate_download_url(url, env.get(ALLOW_HTTP_ENV))?;
         let filename = parsed_url
             .path_segments()
-            .and_then(|segments| segments.last())
+            .and_then(|mut segments| segments.next_back())
             .filter(|name| !name.is_empty() && *name != "." && *name != "..")
             .and_then(|name| Path::new(name).file_name())
             .and_then(|name| name.to_str())

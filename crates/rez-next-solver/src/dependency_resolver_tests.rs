@@ -171,7 +171,6 @@ mod tests {
     fn test_resolution_result_structure() {
         let result = DetailedResolutionResult {
             resolved_packages: vec![],
-            resolved_ephemerals: vec![],
             failed_requirements: vec![],
             conflicts: vec![],
             stats: ResolutionStats::default(),

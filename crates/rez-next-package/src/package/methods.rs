@@ -30,7 +30,6 @@ impl Package {
             requires_rez_version: None,
             uuid: None,
             config: HashMap::new(),
-            extra_fields: HashMap::new(),
             help: None,
             relocatable: None,
             cachable: None,
@@ -87,20 +86,38 @@ impl Package {
     /// Return arbitrary package attribute names in stable order.
     #[must_use]
     pub fn arbitrary_keys(&self) -> Vec<String> {
-        let mut keys = self.extra_fields.keys().cloned().collect::<Vec<_>>();
+        let mut keys = self.arbitrary_fields().into_keys().collect::<Vec<_>>();
         keys.sort();
         keys
     }
 
+    /// Return all arbitrary package attributes.
+    #[must_use]
+    pub fn arbitrary_fields(&self) -> HashMap<String, serde_json::Value> {
+        self.config
+            .get(ARBITRARY_FIELDS_CONFIG_KEY)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default()
+    }
+
     /// Return one arbitrary package attribute, if present.
     #[must_use]
-    pub fn arbitrary_value(&self, key: &str) -> Option<&serde_json::Value> {
-        self.extra_fields.get(key)
+    pub fn arbitrary_value(&self, key: &str) -> Option<serde_json::Value> {
+        self.arbitrary_fields().remove(key)
     }
 
     /// Store an arbitrary package attribute.
     pub fn set_arbitrary_value(&mut self, key: String, value: serde_json::Value) {
-        self.extra_fields.insert(key, value);
+        let mut fields = self.arbitrary_fields();
+        fields.insert(key, value);
+        self.set_arbitrary_fields(fields);
+    }
+
+    /// Store all arbitrary package attributes.
+    pub fn set_arbitrary_fields(&mut self, fields: HashMap<String, serde_json::Value>) {
+        let encoded = serde_json::to_string(&fields).unwrap_or_else(|_| "{}".to_string());
+        self.config
+            .insert(ARBITRARY_FIELDS_CONFIG_KEY.to_string(), encoded);
     }
 
     /// Set the package version
@@ -398,11 +415,11 @@ impl Package {
         }
 
         for key in self.arbitrary_keys() {
-            if let Some(value) = self.extra_fields.get(&key) {
+            if let Some(value) = self.arbitrary_value(&key) {
                 lines.push(format!(
                     "{} = {}",
                     key,
-                    super::types::json_value_to_python(value)
+                    super::types::json_value_to_python(&value)
                 ));
             }
         }
@@ -459,6 +476,8 @@ impl Package {
         lines.join("\n")
     }
 }
+
+const ARBITRARY_FIELDS_CONFIG_KEY: &str = "__rez_next_arbitrary_fields";
 
 #[cfg(test)]
 mod tests {

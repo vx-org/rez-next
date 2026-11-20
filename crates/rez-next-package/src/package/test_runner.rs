@@ -8,7 +8,8 @@
 //! See the Python bindings (`rez_next._native.test`) for usage examples.
 
 use crate::serialization::PackageSerializer;
-use crate::types::{Package, TestCommand, TestVariantFilter, shell_command};
+pub use crate::types::TestCommand;
+use crate::types::{Package, TestVariantFilter, shell_command};
 use rez_next_common::{RezCoreResult, error::RezCoreError};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

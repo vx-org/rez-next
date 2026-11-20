@@ -353,10 +353,9 @@ impl PackageTestRunner {
                     apply_pre_test_commands(&mut test_package);
                     packages.push(test_package);
                 }
-                let manager = EnvironmentManager::new(ContextConfig {
-                    inherit_parent_env: true,
-                    ..ContextConfig::default()
-                });
+                let mut context_config = ContextConfig::default();
+                context_config.inherit_parent_env = true;
+                let manager = EnvironmentManager::new(context_config);
                 runtime
                     .block_on(manager.generate_environment(&packages))
                     .map_err(Into::into)

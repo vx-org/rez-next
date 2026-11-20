@@ -232,14 +232,10 @@ fn resolve_test_environment(
         packages.push(test_package);
     }
 
+    let mut context_config = ContextConfig::default();
+    context_config.inherit_parent_env = true;
     get_runtime()
-        .block_on(
-            EnvironmentManager::new(ContextConfig {
-                inherit_parent_env: true,
-                ..ContextConfig::default()
-            })
-            .generate_environment(&packages),
-        )
+        .block_on(EnvironmentManager::new(context_config).generate_environment(&packages))
         .map_err(|error| error.to_string())
 }
 
