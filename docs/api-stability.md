@@ -3,7 +3,7 @@
 This document defines which parts of rez-next are covered by SemVer, and how that
 promise is enforced in CI.
 
-rez-next is pre-1.0 and every crate currently sits at `0.3.6`. Under the
+rez-next is pre-1.0 and every crate currently sits at `0.3.13`. Under the
 [0.x SemVer rules](https://doc.rust-lang.org/cargo/reference/semver.html), a
 breaking change requires a **minor** bump (`0.3.x` -> `0.4.0`) and an additive
 change requires a **patch** bump.

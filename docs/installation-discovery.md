@@ -29,7 +29,7 @@ Example:
 
 ```json
 {
-  "rez_next_version": "0.3.6",
+  "rez_next_version": "0.3.13",
   "rez_legacy_path": null,
   "rez_legacy_available": false,
   "packages_path": ["D:\\packages", "D:\\shared-packages"],

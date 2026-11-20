@@ -10,7 +10,7 @@ New integrations can use the smaller standalone crate directly:
 
 ```toml
 [dependencies]
-rez-next-runtime = "0.3.9"
+rez-next-runtime = "0.3.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -53,7 +53,7 @@ Malformed higher-priority definitions produce an error rather than falling
 back to another format. Repository-root descriptors and deeper layouts are not
 package locations. All formats share the same core solver.
 Python uses `PackageSerializer`; YAML uses the public core `Package`
-deserializer and validation because the legacy 0.3.9 YAML serializer omits Rex
+deserializer and validation because the legacy YAML serializer omits Rex
 commands. YAML `commands` is a string containing the same Rex operations used by
 Python package definitions.
 Relative repository paths become absolute at construction so a child's working
@@ -77,7 +77,7 @@ folded to avoid separate `Path` and `PATH` entries.
 `with_context_config(ContextConfig)` exposes the existing core configuration,
 including additional variables, unsets and PATH strategy. Supplying an explicit
 parent continues to take precedence over ambient inheritance regardless of
-builder call order. Selective parent-variable inheritance is outside the 0.3.9
+builder call order. Selective parent-variable inheritance is outside the current
 core API.
 
 `command(program)` returns `std::process::Command` with the ambient environment
@@ -119,7 +119,7 @@ failures remain available as error sources. A missing transitive dependency or
 unsatisfied version produces `Resolve`; no partial environment is returned.
 `with_solver_config` changes preferences while retaining `strict_mode = true`.
 
-The facade supports the package and solver behavior shipped by the 0.3.9 core
+The facade supports the package and solver behavior shipped by the 0.3.13 core
 crates. Ephemeral resolution and selective parent-variable policy are not part
 of this initial embedding API. No parallel dependency solver is introduced.
 
@@ -127,7 +127,7 @@ The public types and methods in `rez_next_runtime` are the supported embedding
 surface. Patch releases do not intentionally break it. Before 1.0, a required
 breaking change belongs in a minor release with migration guidance.
 
-The exposed context retains its 0.3.9 core behavior: its low-level `validate()`
+The exposed context retains its current core behavior: its low-level `validate()`
 does not understand weak/conflict requests, and formatting its
 `PackageRequirement` values does not round-trip operator syntax. Resolution
 validates the original request strings through the strict solver. Preserve
