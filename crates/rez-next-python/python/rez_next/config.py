@@ -194,10 +194,13 @@ class Setting:
         try:
             data = self._validate(data)
             data = self.schema.validate(data)
-            data = expand_system_vars(data)
+            data = self._expand_value(data)
         except _SchemaError as e:
             raise ConfigurationError(f"Misconfigured setting {self.key!r}: {str(e)}")
         return data
+
+    def _expand_value(self, data):
+        return expand_system_vars(data)
 
     def _validate(self, data):
         if self.key in self.config.overrides:
@@ -247,6 +250,12 @@ class StrList(Setting):
     schema = _Schema(list, lambda x: all(isinstance(i, str) for i in x))
     sep = ","
 
+    def _expand_value(self, data):
+        # A leading ``~`` is a Rez weak-request marker for settings such as
+        # ``implicit_packages``. Expanding it as a Windows user home turns
+        # ``~platform==windows`` into ``C:\\Users\\platform==windows``.
+        return expand_environment_vars(data)
+
     def _parse_env_var(self, v):
         return [x for x in v.replace(self.sep, " ").split() if x]
 
@@ -259,6 +268,9 @@ class OptionalStrList(StrList):
 
 class PathList(StrList):
     sep = os.pathsep
+
+    def _expand_value(self, data):
+        return expand_system_vars(data)
 
     def _parse_env_var(self, v):
         return [x for x in v.split(self.sep) if x]
@@ -1498,6 +1510,16 @@ def expand_system_vars(data):
         return [expand_system_vars(x) for x in data]
     elif isinstance(data, dict):
         return {k: expand_system_vars(v) for k, v in data.items()}
+    return data
+
+
+def expand_environment_vars(data):
+    if isinstance(data, str):
+        return os.path.expandvars(data)
+    elif isinstance(data, (list, tuple, set)):
+        return [expand_environment_vars(x) for x in data]
+    elif isinstance(data, dict):
+        return {k: expand_environment_vars(v) for k, v in data.items()}
     return data
 
 

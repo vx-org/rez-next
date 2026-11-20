@@ -137,6 +137,21 @@ def test_configured_package_paths_expand_home(monkeypatch, tmp_path):
     assert config.packages_path == [f"{tmp_path}/packages"]
 
 
+def test_implicit_package_requests_preserve_weak_marker():
+    config = Config(
+        [],
+        overrides={
+            "implicit_packages": ["~platform==windows", "~arch==x86_64", "~os==windows"]
+        },
+    )
+
+    assert config.implicit_packages == [
+        "~platform==windows",
+        "~arch==x86_64",
+        "~os==windows",
+    ]
+
+
 def test_top_level_and_module_share_config_singleton():
     import sys
 
