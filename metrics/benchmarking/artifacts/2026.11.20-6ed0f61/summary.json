@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-11-20 15:58 UTC",
+  "commit": "6ed0f61",
+  "platform": "Linux-7.0.0-1020-azure",
+  "cpu": "AMD EPYC 7763 64-Core Processor",
+  "regressions": [],
+  "bench_count": 222
+}
