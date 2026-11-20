@@ -83,8 +83,10 @@ fn test_env_generation_uses_actual_unpacked_repo_root() {
     let packages = rt.block_on(simple_repo.find_packages("python")).unwrap();
     assert_eq!(packages.len(), 1);
 
-    let mut context_config = ContextConfig::default();
-    context_config.inherit_parent_env = false;
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
     let env_manager = EnvironmentManager::new(context_config);
     let package_values: Vec<Package> = packages.iter().map(|p| (**p).clone()).collect();
     let env_vars = rt

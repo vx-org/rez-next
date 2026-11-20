@@ -177,8 +177,10 @@ async fn vx_build_context(temp_dir: &TempDir) -> ResolvedContext {
     context.resolved_packages = vec![python, rez_builder];
     context.status = ContextStatus::Resolved;
 
-    let mut context_config = ContextConfig::default();
-    context_config.inherit_parent_env = false;
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
     let manager = EnvironmentManager::new(context_config);
     context.environment_vars = manager
         .generate_environment(&context.resolved_packages)
@@ -197,8 +199,10 @@ async fn python_build_context(temp_dir: &TempDir) -> ResolvedContext {
     context.resolved_packages = vec![python];
     context.status = ContextStatus::Resolved;
 
-    let mut context_config = ContextConfig::default();
-    context_config.inherit_parent_env = false;
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
     let manager = EnvironmentManager::new(context_config);
     context.environment_vars = manager
         .generate_environment(&context.resolved_packages)
@@ -292,8 +296,10 @@ fn parses_real_open_source_rez_package_fixture() {
 fn real_open_source_rez_package_uses_actual_root_in_environment() {
     let source = aces_container_source();
     let package = Package::from_path(&source).unwrap();
-    let mut context_config = ContextConfig::default();
-    context_config.inherit_parent_env = false;
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
     let manager = EnvironmentManager::new(context_config);
 
     let env = tokio::runtime::Runtime::new()

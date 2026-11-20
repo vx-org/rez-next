@@ -18,10 +18,11 @@ fn package_with_python_path(root: &str) -> Package {
 }
 
 fn no_modify_config(inherit_parent_env: bool) -> ContextConfig {
-    let mut config = ContextConfig::default();
-    config.inherit_parent_env = inherit_parent_env;
-    config.path_strategy = PathStrategy::NoModify;
-    config
+    ContextConfig {
+        inherit_parent_env,
+        path_strategy: PathStrategy::NoModify,
+        ..ContextConfig::default()
+    }
 }
 
 #[test]
@@ -45,13 +46,10 @@ fn selected_parent_variable_is_inherited_without_leaking_unselected_variables() 
         .block_on(manager.generate_environment(&[package]))
         .expect("environment generation succeeds");
 
-    let expected = std::env::join_paths([
-        PathBuf::from(format!("{}/python", package_root.to_string_lossy())),
-        parent_python_path,
-    ])
-    .expect("test paths can be joined")
-    .to_string_lossy()
-    .into_owned();
+    let expected = std::env::join_paths([package_root.join("python"), parent_python_path])
+        .expect("test paths can be joined")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(environment.get("PYTHONPATH"), Some(&expected));
     assert!(!environment.contains_key("VX_INTERNAL_MARKER"));
 }
