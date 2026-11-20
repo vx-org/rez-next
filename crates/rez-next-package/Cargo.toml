@@ -43,7 +43,7 @@ name = "rez_next_package"
 crate-type = ["rlib"]
 
 [dev-dependencies]
-rstest = "0.27"
+rstest = "0.28"
 
 [lints]
 workspace = true
