@@ -25,7 +25,7 @@ pub struct PyRezStatus {
     /// Packages that are currently resolved (name-version strings)
     #[pyo3(get)]
     pub resolved_packages: Vec<String>,
-    /// The shell being used (bash, zsh, fish, powershell, cmd, …)
+    /// The shell being used (bash, zsh, fish, powershell, pwsh, cmd, …)
     #[pyo3(get)]
     pub current_shell: Option<String>,
     /// Rez version that created the context
