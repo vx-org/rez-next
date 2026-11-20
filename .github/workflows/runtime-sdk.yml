@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-14]
+        os: [ubuntu-22.04, windows-2022, macos-15]
     steps:
       - uses: actions/checkout@v7
       - uses: vx-org/vx@6948178844826716e636b474ab322dd8dc115578

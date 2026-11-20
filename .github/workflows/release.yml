@@ -79,11 +79,11 @@ jobs:
             use-cross: true
           # macOS x86_64
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15-intel
             archive: tar.gz
           # macOS aarch64 (Apple Silicon)
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             archive: tar.gz
           # Windows x86_64
           - target: x86_64-pc-windows-msvc
@@ -207,7 +207,7 @@ jobs:
           - name: windows
             os: windows-2022
           - name: macos
-            os: macos-14
+            os: macos-15
 
     steps:
       - uses: actions/checkout@v7
@@ -259,14 +259,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-14]
+        os: [ubuntu-22.04, windows-2022, macos-15]
         python-version: ["3.9", "3.10", "3.11", "3.12"]
         include:
           - os: ubuntu-22.04
             name: linux
           - os: windows-2022
             name: windows
-          - os: macos-14
+          - os: macos-15
             name: macos
 
     steps:
