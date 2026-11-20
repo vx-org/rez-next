@@ -1,4 +1,1792 @@
 {
   "schema_version": 1,
-  "runs": []
+  "runs": [
+    {
+      "schema_version": 1,
+      "timestamp": "2026-11-20T11:39:25.202274+00:00",
+      "commit": "e7ab5d9",
+      "platform": "Linux-7.0.0-1020-azure",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "python": "3.14.10",
+      "regressions": [],
+      "benchmarks": {
+        "cache/batch_insert/10": {
+          "mean_ns": 11021.0,
+          "low_ns": 10938.0,
+          "high_ns": 11121.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/batch_insert/100": {
+          "mean_ns": 160690.0,
+          "low_ns": 159370.0,
+          "high_ns": 162930.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/batch_insert/1000": {
+          "mean_ns": 6576600.0,
+          "low_ns": 6519100.0,
+          "high_ns": 6661300.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/batch_insert/500": {
+          "mean_ns": 1922700.0,
+          "low_ns": 1909400.0,
+          "high_ns": 1941400.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/batch_insert/5000": {
+          "mean_ns": 141740000.0,
+          "low_ns": 140870000.0,
+          "high_ns": 142780000.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/contains_key": {
+          "mean_ns": 183.32,
+          "low_ns": 181.26,
+          "high_ns": 186.99,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/eviction_cost/cap/10": {
+          "mean_ns": 54633.0,
+          "low_ns": 54057.0,
+          "high_ns": 55322.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/eviction_cost/cap/200": {
+          "mean_ns": 2003299.9999999998,
+          "low_ns": 1990000.0,
+          "high_ns": 2020099.9999999998,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/eviction_cost/cap/50": {
+          "mean_ns": 299980.0,
+          "low_ns": 298870.0,
+          "high_ns": 300910.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/get_cold_miss": {
+          "mean_ns": 736.8,
+          "low_ns": 726.78,
+          "high_ns": 746.55,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/get_warm": {
+          "mean_ns": 4123.8,
+          "low_ns": 4047.3999999999996,
+          "high_ns": 4195.400000000001,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/hot_path_pkg_lookup": {
+          "mean_ns": 32134.0,
+          "low_ns": 30677.0,
+          "high_ns": 33398.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "cache/put_single": {
+          "mean_ns": 362710.0,
+          "low_ns": 361090.0,
+          "high_ns": 364410.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_creation/n_pkgs/1": {
+          "mean_ns": 71510.0,
+          "low_ns": 70738.0,
+          "high_ns": 72530.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_creation/n_pkgs/10": {
+          "mean_ns": 731710.0,
+          "low_ns": 726770.0,
+          "high_ns": 737940.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_creation/n_pkgs/20": {
+          "mean_ns": 1448900.0,
+          "low_ns": 1438300.0,
+          "high_ns": 1463200.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_creation/n_pkgs/5": {
+          "mean_ns": 362730.0,
+          "low_ns": 359360.0,
+          "high_ns": 367350.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_creation/n_pkgs/50": {
+          "mean_ns": 3742100.0,
+          "low_ns": 3700200.0,
+          "high_ns": 3795900.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_env_injection/n_vars/10": {
+          "mean_ns": 362080.0,
+          "low_ns": 360710.0,
+          "high_ns": 363610.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_env_injection/n_vars/100": {
+          "mean_ns": 3661700.0,
+          "low_ns": 3653300.0,
+          "high_ns": 3670500.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_env_injection/n_vars/20": {
+          "mean_ns": 721270.0,
+          "low_ns": 716610.0,
+          "high_ns": 727040.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_env_injection/n_vars/40": {
+          "mean_ns": 1450400.0,
+          "low_ns": 1445500.0,
+          "high_ns": 1455300.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_get_summary/n_pkgs/10": {
+          "mean_ns": 569.84,
+          "low_ns": 565.4,
+          "high_ns": 575.75,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_get_summary/n_pkgs/20": {
+          "mean_ns": 1603.2,
+          "low_ns": 1581.9,
+          "high_ns": 1627.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_get_summary/n_pkgs/5": {
+          "mean_ns": 172.71,
+          "low_ns": 171.87,
+          "high_ns": 173.57,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_deserialize/n_pkgs/10": {
+          "mean_ns": 19516.0,
+          "low_ns": 19207.0,
+          "high_ns": 19988.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_deserialize/n_pkgs/20": {
+          "mean_ns": 38859.0,
+          "low_ns": 38653.0,
+          "high_ns": 39125.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_deserialize/n_pkgs/5": {
+          "mean_ns": 10021.0,
+          "low_ns": 9885.199999999999,
+          "high_ns": 10181.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_roundtrip/n_pkgs/10": {
+          "mean_ns": 26743.0,
+          "low_ns": 26525.0,
+          "high_ns": 27086.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_roundtrip/n_pkgs/20": {
+          "mean_ns": 52821.0,
+          "low_ns": 52486.0,
+          "high_ns": 53334.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_roundtrip/n_pkgs/5": {
+          "mean_ns": 13830.0,
+          "low_ns": 13714.0,
+          "high_ns": 13998.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_serialize/n_pkgs/10": {
+          "mean_ns": 6806.5,
+          "low_ns": 6735.599999999999,
+          "high_ns": 6901.4,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_serialize/n_pkgs/20": {
+          "mean_ns": 13137.0,
+          "low_ns": 12996.0,
+          "high_ns": 13310.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "context_json_serialize/n_pkgs/5": {
+          "mean_ns": 3732.2999999999997,
+          "low_ns": 3701.0,
+          "high_ns": 3776.2,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_build_index/100": {
+          "mean_ns": 1601.0,
+          "low_ns": 1593.5,
+          "high_ns": 1609.1,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_build_index/2000": {
+          "mean_ns": 26921.0,
+          "low_ns": 26725.0,
+          "high_ns": 27164.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_build_index/500": {
+          "mean_ns": 6819.4,
+          "low_ns": 6745.0,
+          "high_ns": 6929.599999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_multi_target_1000_pkgs": {
+          "mean_ns": 5812.2,
+          "low_ns": 5741.5,
+          "high_ns": 5915.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_package_construction/10": {
+          "mean_ns": 784.52,
+          "low_ns": 780.35,
+          "high_ns": 788.89,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_package_construction/100": {
+          "mean_ns": 10481.0,
+          "low_ns": 10432.0,
+          "high_ns": 10531.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_package_construction/50": {
+          "mean_ns": 5041.2,
+          "low_ns": 5018.4,
+          "high_ns": 5063.799999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_package_construction/500": {
+          "mean_ns": 53303.0,
+          "low_ns": 53090.0,
+          "high_ns": 53535.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_requirement_string_match_batch": {
+          "mean_ns": 2.8339,
+          "low_ns": 2.8145,
+          "high_ns": 2.8538,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_reverse_scan/1000": {
+          "mean_ns": 1084.3,
+          "low_ns": 1079.9,
+          "high_ns": 1088.7,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_reverse_scan/200": {
+          "mean_ns": 191.74,
+          "low_ns": 188.55,
+          "high_ns": 196.07,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_reverse_scan/50": {
+          "mean_ns": 45.287,
+          "low_ns": 45.09,
+          "high_ns": 45.518,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_reverse_scan/500": {
+          "mean_ns": 482.57,
+          "low_ns": 475.8,
+          "high_ns": 491.59,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "depends_reverse_scan/5000": {
+          "mean_ns": 9759.6,
+          "low_ns": 9712.1,
+          "high_ns": 9810.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_cloning/complex_clone": {
+          "mean_ns": 305.63,
+          "low_ns": 303.9,
+          "high_ns": 307.11,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_cloning/large_clone": {
+          "mean_ns": 11871.0,
+          "low_ns": 11849.0,
+          "high_ns": 11899.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_cloning/simple_clone": {
+          "mean_ns": 101.03,
+          "low_ns": 98.488,
+          "high_ns": 104.93,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_creation/complex_package": {
+          "mean_ns": 347.57,
+          "low_ns": 345.7,
+          "high_ns": 349.82,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_creation/package_with_version": {
+          "mean_ns": 306.33,
+          "low_ns": 302.45,
+          "high_ns": 312.6,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_creation/simple_package": {
+          "mean_ns": 29.44,
+          "low_ns": 29.196,
+          "high_ns": 29.614,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/complex_json": {
+          "mean_ns": 1887.7,
+          "low_ns": 1872.0,
+          "high_ns": 1902.1999999999998,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/complex_python": {
+          "mean_ns": 30442.0,
+          "low_ns": 30226.0,
+          "high_ns": 30646.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/complex_yaml": {
+          "mean_ns": 27999.0,
+          "low_ns": 27848.0,
+          "high_ns": 28146.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/large_json": {
+          "mean_ns": 17979.0,
+          "low_ns": 17910.0,
+          "high_ns": 18060.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/large_python": {
+          "mean_ns": 393630.0,
+          "low_ns": 386020.0,
+          "high_ns": 409110.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/large_yaml": {
+          "mean_ns": 158270.0,
+          "low_ns": 154250.0,
+          "high_ns": 165320.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/simple_json": {
+          "mean_ns": 1363.6,
+          "low_ns": 1330.5,
+          "high_ns": 1422.1999999999998,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/simple_python": {
+          "mean_ns": 5966.5,
+          "low_ns": 5933.6,
+          "high_ns": 6003.599999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_deserialization/simple_yaml": {
+          "mean_ns": 22628.0,
+          "low_ns": 22340.0,
+          "high_ns": 23137.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_cloning/complex_clone": {
+          "mean_ns": 375.58,
+          "low_ns": 359.45,
+          "high_ns": 398.05,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_cloning/large_clone": {
+          "mean_ns": 11663.0,
+          "low_ns": 11569.0,
+          "high_ns": 11780.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_cloning/simple_clone": {
+          "mean_ns": 109.54,
+          "low_ns": 106.14,
+          "high_ns": 114.93,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_creation/complex_package": {
+          "mean_ns": 347.73,
+          "low_ns": 343.85,
+          "high_ns": 350.69,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_creation/package_with_version": {
+          "mean_ns": 304.48,
+          "low_ns": 300.94,
+          "high_ns": 307.41,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_creation/simple_package": {
+          "mean_ns": 29.641,
+          "low_ns": 29.477,
+          "high_ns": 29.788,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/complex_json": {
+          "mean_ns": 1944.0,
+          "low_ns": 1901.8,
+          "high_ns": 2013.6,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/complex_python": {
+          "mean_ns": 31302.0,
+          "low_ns": 31067.0,
+          "high_ns": 31459.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/complex_yaml": {
+          "mean_ns": 28447.0,
+          "low_ns": 27770.0,
+          "high_ns": 29678.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/large_json": {
+          "mean_ns": 18563.0,
+          "low_ns": 18465.0,
+          "high_ns": 18677.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/large_python": {
+          "mean_ns": 397890.0,
+          "low_ns": 385660.0,
+          "high_ns": 411640.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/large_yaml": {
+          "mean_ns": 153400.0,
+          "low_ns": 152280.0,
+          "high_ns": 154800.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/simple_json": {
+          "mean_ns": 1375.3999999999999,
+          "low_ns": 1295.3,
+          "high_ns": 1469.7,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/simple_python": {
+          "mean_ns": 5956.400000000001,
+          "low_ns": 5925.0,
+          "high_ns": 5986.3,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_deserialization/simple_yaml": {
+          "mean_ns": 21813.0,
+          "low_ns": 21710.0,
+          "high_ns": 21924.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_build_requirements/1": {
+          "mean_ns": 78.075,
+          "low_ns": 77.448,
+          "high_ns": 78.817,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_build_requirements/10": {
+          "mean_ns": 491.31,
+          "low_ns": 489.84,
+          "high_ns": 492.94,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_build_requirements/100": {
+          "mean_ns": 5784.799999999999,
+          "low_ns": 5738.400000000001,
+          "high_ns": 5828.400000000001,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_build_requirements/50": {
+          "mean_ns": 2810.2999999999997,
+          "low_ns": 2790.0,
+          "high_ns": 2831.5,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_requirements/1": {
+          "mean_ns": 72.651,
+          "low_ns": 71.865,
+          "high_ns": 73.532,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_requirements/10": {
+          "mean_ns": 447.36,
+          "low_ns": 445.18,
+          "high_ns": 449.62,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_requirements/100": {
+          "mean_ns": 5545.099999999999,
+          "low_ns": 5502.4,
+          "high_ns": 5606.099999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_requirements/50": {
+          "mean_ns": 2636.2000000000003,
+          "low_ns": 2585.9,
+          "high_ns": 2750.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_requirements/add_requirements/500": {
+          "mean_ns": 29146.0,
+          "low_ns": 29069.0,
+          "high_ns": 29226.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/complex_json": {
+          "mean_ns": 729.37,
+          "low_ns": 726.3,
+          "high_ns": 732.68,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/complex_python": {
+          "mean_ns": 682.86,
+          "low_ns": 680.06,
+          "high_ns": 685.24,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/complex_yaml": {
+          "mean_ns": 9334.5,
+          "low_ns": 9160.1,
+          "high_ns": 9512.800000000001,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/large_json": {
+          "mean_ns": 4642.1,
+          "low_ns": 4601.4,
+          "high_ns": 4705.9,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/large_python": {
+          "mean_ns": 10484.0,
+          "low_ns": 10333.0,
+          "high_ns": 10794.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/large_yaml": {
+          "mean_ns": 56005.0,
+          "low_ns": 54607.0,
+          "high_ns": 58715.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/simple_json": {
+          "mean_ns": 498.43,
+          "low_ns": 494.5,
+          "high_ns": 502.47,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/simple_python": {
+          "mean_ns": 240.1,
+          "low_ns": 239.26,
+          "high_ns": 240.86,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_serialization/simple_yaml": {
+          "mean_ns": 7101.0,
+          "low_ns": 7058.900000000001,
+          "high_ns": 7151.3,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_validation/complex_valid": {
+          "mean_ns": 13.358,
+          "low_ns": 13.263,
+          "high_ns": 13.471,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_validation/invalid_package": {
+          "mean_ns": 5.2534,
+          "low_ns": 5.2102,
+          "high_ns": 5.2967,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_validation/large_valid": {
+          "mean_ns": 88.089,
+          "low_ns": 87.103,
+          "high_ns": 89.299,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_validation/simple_valid": {
+          "mean_ns": 10.911,
+          "low_ns": 10.765,
+          "high_ns": 11.088,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/access_variants": {
+          "mean_ns": 0.24277,
+          "low_ns": 0.23815,
+          "high_ns": 0.24928999999999998,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/add_variants/1": {
+          "mean_ns": 79.934,
+          "low_ns": 79.177,
+          "high_ns": 80.997,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/add_variants/10": {
+          "mean_ns": 714.06,
+          "low_ns": 703.49,
+          "high_ns": 730.24,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/add_variants/25": {
+          "mean_ns": 1698.1,
+          "low_ns": 1677.4,
+          "high_ns": 1714.9,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/add_variants/5": {
+          "mean_ns": 257.84,
+          "low_ns": 254.45,
+          "high_ns": 262.75,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_full_variants/add_variants/50": {
+          "mean_ns": 4840.900000000001,
+          "low_ns": 4706.5,
+          "high_ns": 5089.299999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_build_requirements/1": {
+          "mean_ns": 75.277,
+          "low_ns": 73.7,
+          "high_ns": 77.591,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_build_requirements/10": {
+          "mean_ns": 441.45,
+          "low_ns": 433.19,
+          "high_ns": 455.27,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_build_requirements/100": {
+          "mean_ns": 5647.1,
+          "low_ns": 5605.400000000001,
+          "high_ns": 5690.299999999999,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_build_requirements/50": {
+          "mean_ns": 2727.1,
+          "low_ns": 2680.5,
+          "high_ns": 2821.6,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_requirements/1": {
+          "mean_ns": 73.424,
+          "low_ns": 73.225,
+          "high_ns": 73.685,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_requirements/10": {
+          "mean_ns": 439.73,
+          "low_ns": 438.47,
+          "high_ns": 441.34,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_requirements/100": {
+          "mean_ns": 5395.8,
+          "low_ns": 5382.4,
+          "high_ns": 5412.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_requirements/50": {
+          "mean_ns": 2553.0,
+          "low_ns": 2543.1,
+          "high_ns": 2565.1000000000004,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_requirements/add_requirements/500": {
+          "mean_ns": 29567.0,
+          "low_ns": 29121.0,
+          "high_ns": 30116.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/complex_json": {
+          "mean_ns": 776.27,
+          "low_ns": 766.06,
+          "high_ns": 796.78,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/complex_python": {
+          "mean_ns": 762.97,
+          "low_ns": 748.27,
+          "high_ns": 787.03,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/complex_yaml": {
+          "mean_ns": 9405.4,
+          "low_ns": 9218.6,
+          "high_ns": 9728.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/large_json": {
+          "mean_ns": 5783.400000000001,
+          "low_ns": 5655.400000000001,
+          "high_ns": 6043.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/large_python": {
+          "mean_ns": 11400.0,
+          "low_ns": 11354.0,
+          "high_ns": 11448.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/large_yaml": {
+          "mean_ns": 53355.0,
+          "low_ns": 53169.0,
+          "high_ns": 53513.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/simple_json": {
+          "mean_ns": 614.7,
+          "low_ns": 612.57,
+          "high_ns": 616.55,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/simple_python": {
+          "mean_ns": 252.61,
+          "low_ns": 251.37,
+          "high_ns": 253.69,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_serialization/simple_yaml": {
+          "mean_ns": 6956.7,
+          "low_ns": 6891.3,
+          "high_ns": 7045.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_validation/complex_valid": {
+          "mean_ns": 15.351,
+          "low_ns": 15.288,
+          "high_ns": 15.435,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_validation/invalid_package": {
+          "mean_ns": 5.1273,
+          "low_ns": 5.1018,
+          "high_ns": 5.167,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_validation/large_valid": {
+          "mean_ns": 101.67,
+          "low_ns": 98.513,
+          "high_ns": 105.98,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_validation/simple_valid": {
+          "mean_ns": 11.482,
+          "low_ns": 11.383,
+          "high_ns": 11.582,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/access_variants": {
+          "mean_ns": 0.26521,
+          "low_ns": 0.25576,
+          "high_ns": 0.28267000000000003,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/add_variants/1": {
+          "mean_ns": 85.926,
+          "low_ns": 84.836,
+          "high_ns": 86.713,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/add_variants/10": {
+          "mean_ns": 749.99,
+          "low_ns": 742.14,
+          "high_ns": 760.55,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/add_variants/25": {
+          "mean_ns": 1774.1,
+          "low_ns": 1755.0,
+          "high_ns": 1791.3,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/add_variants/5": {
+          "mean_ns": 270.58,
+          "low_ns": 266.88,
+          "high_ns": 275.86,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "package_variants/add_variants/50": {
+          "mean_ns": 4621.5,
+          "low_ns": 4603.4,
+          "high_ns": 4640.4,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_bulk_metadata_conversion_20_pkgs": {
+          "mean_ns": 10112.0,
+          "low_ns": 10021.0,
+          "high_ns": 10237.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_bulk_metadata_scale/100": {
+          "mean_ns": 55880.0,
+          "low_ns": 55708.0,
+          "high_ns": 56125.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_bulk_metadata_scale/1000": {
+          "mean_ns": 557020.0,
+          "low_ns": 555030.0,
+          "high_ns": 558860.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_bulk_metadata_scale/20": {
+          "mean_ns": 10508.0,
+          "low_ns": 10301.0,
+          "high_ns": 10773.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_bulk_metadata_scale/500": {
+          "mean_ns": 282690.0,
+          "low_ns": 280680.0,
+          "high_ns": 285360.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_converted_req_parse_15_pkgs": {
+          "mean_ns": 1092700.0,
+          "low_ns": 1084200.0,
+          "high_ns": 1104300.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_converted_req_parse_scale/10": {
+          "mean_ns": 730840.0,
+          "low_ns": 728180.0,
+          "high_ns": 733620.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_converted_req_parse_scale/100": {
+          "mean_ns": 7447900.0,
+          "low_ns": 7328500.0,
+          "high_ns": 7598300.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_converted_req_parse_scale/50": {
+          "mean_ns": 3689100.0,
+          "low_ns": 3655400.0,
+          "high_ns": 3737400.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_converted_req_parse_scale/500": {
+          "mean_ns": 36771000.0,
+          "low_ns": 36646000.0,
+          "high_ns": 36893000.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_name_normalization_20_pkgs": {
+          "mean_ns": 251.7,
+          "low_ns": 248.43,
+          "high_ns": 256.93,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_name_normalization_scale/10": {
+          "mean_ns": 188.25,
+          "low_ns": 185.98,
+          "high_ns": 191.29,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_name_normalization_scale/100": {
+          "mean_ns": 1873.6,
+          "low_ns": 1852.1000000000001,
+          "high_ns": 1902.5,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_name_normalization_scale/1000": {
+          "mean_ns": 10219.0,
+          "low_ns": 10046.0,
+          "high_ns": 10430.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_version_conversion_10_specs": {
+          "mean_ns": 212.43,
+          "low_ns": 209.98,
+          "high_ns": 216.36,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "pip_version_satisfaction_5_pkgs": {
+          "mean_ns": 65.012,
+          "low_ns": 63.997,
+          "high_ns": 66.294,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "repo_scan/scan_maya": {
+          "mean_ns": 143.41,
+          "low_ns": 143.13,
+          "high_ns": 143.65,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "repo_scan/scan_python": {
+          "mean_ns": 165.98,
+          "low_ns": 162.96,
+          "high_ns": 170.88,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/houdini-20.0.547": {
+          "mean_ns": 72955.0,
+          "low_ns": 72774.0,
+          "high_ns": 73186.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/maya-2024": {
+          "mean_ns": 73711.0,
+          "low_ns": 73330.0,
+          "high_ns": 74306.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/numpy-1.20+": {
+          "mean_ns": 73255.0,
+          "low_ns": 73088.0,
+          "high_ns": 73394.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python": {
+          "mean_ns": 75244.0,
+          "low_ns": 72721.0,
+          "high_ns": 79242.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python-3": {
+          "mean_ns": 74073.0,
+          "low_ns": 73574.0,
+          "high_ns": 74814.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python-3.9": {
+          "mean_ns": 73220.0,
+          "low_ns": 73013.0,
+          "high_ns": 73401.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python-3.9+": {
+          "mean_ns": 74473.0,
+          "low_ns": 73487.0,
+          "high_ns": 76598.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python-3.9+<3.12": {
+          "mean_ns": 72699.0,
+          "low_ns": 72399.0,
+          "high_ns": 72962.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/python-3.9+<4": {
+          "mean_ns": 73253.0,
+          "low_ns": 72988.0,
+          "high_ns": 73480.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/rez-3.0.0": {
+          "mean_ns": 73709.0,
+          "low_ns": 73260.0,
+          "high_ns": 74505.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/rez>=3.0": {
+          "mean_ns": 75914.0,
+          "low_ns": 73838.0,
+          "high_ns": 79528.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse/scipy-1.9+<2": {
+          "mean_ns": 75392.0,
+          "low_ns": 73487.0,
+          "high_ns": 78404.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "requirement_parsing/parse_all_formats": {
+          "mean_ns": 887240.0,
+          "low_ns": 882440.0,
+          "high_ns": 894320.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_empty_requirements": {
+          "mean_ns": 275.55,
+          "low_ns": 272.19,
+          "high_ns": 279.53,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_large_repo/medium_repo_linear_chain": {
+          "mean_ns": 1802200.0,
+          "low_ns": 1794700.0,
+          "high_ns": 1814600.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_large_repo/small_repo_linear_chain": {
+          "mean_ns": 784850.0,
+          "low_ns": 781040.0,
+          "high_ns": 791020.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_multi_requirements/n_reqs/10": {
+          "mean_ns": 5305.7,
+          "low_ns": 5227.2,
+          "high_ns": 5421.1,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_multi_requirements/n_reqs/2": {
+          "mean_ns": 1040.7,
+          "low_ns": 1035.7,
+          "high_ns": 1045.6000000000001,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_multi_requirements/n_reqs/5": {
+          "mean_ns": 2697.2999999999997,
+          "low_ns": 2666.9,
+          "high_ns": 2734.1000000000004,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_dcc/resolve/houdini": {
+          "mean_ns": 156280.0,
+          "low_ns": 155750.0,
+          "high_ns": 157020.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_dcc/resolve/maya": {
+          "mean_ns": 331420.0,
+          "low_ns": 321190.0,
+          "high_ns": 345340.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_dcc/resolve/numpy": {
+          "mean_ns": 151820.0,
+          "low_ns": 150880.0,
+          "high_ns": 152680.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_dcc/resolve/python": {
+          "mean_ns": 75721.0,
+          "low_ns": 73996.0,
+          "high_ns": 78565.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_dcc/resolve/scipy": {
+          "mean_ns": 318700.0,
+          "low_ns": 314830.0,
+          "high_ns": 323770.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_requirement/req/houdini>=19.5": {
+          "mean_ns": 75860.0,
+          "low_ns": 75092.0,
+          "high_ns": 76814.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_requirement/req/maya-2024": {
+          "mean_ns": 75603.0,
+          "low_ns": 74524.0,
+          "high_ns": 76857.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_requirement/req/python": {
+          "mean_ns": 73726.0,
+          "low_ns": 73381.0,
+          "high_ns": 74067.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_single_requirement/req/python-3.9": {
+          "mean_ns": 75528.0,
+          "low_ns": 74758.0,
+          "high_ns": 76525.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_transitive_dcc/scenario/dcc_suite": {
+          "mean_ns": 656120.0,
+          "low_ns": 640540.0,
+          "high_ns": 681240.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_transitive_dcc/scenario/maya_full": {
+          "mean_ns": 318820.0,
+          "low_ns": 317630.0,
+          "high_ns": 320240.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_transitive_dcc/scenario/pipeline": {
+          "mean_ns": 559580.0,
+          "low_ns": 558070.0,
+          "high_ns": 561110.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolve_transitive_dcc/scenario/python_only": {
+          "mean_ns": 75727.0,
+          "low_ns": 73789.0,
+          "high_ns": 78826.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "resolver_create_default": {
+          "mean_ns": 21.803,
+          "low_ns": 21.729,
+          "high_ns": 21.884,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_commands_block/execute/houdini": {
+          "mean_ns": 18904.0,
+          "low_ns": 18799.0,
+          "high_ns": 19003.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_commands_block/execute/large_pkg": {
+          "mean_ns": 27939.0,
+          "low_ns": 27837.0,
+          "high_ns": 28092.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_commands_block/execute/maya": {
+          "mean_ns": 12181.0,
+          "low_ns": 12100.0,
+          "high_ns": 12322.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_commands_block/execute/python": {
+          "mean_ns": 10097.0,
+          "low_ns": 10037.0,
+          "high_ns": 10153.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_multi_package/n_packages/10": {
+          "mean_ns": 68324.0,
+          "low_ns": 67191.0,
+          "high_ns": 70325.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_multi_package/n_packages/2": {
+          "mean_ns": 11496.0,
+          "low_ns": 11203.0,
+          "high_ns": 11934.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_multi_package/n_packages/20": {
+          "mean_ns": 171830.0,
+          "low_ns": 170930.0,
+          "high_ns": 172550.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_execute_multi_package/n_packages/5": {
+          "mean_ns": 30434.0,
+          "low_ns": 29484.0,
+          "high_ns": 31814.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parse_commands_block/parse/houdini": {
+          "mean_ns": 2886.8,
+          "low_ns": 2864.9,
+          "high_ns": 2926.4,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parse_commands_block/parse/large_pkg": {
+          "mean_ns": 4301.400000000001,
+          "low_ns": 4101.0,
+          "high_ns": 4550.8,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parse_commands_block/parse/maya": {
+          "mean_ns": 1563.7,
+          "low_ns": 1551.7,
+          "high_ns": 1579.1,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parse_commands_block/parse/python": {
+          "mean_ns": 1314.1000000000001,
+          "low_ns": 1309.3,
+          "high_ns": 1319.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parse_simple_setenv": {
+          "mean_ns": 141.21,
+          "low_ns": 140.93,
+          "high_ns": 141.56,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parser_cached_access": {
+          "mean_ns": 0.24681999999999998,
+          "low_ns": 0.23851,
+          "high_ns": 0.25842000000000004,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "rex_parser_construction": {
+          "mean_ns": 582140.0,
+          "low_ns": 576450.0,
+          "high_ns": 591040.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_config_variants/config/default": {
+          "mean_ns": 276.57,
+          "low_ns": 273.19,
+          "high_ns": 281.24,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_config_variants/config/latest_false": {
+          "mean_ns": 268.84,
+          "low_ns": 266.9,
+          "high_ns": 271.11,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_config_variants/config/no_cache": {
+          "mean_ns": 274.03,
+          "low_ns": 272.93,
+          "high_ns": 275.24,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_config_variants/config/parallel_4": {
+          "mean_ns": 272.31,
+          "low_ns": 269.67,
+          "high_ns": 275.36,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_heuristics/composite_default": {
+          "mean_ns": 1181.6,
+          "low_ns": 1169.7,
+          "high_ns": 1191.4,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_heuristics/composite_fast": {
+          "mean_ns": 1206.1,
+          "low_ns": 1194.1999999999998,
+          "high_ns": 1223.2,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_heuristics/composite_thorough": {
+          "mean_ns": 1199.3,
+          "low_ns": 1182.0,
+          "high_ns": 1212.6999999999998,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_heuristics/factory_complex": {
+          "mean_ns": 1162.0,
+          "low_ns": 1148.8,
+          "high_ns": 1176.9,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "solver_heuristics/factory_conflict_heavy": {
+          "mean_ns": 1194.9,
+          "low_ns": 1149.0,
+          "high_ns": 1272.7,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_comparison": {
+          "mean_ns": 9.8624,
+          "low_ns": 9.5334,
+          "high_ns": 10.263,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_constraint/GreaterThanOrEqual_deep": {
+          "mean_ns": 55.429,
+          "low_ns": 54.795,
+          "high_ns": 56.384,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_constraint/GreaterThanOrEqual_shallow": {
+          "mean_ns": 43.365,
+          "low_ns": 42.138,
+          "high_ns": 45.485,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_constraint/LessThan_shallow": {
+          "mean_ns": 42.102,
+          "low_ns": 41.912,
+          "high_ns": 42.244,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_constraint/Multiple_ge_lt": {
+          "mean_ns": 86.333,
+          "low_ns": 85.501,
+          "high_ns": 87.171,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_constraint/Prefix": {
+          "mean_ns": 8.8072,
+          "low_ns": 8.701,
+          "high_ns": 8.9162,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_creation_scale/10": {
+          "mean_ns": 2755.3999999999996,
+          "low_ns": 2711.8,
+          "high_ns": 2837.2000000000003,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_creation_scale/100": {
+          "mean_ns": 32299.0,
+          "low_ns": 32209.000000000004,
+          "high_ns": 32393.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_creation_scale/1000": {
+          "mean_ns": 279380.0,
+          "low_ns": 276850.0,
+          "high_ns": 282360.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_parsing": {
+          "mean_ns": 277.72,
+          "low_ns": 275.36,
+          "high_ns": 281.27,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_sorting/10": {
+          "mean_ns": 1618.5,
+          "low_ns": 1604.5,
+          "high_ns": 1632.3000000000002,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_sorting/100": {
+          "mean_ns": 23507.0,
+          "low_ns": 23414.0,
+          "high_ns": 23601.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        },
+        "version_sorting/1000": {
+          "mean_ns": 248000.0,
+          "low_ns": 244870.0,
+          "high_ns": 251230.0,
+          "change_pct": null,
+          "regression": false,
+          "improved": false
+        }
+      }
+    }
+  ]
 }
