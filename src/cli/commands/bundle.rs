@@ -338,7 +338,6 @@ fn get_search_paths(args: &BundleArgs, config: &RezCoreConfig) -> RezCoreResult<
         config.packages_path.clone()
     };
     rez_next_repository::package_repository::spec::resolve_filesystem_paths(entries)
-        .map_err(Into::into)
 }
 
 /// Find a package directory in search paths

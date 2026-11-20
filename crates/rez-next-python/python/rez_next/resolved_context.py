@@ -352,6 +352,11 @@ def _context_graph(self, as_dot=False):
     return self.get_dependency_graph(as_dot=as_dot)
 
 
+def _context_has_graph(self):
+    """Whether the context contains resolved package graph data."""
+    return bool(getattr(self, "resolved_packages", []) or [])
+
+
 def _context_failed(self):
     """Whether the context failed to resolve."""
     return not self.success
@@ -531,6 +536,7 @@ def _apply_patches():
         "which": _context_which,
         "get_dependency_graph": _context_get_dependency_graph,
         "graph": _context_graph,
+        "has_graph": property(_context_has_graph),
         "failed": property(_context_failed),
         "requirements": property(_context_requirements),
         "is_current": _context_is_current,

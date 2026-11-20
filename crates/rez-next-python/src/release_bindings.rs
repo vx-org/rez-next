@@ -545,7 +545,7 @@ impl ReleaseVCS for PythonReleaseVCS {
     }
 
     fn export(&self, revision: &VCSRevision, path: &Path) -> Result<(), RezCoreError> {
-        let value = Python::attach(|py| {
+        Python::attach(|py| {
             let revision = Py::new(py, PyVCSRevision::from(revision.clone()))
                 .map_err(|error| python_vcs_error("export", error))?;
             self.inner
@@ -553,8 +553,7 @@ impl ReleaseVCS for PythonReleaseVCS {
                 .call_method1("export", (revision, path.to_string_lossy().as_ref()))
                 .map(|_| ())
                 .map_err(|error| python_vcs_error("export", error))
-        });
-        value
+        })
     }
 }
 

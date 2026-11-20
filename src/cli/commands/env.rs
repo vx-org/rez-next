@@ -213,8 +213,10 @@ fn resolve_environment(
 ) -> RezCoreResult<ResolvedContext> {
     // Rez environments extend the caller's process environment. Package
     // actions then prepend, append, set, or unset values on top of it.
-    let mut config = ContextConfig::default();
-    config.inherit_parent_env = true;
+    let mut config = ContextConfig {
+        inherit_parent_env: true,
+        ..ContextConfig::default()
+    };
 
     let rez_config = RezCoreConfig::load();
     config.shell_type =

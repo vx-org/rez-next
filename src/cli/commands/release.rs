@@ -206,11 +206,10 @@ mod tests {
     #[test]
     fn test_release_rejects_vcs_backends_without_tag_implementation() {
         assert!(ensure_supported_vcs("git").is_ok());
-        for vcs in ["unknown"] {
-            let error = ensure_supported_vcs(vcs)
-                .expect_err("an unsupported VCS must not report a successful release");
-            assert!(error.to_string().contains(vcs), "{error}");
-        }
+        let vcs = "unknown";
+        let error = ensure_supported_vcs(vcs)
+            .expect_err("an unsupported VCS must not report a successful release");
+        assert!(error.to_string().contains(vcs), "{error}");
         assert!(ensure_supported_vcs("hg").is_ok());
         assert!(ensure_supported_vcs("svn").is_ok());
     }

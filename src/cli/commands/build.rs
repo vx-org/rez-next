@@ -485,8 +485,10 @@ pub(super) fn resolve_build_context(
         .collect::<Result<Vec<_>, _>>()?;
     context.status = rez_next_context::ContextStatus::Resolved;
 
-    let mut context_config = ContextConfig::default();
-    context_config.inherit_parent_env = false;
+    let context_config = ContextConfig {
+        inherit_parent_env: false,
+        ..ContextConfig::default()
+    };
     let env_manager = EnvironmentManager::new(context_config);
     context.environment_vars =
         rt.block_on(env_manager.generate_environment(&context.resolved_packages))?;

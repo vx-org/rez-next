@@ -125,10 +125,10 @@ async fn add_default_repositories(repo_manager: &mut RepositoryManager) -> RezCo
     let config = RezCoreConfig::load();
     *repo_manager =
         RepositoryManager::from_package_paths(config.packages_path.iter().map(|path| {
-            if path.starts_with("~/") || path == "~" {
-                if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-                    return path.replacen("~", &home, 1);
-                }
+            if (path.starts_with("~/") || path == "~")
+                && let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+            {
+                return path.replacen("~", &home, 1);
             }
             path.clone()
         }))?;

@@ -168,7 +168,7 @@ fn source_paths(options: &PackageTransferOptions) -> RezCoreResult<Vec<PathBuf>>
         let config = rez_next_common::config::RezCoreConfig::load();
         config.packages_path.clone()
     };
-    resolve_filesystem_paths(entries).map_err(Into::into)
+    resolve_filesystem_paths(entries)
 }
 
 fn resolve_source_spec(

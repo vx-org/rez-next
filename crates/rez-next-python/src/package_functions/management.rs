@@ -210,6 +210,7 @@ fn parse_overrides(
 
 /// Copy a package through the filesystem repository installation contract.
 #[pyfunction]
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (pkg_name, dest_path, version=None, src_paths=None, force=false, variants=None, shallow=false, dest_name=None, dest_version=None, follow_symlinks=false, dry_run=false, keep_timestamp=false, skip_payload=false, overrides_json=None))]
 pub fn copy_package_with_options(
     pkg_name: &str,

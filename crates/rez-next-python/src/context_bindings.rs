@@ -137,8 +137,10 @@ impl PyResolvedContext {
         let rt = get_runtime();
 
         let repo_arc = Arc::new(repo_manager);
-        let mut solver_config = SolverConfig::default();
-        solver_config.strict_mode = true;
+        let solver_config = SolverConfig {
+            strict_mode: true,
+            ..SolverConfig::default()
+        };
         let mut resolver = DependencyResolver::new(Arc::clone(&repo_arc), solver_config);
         let resolution = rt
             .block_on(resolver.resolve_with_ephemerals(resolver_reqs))
