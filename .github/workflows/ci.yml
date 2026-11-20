@@ -361,7 +361,7 @@ jobs:
 
   python-binding-tests:
     name: Python Binding Tests (maturin + pytest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Do not cancel the other matrix legs when one fails; each version's
       # result should stand on its own so a single failure is not hidden behind

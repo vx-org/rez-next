@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import rez_next._native  # noqa: F401
 from rez_next._native.vendor.version import *  # noqa: F401,F403
+from rez_next._native import PackageRequirement as Requirement  # noqa: F401
 
 
 class ParseException(ValueError):

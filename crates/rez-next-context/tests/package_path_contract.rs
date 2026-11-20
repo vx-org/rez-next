@@ -26,8 +26,10 @@ fn package_with_tools(root: &Path) -> Package {
 }
 
 fn manager(strategy: PathStrategy, parent: HashMap<String, String>) -> EnvironmentManager {
-    let mut config = ContextConfig::default();
-    config.path_strategy = strategy;
+    let config = ContextConfig {
+        path_strategy: strategy,
+        ..ContextConfig::default()
+    };
     EnvironmentManager::with_base_environment(config, parent)
 }
 
