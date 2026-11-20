@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-11-20 14:10 UTC",
+  "commit": "86885b9",
+  "platform": "Linux-7.0.0-1019-azure",
+  "cpu": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+  "regressions": [],
+  "bench_count": 222
+}
