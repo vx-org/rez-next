@@ -8,6 +8,7 @@ use crate::solver_bindings::PySolverStatusMember;
 use crate::source_bindings::detect_current_shell;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use rez_next_common::windows_process_environment;
 use rez_next_context::{ContextStatus, ResolvedContext};
 use rez_next_package::{PackageRequirement, Requirement};
 use rez_next_repository::package_repository::spec::resolve_filesystem_paths;
@@ -361,6 +362,16 @@ impl PyResolvedContext {
         }
         for (name, value) in generated_environment {
             process_environment.set_item(name, value)?;
+        }
+
+        let mut process_environment_names = std::collections::HashSet::new();
+        for name in process_environment.keys() {
+            process_environment_names.insert(name.extract::<String>()?.to_ascii_lowercase());
+        }
+        for (name, value) in windows_process_environment() {
+            if process_environment_names.insert(name.to_ascii_lowercase()) {
+                process_environment.set_item(name, value)?;
+            }
         }
 
         let keyword_arguments = PyDict::new(py);

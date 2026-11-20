@@ -1,6 +1,6 @@
 //! Shell integration and command execution
 
-use rez_next_common::RezCoreError;
+use rez_next_common::{RezCoreError, windows_process_environment};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -286,6 +286,17 @@ impl ShellExecutor {
         for (key, value) in &self.environment {
             cmd.env(key, value);
         }
+        if !self.inherit_parent_env {
+            for (key, value) in windows_process_environment() {
+                if !self
+                    .environment
+                    .keys()
+                    .any(|existing| existing.eq_ignore_ascii_case(&key))
+                {
+                    cmd.env(key, value);
+                }
+            }
+        }
 
         // Execute with timeout
         let output = tokio::time::timeout(
@@ -331,6 +342,17 @@ impl ShellExecutor {
         }
         for (key, value) in &self.environment {
             cmd.env(key, value);
+        }
+        if !self.inherit_parent_env {
+            for (key, value) in windows_process_environment() {
+                if !self
+                    .environment
+                    .keys()
+                    .any(|existing| existing.eq_ignore_ascii_case(&key))
+                {
+                    cmd.env(key, value);
+                }
+            }
         }
 
         let child = cmd

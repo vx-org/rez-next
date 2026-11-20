@@ -19,4 +19,4 @@ pub use config::RezCoreConfig;
 pub use error::RezCoreError;
 pub use error::RezCoreResult;
 pub use shell::ShellType;
-pub use system::SystemInfo;
+pub use system::{SystemInfo, windows_process_environment};
